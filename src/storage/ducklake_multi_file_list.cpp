@@ -3,6 +3,7 @@
 #include "storage/ducklake_multi_file_list.hpp"
 #include "storage/ducklake_multi_file_reader.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
+#include "storage/ducklake_catalog.hpp"
 
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -293,7 +294,7 @@ vector<DuckLakeFileListExtendedEntry> DuckLakeMultiFileList::GetFilesExtended() 
 		transaction_row_start += file.row_count;
 		result.push_back(std::move(file_entry));
 	}
-	inlined_data_tables = read_info.table.GetInlinedDataTables();
+	inlined_data_tables = transaction.GetCatalog().GetInlinedDataTables(transaction, read_info.table);
 	for (auto &table : inlined_data_tables) {
 		DuckLakeFileListExtendedEntry file_entry;
 		file_entry.file.path = table.table_name;
@@ -375,7 +376,7 @@ void DuckLakeMultiFileList::GetFilesForTable() const {
 		throw InvalidInputException("DuckLake table data files use %s, but data_file_format is configured as %s",
 		                            visible_file_format, read_info.file_format);
 	}
-	inlined_data_tables = read_info.table.GetInlinedDataTables();
+	inlined_data_tables = transaction.GetCatalog().GetInlinedDataTables(transaction, read_info.table);
 	for (auto &table : inlined_data_tables) {
 		DuckLakeFileListEntry file_entry;
 		file_entry.file.path = table.table_name;
@@ -402,7 +403,7 @@ void DuckLakeMultiFileList::GetTableInsertions() const {
 	auto &metadata_manager = transaction.GetMetadataManager();
 	files = metadata_manager.GetTableInsertions(read_info.table, *read_info.start_snapshot, read_info.snapshot);
 	// add inlined data tables as sources (if any)
-	inlined_data_tables = read_info.table.GetInlinedDataTables();
+	inlined_data_tables = transaction.GetCatalog().GetInlinedDataTables(transaction, read_info.table);
 	for (auto &table : inlined_data_tables) {
 		DuckLakeFileListEntry file_entry;
 		file_entry.file.path = table.table_name;
@@ -429,7 +430,7 @@ void DuckLakeMultiFileList::GetTableDeletions() const {
 		files.emplace_back(std::move(file_entry));
 	}
 	// add inlined data tables as sources (if any)
-	inlined_data_tables = read_info.table.GetInlinedDataTables();
+	inlined_data_tables = transaction.GetCatalog().GetInlinedDataTables(transaction, read_info.table);
 	for (auto &table : inlined_data_tables) {
 		DuckLakeFileListEntry file_entry;
 		file_entry.file.path = table.table_name;
