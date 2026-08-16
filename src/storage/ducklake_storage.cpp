@@ -50,6 +50,14 @@ static void HandleDuckLakeOption(DuckLakeOptions &options, const string &option,
 	} else if (lcase == "write_deletion_vectors") {
 		options.config_options["write_deletion_vectors"] =
 		    BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN)) ? "true" : "false";
+	} else if (lcase == "data_file_format") {
+		// Cherry-picked from duckdb/ducklake#1193: attach-time format for new lakes.
+		auto format = StringUtil::Lower(value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		if (format != "parquet" && format != "vortex") {
+			throw NotImplementedException("Unsupported data file format \"%s\"; supported options are parquet, vortex",
+			                              format);
+		}
+		options.config_options["data_file_format"] = std::move(format);
 	} else if (lcase == "create_if_not_exists") {
 		options.create_if_not_exists = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
 	} else if (lcase == "automatic_migration") {

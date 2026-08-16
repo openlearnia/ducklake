@@ -8,6 +8,49 @@ require parquet
 
 require vortex
 
+# Attach-time DATA_FILE_FORMAT (from duckdb/ducklake#1193) seeds a new lake's
+# persisted global option. Mixed-format tables remain rejected by format freeze.
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/data_file_format_attach.db' AS ducklake_attach (
+	DATA_PATH '__TEST_DIR__/data_file_format_attach_files',
+	METADATA_CATALOG 'meta_attach',
+	DATA_INLINING_ROW_LIMIT 0,
+	DATA_FILE_FORMAT 'vortex'
+);
+
+query I
+SELECT value FROM meta_attach.ducklake_metadata WHERE key = 'data_file_format';
+----
+vortex
+
+statement ok
+CREATE TABLE ducklake_attach.t(i INTEGER, s VARCHAR);
+
+statement ok
+INSERT INTO ducklake_attach.t VALUES (1, 'one'), (2, 'two');
+
+query II
+SELECT file_format, COUNT(*) FROM meta_attach.ducklake_data_file GROUP BY ALL ORDER BY ALL;
+----
+vortex	1
+
+query II
+SELECT i, s FROM ducklake_attach.t ORDER BY i;
+----
+1	one
+2	two
+
+statement error
+ATTACH 'ducklake:__TEST_DIR__/data_file_format_bad.db' AS ducklake_bad (
+	DATA_PATH '__TEST_DIR__/data_file_format_bad_files',
+	DATA_FILE_FORMAT 'orc'
+);
+----
+Unsupported data file format
+
+statement ok
+DETACH ducklake_attach;
+
 statement ok
 ATTACH 'ducklake:__TEST_DIR__/data_file_format.db' AS ducklake (DATA_PATH '__TEST_DIR__/data_file_format_files');
 
