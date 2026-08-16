@@ -29,6 +29,10 @@ CALL ducklake_set_option('ducklake', 'target_file_size', '1B', schema => 'main')
 statement ok
 CALL ducklake_set_option('ducklake', 'target_file_size', '1B', table_name => 'example');
 
+# Keep each INSERT in one file so this test isolates the compaction override
+statement ok
+SET ducklake_target_file_size = '512MB'
+
 statement ok
 INSERT INTO example SELECT i, concat('thisisalongstring', i) FROM range(10000) t(i);
 

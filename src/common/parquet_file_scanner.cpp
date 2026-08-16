@@ -6,17 +6,24 @@
 namespace duckdb {
 
 ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFileData &file)
-    : ParquetFileScanner(context, file, nullptr, nullptr) {
+    : ParquetFileScanner(context, file, "parquet_scan", nullptr, nullptr) {
 }
 
 ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFileData &file,
                                        table_function_get_multi_file_reader_t multi_file_reader_creator_p,
                                        shared_ptr<TableFunctionInfo> function_info_p)
+    : ParquetFileScanner(context, file, "parquet_scan", multi_file_reader_creator_p, std::move(function_info_p)) {
+}
+
+ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFileData &file,
+                                       const string &scan_function_name,
+                                       table_function_get_multi_file_reader_t multi_file_reader_creator_p,
+                                       shared_ptr<TableFunctionInfo> function_info_p)
     : context(context) {
 	auto &instance = DatabaseInstance::GetDatabase(context);
 	ExtensionLoader loader(instance, "ducklake");
-	auto &parquet_scan_entry = loader.GetTableFunction("parquet_scan");
-	parquet_scan = parquet_scan_entry.functions.functions[0];
+	auto &scan_entry = loader.GetTableFunction(scan_function_name);
+	parquet_scan = scan_entry.functions.functions[0];
 
 	// Prepare the inputs for the bind
 	vector<Value> children;

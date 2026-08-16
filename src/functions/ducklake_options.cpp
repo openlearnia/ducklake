@@ -13,6 +13,7 @@ struct DuckLakeOptionMetadata {
 
 static constexpr DuckLakeOptionMetadata DUCKLAKE_OPTIONS[] = {
     {"data_inlining_row_limit", "Maximum amount of rows to inline in a single insert"},
+    {"data_file_format", "Managed data-file format (parquet or vortex)"},
     {"parquet_compression",
      "Compression algorithm for Parquet files (uncompressed, snappy, gzip, zstd, brotli, lz4, lz4_raw)"},
     {"parquet_version", "Parquet format version (1 or 2)"},

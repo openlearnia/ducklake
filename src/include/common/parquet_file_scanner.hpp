@@ -17,12 +17,15 @@
 
 namespace duckdb {
 
-//! Utility class for scanning parquet files directly
+//! Utility class for scanning parquet/vortex files directly
 class ParquetFileScanner {
 public:
 	ParquetFileScanner(ClientContext &context, const DuckLakeFileData &file);
 	ParquetFileScanner(ClientContext &context, const DuckLakeFileData &file,
 	                   table_function_get_multi_file_reader_t multi_file_reader_creator,
+	                   shared_ptr<TableFunctionInfo> function_info = nullptr);
+	ParquetFileScanner(ClientContext &context, const DuckLakeFileData &file, const string &scan_function_name,
+	                   table_function_get_multi_file_reader_t multi_file_reader_creator = nullptr,
 	                   shared_ptr<TableFunctionInfo> function_info = nullptr);
 
 	const vector<LogicalType> &GetTypes() const;

@@ -995,6 +995,35 @@ bool DuckLakeCatalog::TryGetConfigOption(const string &option, string &result, D
 	return TryGetConfigOption(option, result, schema_id, table_id);
 }
 
+string DuckLakeCatalog::GetDataFileFormat(ClientContext &context, SchemaIndex schema_id, TableIndex table_id) {
+	// Non-empty tables are frozen to the format of their existing data files.
+	auto &transaction = DuckLakeTransaction::Get(context, *this);
+	auto local_files = transaction.GetTransactionLocalFiles(table_id);
+	if (!local_files.empty()) {
+		return local_files[0].file_format;
+	}
+	string persisted_format;
+	if (transaction.GetMetadataManager().TryGetPersistedDataFileFormat(table_id, transaction.GetSnapshot(),
+	                                                                   persisted_format)) {
+		return persisted_format;
+	}
+
+	string format;
+	if (TryGetConfigOption("data_file_format", format, schema_id, table_id)) {
+		return format;
+	}
+	Value setting_val;
+	if (context.TryGetCurrentSetting("ducklake_default_data_file_format", setting_val) && !setting_val.IsNull()) {
+		return StringUtil::Lower(setting_val.ToString());
+	}
+	return "parquet";
+}
+
+string DuckLakeCatalog::GetDataFileFormat(ClientContext &context, DuckLakeTableEntry &table) {
+	auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
+	return GetDataFileFormat(context, schema.GetSchemaId(), table.GetTableId());
+}
+
 idx_t DuckLakeCatalog::DataInliningRowLimit(SchemaIndex schema_index, TableIndex table_index) const {
 	return GetConfigOption<idx_t>("data_inlining_row_limit", schema_index, table_index, 10);
 }

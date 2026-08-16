@@ -85,7 +85,14 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 	auto &val = input.inputs[2];
 
 	// read the option
-	if (option == "parquet_compression") {
+	if (option == "data_file_format") {
+		auto format = StringUtil::Lower(val.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		if (format != "parquet" && format != "vortex") {
+			throw NotImplementedException("Unsupported data file format \"%s\"; supported options are parquet, vortex",
+			                              format);
+		}
+		value = std::move(format);
+	} else if (option == "parquet_compression") {
 		auto codec = val.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
 		vector<string> supported_algorithms {"uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4", "lz4_raw"};
 		bool found = false;
@@ -185,6 +192,22 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 		config_option.table_id = ducklake_table.GetTableId();
 		if (config_option.table_id.IsTransactionLocal()) {
 			throw NotImplementedException("Settings cannot be set for transaction-local tables");
+		}
+		if (option == "data_file_format") {
+			auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
+			auto frozen_format = duck_catalog.GetDataFileFormat(context, ducklake_table);
+			auto &transaction = DuckLakeTransaction::Get(context, catalog);
+			auto local_files = transaction.GetTransactionLocalFiles(config_option.table_id);
+			string persisted_format;
+			bool has_files =
+			    !local_files.empty() ||
+			    transaction.GetMetadataManager().TryGetPersistedDataFileFormat(
+			        config_option.table_id, transaction.GetSnapshot(), persisted_format);
+			if (has_files && frozen_format != value) {
+				throw InvalidInputException(
+				    "Cannot change data_file_format for table \"%s\" from \"%s\" to \"%s\" after data files exist",
+				    table, frozen_format, value);
+			}
 		}
 	} else if (!schema.empty()) {
 		// find the scope

@@ -185,6 +185,21 @@ static bool PathLooksLikeGlob(const string &path) {
 	return path.find('*') != string::npos || path.find('?') != string::npos || path.find('[') != string::npos;
 }
 
+// When a glob ends in a concrete extension (e.g. *.vortex / file?.parquet), reject
+// format mismatches before MultiFile opens anything.
+static bool TryInferGlobFormatHint(const string &path, string &out_format) {
+	auto lower = StringUtil::Lower(path);
+	if (StringUtil::EndsWith(lower, ".vortex")) {
+		out_format = "vortex";
+		return true;
+	}
+	if (StringUtil::EndsWith(lower, ".parquet")) {
+		out_format = "parquet";
+		return true;
+	}
+	return false;
+}
+
 void DuckLakeFileProcessor::ReadParquetFullMetadata(const string &glob, vector<DuckLakeDataFile> &written_files) {
 	auto result = transaction.ExecuteRaw(StringUtil::Format(R"(
 SELECT
@@ -1540,6 +1555,13 @@ vector<DuckLakeDataFile> DuckLakeFileProcessor::AddFiles(const vector<string> &g
 			if (!StringUtil::CIEquals(inferred, target_format)) {
 				throw InvalidInputException(
 				    "Cannot add %s file \"%s\" to a DuckLake table configured for %s; formats must match", inferred,
+				    glob, target_format);
+			}
+		} else {
+			string glob_hint;
+			if (TryInferGlobFormatHint(glob, glob_hint) && !StringUtil::CIEquals(glob_hint, target_format)) {
+				throw InvalidInputException(
+				    "Cannot add %s glob \"%s\" to a DuckLake table configured for %s; formats must match", glob_hint,
 				    glob, target_format);
 			}
 		}

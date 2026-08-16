@@ -38,7 +38,7 @@ COMMIT
 
 # con2 has the transaction-local files written in the directory
 query I
-SELECT COUNT(*) FROM glob('${DATA_PATH}/ducklake_files_conflict_cleanup/**/*.parquet')
+SELECT COUNT(*) FROM glob('${DATA_PATH}/ducklake_files_conflict_cleanup/**/ducklake-*.*')
 ----
 1
 

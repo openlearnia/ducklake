@@ -9,6 +9,8 @@ string DeleteFileFormatToString(DeleteFileFormat format) {
 		return "parquet";
 	case DeleteFileFormat::PUFFIN:
 		return "puffin";
+	case DeleteFileFormat::VORTEX:
+		return "vortex";
 	default:
 		throw InternalException("Unknown DeleteFileFormat");
 	}
@@ -19,12 +21,15 @@ DeleteFileFormat DeleteFileFormatFromString(const string &str) {
 		return DeleteFileFormat::PARQUET;
 	} else if (StringUtil::CIEquals(str, "puffin")) {
 		return DeleteFileFormat::PUFFIN;
+	} else if (StringUtil::CIEquals(str, "vortex")) {
+		return DeleteFileFormat::VORTEX;
 	}
 	throw InvalidInputException("Unknown delete file format: %s", str);
 }
 
 DuckLakeDataFile::DuckLakeDataFile(const DuckLakeDataFile &other) {
 	file_name = other.file_name;
+	file_format = other.file_format;
 	row_count = other.row_count;
 	file_size_bytes = other.file_size_bytes;
 	footer_size = other.footer_size;
@@ -42,6 +47,7 @@ DuckLakeDataFile::DuckLakeDataFile(const DuckLakeDataFile &other) {
 
 DuckLakeDataFile &DuckLakeDataFile::operator=(const DuckLakeDataFile &other) {
 	file_name = other.file_name;
+	file_format = other.file_format;
 	row_count = other.row_count;
 	file_size_bytes = other.file_size_bytes;
 	footer_size = other.footer_size;

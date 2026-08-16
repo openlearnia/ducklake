@@ -1,0 +1,50 @@
+# name: test/sql/add_files/vortex_add_files_missing_fields.test
+# description: Vortex twin of add_files_missing_fields — allow_missing struct fields
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_missing_fields');
+
+statement ok
+CREATE TABLE ducklake.test(s STRUCT(i INTEGER, j INTEGER));
+
+statement ok
+COPY (SELECT {'j': 84} s) TO '${DATA_PATH}/missing_field.vortex' (FORMAT vortex)
+
+# adding a file with missing field results in an error
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/missing_field.vortex')
+----
+Column "s.i" exists in table "test" but was not found in file
+
+statement ok
+BEGIN
+
+# UNLESS we specify "allow_missing
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/missing_field.vortex', allow_missing => true)
+
+query I
+FROM ducklake.test
+----
+{'i': NULL, 'j': 84}
+
+statement ok
+COMMIT
+
+query I
+FROM ducklake.test
+----
+{'i': NULL, 'j': 84}

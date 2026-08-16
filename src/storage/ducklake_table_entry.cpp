@@ -32,6 +32,10 @@ namespace duckdb {
 
 namespace {
 
+string GetDataFileFormat(ClientContext &context, DuckLakeTableEntry &table) {
+	return table.ParentCatalog().Cast<DuckLakeCatalog>().GetDataFileFormat(context, table);
+}
+
 struct DuckLakeColumnScan {
 	TableFunction function;
 	unique_ptr<FunctionData> bind_data;
@@ -42,8 +46,10 @@ struct DuckLakeColumnScan {
 
 	DuckLakeColumnScan(ClientContext &context, DuckLakeTransaction &transaction, DuckLakeTableEntry &table,
 	                   const ColumnDefinition &col) {
-		function = DuckLakeFunctions::GetDuckLakeScanFunction(*context.db);
+		auto file_format = GetDataFileFormat(context, table);
+		function = DuckLakeFunctions::GetDuckLakeScanFunction(*context.db, file_format);
 		function.function_info = DuckLakeFunctionInfo::Create(table, transaction, transaction.GetSnapshot());
+		function.function_info->Cast<DuckLakeFunctionInfo>().file_format = file_format;
 		bind_data = DuckLakeFunctions::BindDuckLakeScan(context, function);
 
 		vector<ColumnIndex> column_ids;
@@ -350,10 +356,12 @@ unique_ptr<FunctionData> DuckLakeFunctions::BindDuckLakeScan(ClientContext &cont
 
 TableFunction DuckLakeTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
                                                   const EntryLookupInfo &lookup_info) {
-	auto function = DuckLakeFunctions::GetDuckLakeScanFunction(*context.db);
+	auto file_format = GetDataFileFormat(context, *this);
+	auto function = DuckLakeFunctions::GetDuckLakeScanFunction(*context.db, file_format);
 	auto &transaction = DuckLakeTransaction::Get(context, ParentCatalog());
 	auto function_info =
 	    DuckLakeFunctionInfo::Create(*this, transaction, transaction.GetSnapshot(lookup_info.GetAtClause()));
+	function_info->file_format = file_format;
 	auto table_id = function_info->table_id;
 	function.function_info = std::move(function_info);
 	auto &dropped_tables = transaction.GetDroppedTables();

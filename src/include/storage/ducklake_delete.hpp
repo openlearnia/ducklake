@@ -59,6 +59,15 @@ inline void MergeDeletesWithSnapshots(const DuckLakeDeleteData &delete_data, idx
 //! Input parameters for writing a delete file
 template <typename PositionType>
 struct WriteDeleteFileInputBase {
+	WriteDeleteFileInputBase(ClientContext &context_p, DuckLakeTransaction &transaction_p, FileSystem &fs_p,
+	                         string data_path_p, string encryption_key_p, string data_file_path_p,
+	                         set<PositionType> positions_p, DeleteFileSource source_p,
+	                         string data_file_format_p = "parquet")
+	    : context(context_p), transaction(transaction_p), fs(fs_p), data_path(std::move(data_path_p)),
+	      encryption_key(std::move(encryption_key_p)), data_file_path(std::move(data_file_path_p)),
+	      positions(std::move(positions_p)), source(source_p), data_file_format(std::move(data_file_format_p)) {
+	}
+
 	ClientContext &context;
 	DuckLakeTransaction &transaction;
 	FileSystem &fs;
@@ -67,6 +76,9 @@ struct WriteDeleteFileInputBase {
 	string data_file_path;
 	set<PositionType> positions;
 	DeleteFileSource source;
+	//! Managed data-file format of the parent table ("parquet" or "vortex").
+	//! Vortex tables always write Vortex positional deletes (never new Puffin DVs).
+	string data_file_format;
 };
 
 //! Input for writing a delete file without per-position snapshot IDs, used for deletion

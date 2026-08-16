@@ -31,30 +31,31 @@ namespace duckdb {
 template <typename InputType>
 static DuckLakeDeleteFile WriteDeleteFileInternal(ClientContext &context, InputType &input) {
 	constexpr bool with_snapshots = std::is_same<InputType, WriteDeleteFileWithSnapshotsInput>::value;
+	const bool write_vortex = StringUtil::CIEquals(input.data_file_format, "vortex");
 
-	auto delete_file_uuid = "ducklake-" + input.transaction.GenerateUUID() + "-delete.parquet";
+	auto delete_file_uuid =
+	    "ducklake-" + input.transaction.GenerateUUID() + (write_vortex ? "-delete.vortex" : "-delete.parquet");
 	string delete_file_path = DuckLakeUtil::JoinPath(input.fs, input.data_path, delete_file_uuid);
 
 	auto info = make_uniq<CopyInfo>();
 	info->file_path = delete_file_path;
-	info->format = "parquet";
+	info->format = write_vortex ? "vortex" : "parquet";
 	info->is_from = false;
 
-	// generate the field ids to be written by the parquet writer
-	// these field ids follow icebergs' ids and names for the delete files
-	child_list_t<Value> values;
-	values.emplace_back("file_path", Value::INTEGER(MultiFileReader::FILENAME_FIELD_ID));
-	values.emplace_back("pos", Value::INTEGER(MultiFileReader::ORDINAL_FIELD_ID));
-	if (with_snapshots) {
-		// add the snapshot_id column to track when each deletion became valid
-		values.emplace_back("_ducklake_internal_snapshot_id",
-		                    Value::INTEGER(MultiFileReader::LAST_UPDATED_SEQUENCE_NUMBER_ID));
+	if (!write_vortex) {
+		// Parquet field ids follow Iceberg's ids and names for delete files.
+		child_list_t<Value> values;
+		values.emplace_back("file_path", Value::INTEGER(MultiFileReader::FILENAME_FIELD_ID));
+		values.emplace_back("pos", Value::INTEGER(MultiFileReader::ORDINAL_FIELD_ID));
+		if (with_snapshots) {
+			values.emplace_back("_ducklake_internal_snapshot_id",
+			                    Value::INTEGER(MultiFileReader::LAST_UPDATED_SEQUENCE_NUMBER_ID));
+		}
+		auto field_ids = Value::STRUCT(std::move(values));
+		vector<Value> field_input;
+		field_input.push_back(std::move(field_ids));
+		info->options["field_ids"] = std::move(field_input);
 	}
-	auto field_ids = Value::STRUCT(std::move(values));
-	vector<Value> field_input;
-	field_input.push_back(std::move(field_ids));
-	info->options["field_ids"] = std::move(field_input);
-
 	if (!input.encryption_key.empty()) {
 		child_list_t<Value> enc_values;
 		enc_values.emplace_back("footer_key_value", Value::BLOB_RAW(input.encryption_key));
@@ -64,7 +65,7 @@ static DuckLakeDeleteFile WriteDeleteFileInternal(ClientContext &context, InputT
 	}
 
 	// get the actual copy function and bind it
-	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(input.context, "parquet");
+	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(input.context, info->format);
 	CopyFunctionBindInput bind_input(*info);
 
 	vector<string> names_to_write {"file_path", "pos"};
@@ -135,10 +136,10 @@ static DuckLakeDeleteFile WriteDeleteFileInternal(ClientContext &context, InputT
 	DuckLakeDeleteFile delete_file;
 	delete_file.data_file_path = input.data_file_path;
 	delete_file.file_name = delete_file_path;
-	delete_file.format = DeleteFileFormat::PARQUET;
+	delete_file.format = write_vortex ? DeleteFileFormat::VORTEX : DeleteFileFormat::PARQUET;
 	delete_file.delete_count = stats.row_count;
 	delete_file.file_size_bytes = stats.file_size_bytes;
-	delete_file.footer_size = stats.footer_size_bytes.GetValue<idx_t>();
+	delete_file.footer_size = stats.footer_size_bytes.IsNull() ? 0 : stats.footer_size_bytes.GetValue<idx_t>();
 	delete_file.encryption_key = input.encryption_key;
 	delete_file.source = input.source;
 	if (with_snapshots) {
@@ -410,7 +411,9 @@ void DuckLakeDelete::FlushDeleteWithSnapshots(DuckLakeTransaction &transaction, 
                                               const set<idx_t> &sorted_deletes, DuckLakeDeleteFile &delete_file) const {
 	auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
 	auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
-	if (catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId())) {
+	auto data_file_format = catalog.GetDataFileFormat(context, table);
+	// Vortex-managed tables always use Vortex positional deletes; never write new Puffin DVs.
+	if (data_file_format != "vortex" && catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId())) {
 		FlushMergedDeletionVector(transaction, context, global_state, filename, data_file_info, existing_delete_data,
 		                          sorted_deletes, delete_file);
 		return;
@@ -452,7 +455,8 @@ void DuckLakeDelete::FlushDeleteWithSnapshots(DuckLakeTransaction &transaction, 
 	                                         encryption_key,
 	                                         filename,
 	                                         sorted_deletes_with_snapshots,
-	                                         DeleteFileSource::REGULAR};
+	                                         DeleteFileSource::REGULAR,
+	                                         catalog.GetDataFileFormat(context, table)};
 	auto written_file = DuckLakeDeleteFileWriter::WriteDeleteFileWithSnapshots(context, input);
 
 	written_file.data_file_id = delete_file.data_file_id;
@@ -550,7 +554,9 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
 	auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
-	bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId());
+	auto data_file_format = catalog.GetDataFileFormat(context, table);
+	bool use_deletion_vectors =
+	    data_file_format != "vortex" && catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId());
 
 	WriteDeleteFileInput input {context,
 	                            transaction,
@@ -559,7 +565,8 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
 	                            encryption_key,
 	                            filename,
 	                            sorted_deletes,
-	                            DeleteFileSource::REGULAR};
+	                            DeleteFileSource::REGULAR,
+	                            data_file_format};
 	auto written_file = use_deletion_vectors ? DuckLakeDeleteFileWriter::WriteDeletionVectorFile(context, input)
 	                                         : DuckLakeDeleteFileWriter::WriteDeleteFile(context, input);
 

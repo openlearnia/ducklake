@@ -43,20 +43,40 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_s
 ----
 4
 
-# Verify small files are < 1000 bytes and medium files are >= 1000 bytes
+# Derive a threshold from the files instead of assuming Parquet byte sizes
+statement ok
+SET VARIABLE small_max = (
+	SELECT max(file_size_bytes)
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL AND record_count = 10
+)
+
+statement ok
+SET VARIABLE medium_min = (
+	SELECT min(file_size_bytes)
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL AND record_count = 100
+)
+
 query I
-SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND file_size_bytes < 1000
+SELECT getvariable('small_max') + 1 < getvariable('medium_min')
+----
+true
+
+# Verify both format-relative size groups contain two files
+query I
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND file_size_bytes <= getvariable('small_max')
 ----
 2
 
 query I
-SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND file_size_bytes >= 1000
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND file_size_bytes >= getvariable('medium_min')
 ----
 2
 
-# Test min_file_size: only merge files >= 1000 bytes (should only merge the medium files)
+# Test min_file_size: only merge the medium files
 query IIII
-SELECT schema_name, table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', min_file_size=>1000)
+SELECT schema_name, table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', min_file_size=>getvariable('medium_min'))
 ----
 main	example	2	1
 
@@ -66,9 +86,9 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_s
 ----
 3
 
-# The small files should still exist (count of files < 1000 bytes should be 2)
+# The two original small files should still exist
 query I
-SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND file_size_bytes < 1000
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND record_count = 10
 ----
 2
 
@@ -101,9 +121,9 @@ INSERT INTO example SELECT i + 100, repeat('medium', 100) FROM range(100) t(i);
 statement ok
 INSERT INTO example SELECT i + 200, repeat('medium', 100) FROM range(100) t(i);
 
-# Test max_file_size: only merge files < 1000 bytes (should only merge the small files)
+# Test max_file_size: only merge the small files
 query IIII
-SELECT schema_name, table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_file_size=>1000)
+SELECT schema_name, table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_file_size=>getvariable('medium_min'))
 ----
 main	example	2	1
 
@@ -113,9 +133,9 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_s
 ----
 3
 
-# Medium files should still be there (files >= 1000 bytes)
+# The two original medium files should still be there
 query I
-SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND file_size_bytes >= 1000
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND record_count = 100
 ----
 2
 
@@ -148,11 +168,14 @@ INSERT INTO example SELECT i + 100, repeat('medium', 100) FROM range(100) t(i);
 statement ok
 INSERT INTO example SELECT i + 200, repeat('medium', 100) FROM range(100) t(i);
 
-# Test combined min_file_size and max_file_size: range that excludes all files
-# Small files are ~400-500 bytes, medium files are ~1800 bytes
-# 600-1500 range should match nothing
+# Test a format-relative gap that excludes all files
 query IIII
-SELECT schema_name, table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', min_file_size=>600, max_file_size=>1500)
+SELECT schema_name, table_name, files_processed, files_created FROM ducklake_merge_adjacent_files(
+	'ducklake',
+	'example',
+	min_file_size=>getvariable('small_max') + 1,
+	max_file_size=>getvariable('medium_min')
+)
 ----
 
 # No files should be merged

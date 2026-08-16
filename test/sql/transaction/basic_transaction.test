@@ -66,7 +66,7 @@ SELECT * FROM test
 
 # the data exists as files in the data directory
 query I
-SELECT COUNT(*) FROM glob('${DATA_PATH}/ducklake_tl_files/**/*.parquet')
+SELECT COUNT(*) FROM glob('${DATA_PATH}/ducklake_tl_files/**/ducklake-*.*')
 ----
 1
 

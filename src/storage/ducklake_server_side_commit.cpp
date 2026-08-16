@@ -268,6 +268,9 @@ void DuckLakeServerSideCommit::ReadStagedDataFiles() {
 		DataFileIndex local_file_id(AsIdx(row, 0));
 		DuckLakeDataFile f;
 		f.file_name = row.GetValue<string>(3);
+		if (!row.IsNull(5)) {
+			f.file_format = row.GetValue<string>(5);
+		}
 		f.row_count = AsIdx(row, 6);
 		f.file_size_bytes = AsIdx(row, 7);
 		if (!row.IsNull(8)) {

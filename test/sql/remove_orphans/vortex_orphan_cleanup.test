@@ -1,0 +1,51 @@
+# name: test/sql/remove_orphans/vortex_orphan_cleanup.test
+# description: Orphan cleanup recognizes .vortex and .puffin artifacts
+# group: [remove_orphans]
+
+require ducklake
+
+require parquet
+
+require vortex
+
+require icu
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/vortex_orphan_cleanup', METADATA_CATALOG 'ducklake_metadata');
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 0);
+
+statement ok
+CALL ducklake.set_option('data_file_format', 'vortex');
+
+statement ok
+CREATE TABLE ducklake.test(a INTEGER);
+
+statement ok
+INSERT INTO ducklake.test VALUES (1);
+
+# Plant orphaned Vortex and Puffin files beside the managed data.
+statement ok
+COPY (SELECT 99) TO '${DATA_PATH}/vortex_orphan_cleanup/main/test/orphan.vortex' (FORMAT vortex);
+
+statement ok
+COPY (SELECT 1) TO '${DATA_PATH}/vortex_orphan_cleanup/main/test/orphan.parquet';
+
+statement ok
+CALL ducklake.set_option('delete_older_than', '');
+
+query I
+SELECT count(*) FROM ducklake_delete_orphaned_files('ducklake', cleanup_all => true, dry_run => true);
+----
+2
+
+query I
+SELECT bool_or(ends_with(path, 'orphan.vortex')) AND bool_or(ends_with(path, 'orphan.parquet'))
+FROM ducklake_delete_orphaned_files('ducklake', cleanup_all => true, dry_run => true);
+----
+true

@@ -63,6 +63,17 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
 20
 
+# Create several format-relative size groups so max_compacted_files is the limiter
+statement ok
+SET VARIABLE compact_target = (
+	SELECT max(file_size_bytes) * 5
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL
+)
+
+statement ok
+CALL ducklake.set_option('target_file_size', concat(getvariable('compact_target')::VARCHAR, 'B'));
+
 statement error
 CALL ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>-1);
 ----
@@ -160,6 +171,17 @@ query I
 SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
 20
+
+# Derive size groups for the database-wide max_compacted_files check too
+statement ok
+SET VARIABLE database_compact_target = (
+	SELECT max(file_size_bytes) * 5
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL
+)
+
+statement ok
+CALL ducklake.set_option('target_file_size', concat(getvariable('database_compact_target')::VARCHAR, 'B'));
 
 # Compact entire database with max_compacted_files=1 per table
 # Each table should get at most 1 compaction operation

@@ -24,6 +24,10 @@ CALL ducklake_set_option('ducklake', 'target_file_size', '10KB');
 statement ok
 CREATE TABLE t (id INTEGER, data VARCHAR);
 
+# Keep each INSERT in one file; metadata target sizes below govern compaction
+statement ok
+SET ducklake_target_file_size = '512MB'
+
 statement ok
 SET VARIABLE snap_create = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
 
@@ -62,6 +66,37 @@ SELECT COUNT(*) FROM ducklake_list_files('ducklake', 't');
 ----
 3
 
+# Derive a target that fits B+C while leaving the much larger A untouched
+statement ok
+SET VARIABLE compact_target_1 = (
+	SELECT sum(file_size_bytes) + 1
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL
+	  AND begin_snapshot != (
+		SELECT min(begin_snapshot)
+		FROM __ducklake_metadata_ducklake.ducklake_data_file
+		WHERE end_snapshot IS NULL
+	  )
+)
+
+statement ok
+SET VARIABLE large_file_size = (
+	SELECT file_size_bytes
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL
+	  AND begin_snapshot = (
+		SELECT min(begin_snapshot)
+		FROM __ducklake_metadata_ducklake.ducklake_data_file
+		WHERE end_snapshot IS NULL
+	  )
+)
+
+statement ok
+RESET ducklake_target_file_size
+
+statement ok
+CALL ducklake_set_option('ducklake', 'target_file_size', concat(getvariable('compact_target_1')::VARCHAR, 'B'));
+
 # Capture expected partial_max before merge: max begin_snapshot of the small files (B and C)
 # (exclude file A which has the smallest begin_snapshot and won't be merged)
 statement ok
@@ -69,7 +104,11 @@ SET VARIABLE expected_pm_1 = (SELECT max(begin_snapshot) FROM __ducklake_metadat
 
 # Merge B+C into a single file (A is too big to merge)
 query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 't')
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files(
+	'ducklake',
+	't',
+	max_file_size=>getvariable('large_file_size')
+)
 ----
 t	2	1
 
@@ -91,6 +130,13 @@ FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL 
 ----
 NULL
 true
+
+statement ok
+SET VARIABLE existing_min_size = (
+	SELECT min(file_size_bytes)
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL
+)
 
 statement ok
 INSERT INTO t SELECT i + 5200, 'small3' FROM range(10) t(i);
@@ -121,9 +167,24 @@ SET VARIABLE merge1_snap = (SELECT max(snapshot_id) FROM ducklake_snapshots('duc
 statement ok
 SET VARIABLE expected_pm_2 = (SELECT max(begin_snapshot) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL AND begin_snapshot > getvariable('merge1_snap'));
 
+# Fit D+E regardless of their format-specific overhead
+statement ok
+SET VARIABLE compact_target_2 = (
+	SELECT sum(file_size_bytes) + 1
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL AND begin_snapshot > getvariable('merge1_snap')
+)
+
+statement ok
+CALL ducklake_set_option('ducklake', 'target_file_size', concat(getvariable('compact_target_2')::VARCHAR, 'B'));
+
 # Merge D+E into a single file (A is too big to merge)
 query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 't')
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files(
+	'ducklake',
+	't',
+	max_file_size=>getvariable('existing_min_size')
+)
 ----
 t	2	1
 

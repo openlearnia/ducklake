@@ -1,0 +1,38 @@
+# name: test/sql/settings/vortex_default_setting.test
+# description: Session default ducklake_default_data_file_format drives new empty tables
+# group: [settings]
+
+require ducklake
+
+require parquet
+
+require vortex
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/vortex_default_setting.db' AS ducklake (DATA_PATH '__TEST_DIR__/vortex_default_setting_files');
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 0);
+
+statement ok
+CREATE TABLE ducklake.t AS SELECT 42 AS id;
+
+query II
+SELECT file_format, suffix(path, '.vortex')
+FROM __ducklake_metadata_ducklake.ducklake_data_file
+WHERE end_snapshot IS NULL;
+----
+vortex	true
+
+query I
+SELECT id FROM ducklake.t;
+----
+42
+
+statement error
+SET ducklake_default_data_file_format = 'csv';
+----
+Unsupported ducklake_default_data_file_format

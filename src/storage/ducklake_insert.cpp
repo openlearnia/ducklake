@@ -112,9 +112,21 @@ DuckLakeColumnStats DuckLakeInsert::ParseColumnStats(const LogicalType &type, co
 
 void DuckLakeInsert::AddWrittenFiles(DuckLakeInsertGlobalState &global_state, DataChunk &chunk,
                                      const string &encryption_key, optional_idx partition_id, bool set_snapshot_id) {
+	if (!chunk.size()) {
+		return;
+	}
+	// Metadata format must match the artifact on disk, not a mutable catalog default.
+	string file_format = "parquet";
+	auto written_path = StringUtil::Lower(chunk.GetValue(0, 0).GetValue<string>());
+	if (StringUtil::EndsWith(written_path, ".vortex")) {
+		file_format = "vortex";
+	} else if (StringUtil::EndsWith(written_path, ".parquet")) {
+		file_format = "parquet";
+	}
 	for (idx_t r = 0; r < chunk.size(); r++) {
 		DuckLakeDataFile data_file;
 		data_file.file_name = chunk.GetValue(0, r).GetValue<string>();
+		data_file.file_format = file_format;
 		data_file.row_count = chunk.GetValue(1, r).GetValue<idx_t>();
 		data_file.file_size_bytes = chunk.GetValue(2, r).GetValue<idx_t>();
 		data_file.footer_size = chunk.GetValue(3, r).GetValue<idx_t>();
@@ -467,47 +479,43 @@ static void GeneratePartitionExpressions(ClientContext &context, DuckLakeCopyInp
 DuckLakeCopyOptions DuckLakeInsert::GetCopyOptions(ClientContext &context, DuckLakeCopyInput &copy_input) {
 	auto info = make_uniq<CopyInfo>();
 	auto &catalog = copy_input.catalog;
+	auto &schema_id = copy_input.schema_id;
+	auto &table_id = copy_input.table_id;
+	string file_format = catalog.GetDataFileFormat(context, schema_id, table_id);
 	info->file_path = copy_input.data_path;
-	info->format = "parquet";
+	info->format = file_format;
 	info->is_from = false;
-	// generate the field ids to be written by the parquet writer
+	// Field IDs are format-agnostic identity metadata for managed files.
 	shared_ptr<DuckLakeFieldData> generated_ids;
 	if (!copy_input.field_data) {
-		// CTAS - generate new ids from columns
 		generated_ids = DuckLakeFieldData::FromColumns(copy_input.columns);
 	}
 	auto &field_ids = copy_input.field_data ? *copy_input.field_data : *generated_ids;
-	vector<Value> field_input;
-	field_input.push_back(WrittenFieldIds(field_ids, copy_input.virtual_columns));
-	info->options["field_ids"] = std::move(field_input);
+	info->options["field_ids"].push_back(WrittenFieldIds(field_ids, copy_input.virtual_columns));
 	if (!copy_input.encryption_key.empty()) {
 		child_list_t<Value> values;
 		values.emplace_back("footer_key_value", Value::BLOB_RAW(copy_input.encryption_key));
-		vector<Value> encryption_input;
-		encryption_input.push_back(Value::STRUCT(std::move(values)));
-		info->options["encryption_config"] = std::move(encryption_input);
+		info->options["encryption_config"].push_back(Value::STRUCT(std::move(values)));
 	}
-	auto &schema_id = copy_input.schema_id;
-	auto &table_id = copy_input.table_id;
-	string parquet_compression;
-	if (catalog.TryGetConfigOption("parquet_compression", parquet_compression, schema_id, table_id)) {
-		info->options["compression"].emplace_back(parquet_compression);
-	}
-	string parquet_version;
-	if (catalog.TryGetConfigOption("parquet_version", parquet_version, schema_id, table_id)) {
-		info->options["parquet_version"].emplace_back(parquet_version);
-	}
-	string parquet_compression_level;
-	if (catalog.TryGetConfigOption("parquet_compression_level", parquet_compression_level, schema_id, table_id)) {
-		info->options["compression_level"].emplace_back(parquet_compression_level);
-	}
-	string row_group_size;
-	if (catalog.TryGetConfigOption("parquet_row_group_size", row_group_size, schema_id, table_id)) {
-		info->options["row_group_size"].emplace_back(row_group_size);
-	}
-	string row_group_size_bytes;
-	if (catalog.TryGetConfigOption("parquet_row_group_size_bytes", row_group_size_bytes, schema_id, table_id)) {
-		info->options["row_group_size_bytes"].emplace_back(row_group_size_bytes + " bytes");
+	if (file_format == "parquet") {
+		string option;
+		if (catalog.TryGetConfigOption("parquet_compression", option, schema_id, table_id)) {
+			info->options["compression"].emplace_back(option);
+		}
+		if (catalog.TryGetConfigOption("parquet_version", option, schema_id, table_id)) {
+			info->options["parquet_version"].emplace_back(option);
+		}
+		if (catalog.TryGetConfigOption("parquet_compression_level", option, schema_id, table_id)) {
+			info->options["compression_level"].emplace_back(option);
+		}
+		if (catalog.TryGetConfigOption("parquet_row_group_size", option, schema_id, table_id)) {
+			info->options["row_group_size"].emplace_back(option);
+		}
+		if (catalog.TryGetConfigOption("parquet_row_group_size_bytes", option, schema_id, table_id)) {
+			info->options["row_group_size_bytes"].emplace_back(option + " bytes");
+		}
+		// Always use native parquet geometry for writing.
+		info->options["geoparquet_version"].emplace_back("NONE");
 	}
 	string per_thread_output_str;
 	bool per_thread_output = false;
@@ -516,11 +524,7 @@ DuckLakeCopyOptions DuckLakeInsert::GetCopyOptions(ClientContext &context, DuckL
 	}
 	idx_t target_file_size = catalog.GetTargetFileSize(context, schema_id, table_id);
 
-	// Always use native parquet geometry for writing
-	info->options["geoparquet_version"].emplace_back("NONE");
-
-	// Get Parquet Copy function
-	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(context, "parquet");
+	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(context, file_format);
 
 	auto &fs = FileSystem::GetFileSystem(context);
 	DuckLakeUtil::EnsureDirectoryExists(fs, copy_input.data_path);
@@ -569,7 +573,7 @@ DuckLakeCopyOptions DuckLakeInsert::GetCopyOptions(ClientContext &context, DuckL
 	}
 	result.file_path = copy_input.data_path;
 	StripTrailingSeparator(fs, result.file_path);
-	result.file_extension = "parquet";
+	result.file_extension = file_format;
 	result.overwrite_mode = CopyOverwriteMode::COPY_OVERWRITE_OR_IGNORE;
 	result.per_thread_output = per_thread_output;
 	result.write_partition_columns = true;

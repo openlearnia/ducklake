@@ -139,10 +139,13 @@ DeleteFileScanResult DuckLakeDeleteFilter::ScanDeleteFile(ClientContext &context
 		return ScanDeletionVectorFile(context, delete_file);
 	}
 
+	const bool is_vortex = delete_file.format == DeleteFileFormat::VORTEX;
+	const string scan_function = is_vortex ? "vortex_multi_file_scan" : "parquet_scan";
+
 	// Set up custom MultiFileReader to avoid HEAD requests
 	auto function_info = make_shared_ptr<DeleteFileFunctionInfo>();
 	function_info->file_data = delete_file;
-	ParquetFileScanner scanner(context, delete_file, DeleteFileMultiFileReader::CreateInstance,
+	ParquetFileScanner scanner(context, delete_file, scan_function, DeleteFileMultiFileReader::CreateInstance,
 	                           std::move(function_info));
 
 	auto &return_types = scanner.GetTypes();
@@ -214,7 +217,7 @@ DeleteFileScanResult DuckLakeDeleteFilter::ScanDeleteFile(ClientContext &context
 				throw InvalidInputException("Invalid delete data - delete data cannot have NULL values");
 			}
 			auto &row_id = row_ids[pos_idx];
-			if (row_id <= last_delete) {
+			if (!is_vortex && row_id <= last_delete) {
 				throw InvalidInputException(
 				    "Invalid delete data - row ids must be sorted and strictly increasing - but found %d after %d",
 				    row_id, last_delete);
@@ -233,6 +236,34 @@ DeleteFileScanResult DuckLakeDeleteFilter::ScanDeleteFile(ClientContext &context
 				result.snapshot_ids.push_back(NumericCast<idx_t>(snapshot_ids[snap_idx]));
 			}
 		}
+	}
+	if (is_vortex && result.deleted_rows.size() > 1) {
+		vector<idx_t> order;
+		order.reserve(result.deleted_rows.size());
+		for (idx_t i = 0; i < result.deleted_rows.size(); i++) {
+			order.push_back(i);
+		}
+		std::sort(order.begin(), order.end(),
+		          [&](idx_t lhs, idx_t rhs) { return result.deleted_rows[lhs] < result.deleted_rows[rhs]; });
+
+		vector<idx_t> sorted_rows;
+		vector<idx_t> sorted_snapshots;
+		sorted_rows.reserve(order.size());
+		if (has_snapshot_id) {
+			sorted_snapshots.reserve(order.size());
+		}
+		for (auto index : order) {
+			auto row = result.deleted_rows[index];
+			if (!sorted_rows.empty() && sorted_rows.back() == row) {
+				throw InvalidInputException("Invalid delete data - duplicate row id %d", row);
+			}
+			sorted_rows.push_back(row);
+			if (has_snapshot_id) {
+				sorted_snapshots.push_back(result.snapshot_ids[index]);
+			}
+		}
+		result.deleted_rows = std::move(sorted_rows);
+		result.snapshot_ids = std::move(sorted_snapshots);
 	}
 	return result;
 }
@@ -293,7 +324,9 @@ unordered_map<idx_t, idx_t> DuckLakeDeleteFilter::ScanDataFileRowIds(ClientConte
 		return result;
 	}
 
-	ParquetFileScanner scanner(context, data_file);
+	const string scan_function =
+	    StringUtil::CIEquals(data_file.file_format, "vortex") ? "vortex_multi_file_scan" : "parquet_scan";
+	ParquetFileScanner scanner(context, data_file, scan_function);
 
 	// Find the _ducklake_internal_row_id column
 	auto row_id_col_idx = scanner.FindColumn("_ducklake_internal_row_id");

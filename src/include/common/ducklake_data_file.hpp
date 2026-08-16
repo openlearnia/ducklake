@@ -22,7 +22,8 @@ struct DuckLakeFilePartition {
 
 enum class DeleteFileFormat : uint8_t {
 	PARQUET, //! Positional delete file in Parquet format
-	PUFFIN   //! Deletion vector in Puffin format (Iceberg V3)
+	PUFFIN,  //! Deletion vector in Puffin format (Iceberg V3)
+	VORTEX   //! Positional delete file in Vortex format
 };
 
 string DeleteFileFormatToString(DeleteFileFormat format);
@@ -62,6 +63,7 @@ struct DuckLakeDataFile {
 	DuckLakeDataFile &operator=(const DuckLakeDataFile &);
 
 	string file_name;
+	string file_format = "parquet";
 	idx_t row_count;
 	idx_t file_size_bytes;
 	optional_idx footer_size;

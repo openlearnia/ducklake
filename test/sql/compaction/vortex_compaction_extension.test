@@ -1,0 +1,46 @@
+# name: test/sql/compaction/vortex_compaction_extension.test
+# description: Compaction of Vortex tables writes .vortex outputs
+# group: [compaction]
+
+require ducklake
+
+require parquet
+
+require vortex
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/vortex_compaction_extension.db' AS ducklake (DATA_PATH '__TEST_DIR__/vortex_compaction_extension_files');
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 0);
+
+statement ok
+CALL ducklake.set_option('data_file_format', 'vortex');
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+query III
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake');
+----
+t	2	1
+
+query II
+SELECT file_format, suffix(data.path, '.vortex')
+FROM __ducklake_metadata_ducklake.ducklake_data_file data
+JOIN __ducklake_metadata_ducklake.ducklake_table tbl USING (table_id)
+WHERE tbl.table_name = 't' AND data.end_snapshot IS NULL;
+----
+vortex	true
+
+query I
+SELECT * FROM ducklake.t ORDER BY i;
+----
+1
+2

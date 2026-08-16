@@ -34,6 +34,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("ducklake_default_data_inlining_row_limit",
 	                          "Default row limit for data inlining (0 disables inlining)", LogicalType::UBIGINT,
 	                          Value::UBIGINT(10), nullptr, SetScope::GLOBAL);
+	auto set_default_data_file_format = [](ClientContext &, SetScope, Value &parameter) {
+		if (parameter.IsNull()) {
+			return;
+		}
+		auto format = StringUtil::Lower(parameter.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		if (format != "parquet" && format != "vortex") {
+			throw InvalidInputException(
+			    "Unsupported ducklake_default_data_file_format \"%s\"; supported options are parquet, vortex", format);
+		}
+		parameter = Value(format);
+	};
+	config.AddExtensionOption("ducklake_default_data_file_format",
+	                          "Default managed data-file format for new empty DuckLake tables (parquet or vortex)",
+	                          LogicalType::VARCHAR, Value("parquet"), set_default_data_file_format, SetScope::GLOBAL);
 	auto set_target_file_size = [](ClientContext &, SetScope, Value &parameter) {
 		if (!parameter.IsNull() && !parameter.ToString().empty()) {
 			DBConfig::ParseMemoryLimit(parameter.ToString());

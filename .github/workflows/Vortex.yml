@@ -1,0 +1,82 @@
+name: Vortex Managed Table Tests
+on: [push, pull_request, repository_dispatch]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ducklake-vortex-tests:
+    name: DuckLake Tests (Vortex default format)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: ['linux_amd64']
+        include:
+          - arch: 'linux_amd64'
+            vcpkg_triplet: 'x64-linux'
+
+    env:
+      VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_triplet }}
+      GEN: Ninja
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      DUCKLAKE_VORTEX_EXTENSION_DIR: ${{ github.workspace }}/duckdb-vortex
+
+    steps:
+    - name: Install required ubuntu packages
+      run: |
+        sudo apt-get update -y -qq
+        sudo apt-get install -y -qq build-essential cmake ninja-build ccache python3 curl
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: 'true'
+
+    - name: Checkout Vortex
+      uses: actions/checkout@v4
+      with:
+        repository: vortex-data/vortex
+        ref: ${{ github.event.client_payload.vortex_ref || github.head_ref || github.ref_name }}
+        path: vortex
+
+    - name: Checkout duckdb-vortex
+      uses: actions/checkout@v4
+      with:
+        repository: vortex-data/duckdb-vortex
+        ref: ${{ github.event.client_payload.duckdb_vortex_ref || github.head_ref || github.ref_name }}
+        path: duckdb-vortex
+
+    - name: Checkout DuckDB to version
+      run: |
+        cd duckdb
+        git checkout $(cat ../.github/duckdb-version)
+
+    - name: Setup Ccache
+      uses: hendrikmuhs/ccache-action@main
+      with:
+        key: ${{ github.job }}-vortex
+        save: ${{ github.ref == 'refs/heads/main' || github.repository != 'duckdb/ducklake' }}
+
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11.1
+      with:
+        vcpkgGitCommitId: a42af01b72c28a8e1d7b48107b33e4f286a55ef6
+
+    - name: Build extension (with Vortex)
+      env:
+        GEN: ninja
+      run: |
+        make release
+
+    - name: Test extension (Parquet default format)
+      run: |
+        build/release/test/unittest
+
+    - name: Test extension (Vortex managed format)
+      run: |
+        build/release/test/unittest --test-config test/configs/vortex.json

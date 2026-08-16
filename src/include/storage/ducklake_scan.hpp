@@ -23,7 +23,7 @@ class Deserializer;
 class DuckLakeFunctions {
 public:
 	//! Table Functions
-	static TableFunction GetDuckLakeScanFunction(DatabaseInstance &instance);
+	static TableFunction GetDuckLakeScanFunction(DatabaseInstance &instance, const string &file_format = "parquet");
 
 	static unique_ptr<FunctionData> BindDuckLakeScan(ClientContext &context, TableFunction &function);
 
@@ -50,6 +50,7 @@ struct DuckLakeFunctionInfo : public TableFunctionInfo {
 	vector<LogicalType> column_types;
 	DuckLakeSnapshot snapshot;
 	TableIndex table_id;
+	string file_format = "parquet";
 	DuckLakeScanType scan_type = DuckLakeScanType::SCAN_TABLE;
 	//! Start snapshot - only set for DuckLakeScanType::SCAN_INSERTIONS and DuckLakeScanType::SCAN_DELETIONS
 	unique_ptr<DuckLakeSnapshot> start_snapshot;

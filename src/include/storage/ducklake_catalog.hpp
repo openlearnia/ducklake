@@ -134,6 +134,10 @@ public:
 		return default_value;
 	}
 	bool TryGetConfigOption(const string &option, string &result, DuckLakeTableEntry &table) const;
+	//! Resolve managed data-file format for a table. Non-empty tables are frozen to their
+	//! persisted/local file format; empty tables use catalog options then the session default.
+	string GetDataFileFormat(ClientContext &context, SchemaIndex schema_id, TableIndex table_id);
+	string GetDataFileFormat(ClientContext &context, DuckLakeTableEntry &table);
 
 	optional_ptr<BoundAtClause> CatalogSnapshot() const;
 

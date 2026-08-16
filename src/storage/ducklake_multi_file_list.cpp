@@ -229,6 +229,7 @@ const DuckLakeFileListEntry &DuckLakeMultiFileList::GetFileEntry(idx_t file_idx)
 DuckLakeFileData GetFileData(const DuckLakeDataFile &file) {
 	DuckLakeFileData result;
 	result.path = file.file_name;
+	result.file_format = file.file_format;
 	result.encryption_key = file.encryption_key;
 	result.file_size_bytes = file.file_size_bytes;
 	result.footer_size = file.footer_size;
@@ -350,6 +351,22 @@ void DuckLakeMultiFileList::GetFilesForTable() const {
 		file_entry.mapping_id = file.mapping_id;
 		transaction_row_start += file.row_count;
 		files.emplace_back(std::move(file_entry));
+	}
+	string visible_file_format;
+	for (auto &file_entry : files) {
+		if (file_entry.data_type != DuckLakeDataType::DATA_FILE || file_entry.file.path.empty()) {
+			continue;
+		}
+		if (visible_file_format.empty()) {
+			visible_file_format = file_entry.file.file_format;
+		} else if (visible_file_format != file_entry.file.file_format) {
+			throw InvalidInputException("DuckLake table contains mixed visible data-file formats: %s and %s",
+			                            visible_file_format, file_entry.file.file_format);
+		}
+	}
+	if (!visible_file_format.empty() && visible_file_format != read_info.file_format) {
+		throw InvalidInputException("DuckLake table data files use %s, but data_file_format is configured as %s",
+		                            visible_file_format, read_info.file_format);
 	}
 	inlined_data_tables = read_info.table.GetInlinedDataTables();
 	for (auto &table : inlined_data_tables) {

@@ -171,6 +171,8 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 		if (!deletes_per_file.empty()) {
 			auto &fs = FileSystem::GetFileSystem(context);
 			vector<DuckLakeDeleteFile> delete_files;
+			auto data_file_format = global_state.table.catalog.Cast<DuckLakeCatalog>().GetDataFileFormat(
+			    context, global_state.table);
 
 			for (auto &file_entry : deletes_per_file) {
 				// write single file, begin_snapshot is the minimum snapshot
@@ -181,7 +183,8 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 				                                              encryption_key,
 				                                              file_entry.first,
 				                                              file_entry.second,
-				                                              DeleteFileSource::FLUSH};
+				                                              DeleteFileSource::FLUSH,
+				                                              data_file_format};
 				delete_files.push_back(DuckLakeDeleteFileWriter::WriteDeleteFileWithSnapshots(context, file_input));
 			}
 			AttachDeleteFilesToWrittenFiles(delete_files, global_state.written_files);
@@ -507,6 +510,7 @@ LEFT JOIN (
 	// Write delete files
 	auto &fs = FileSystem::GetFileSystem(context);
 	vector<DuckLakeDeleteFile> delete_files;
+	auto data_file_format = catalog.GetDataFileFormat(context, table);
 
 	// Get encryption key if the catalog is encrypted
 	string encryption_key;
@@ -555,7 +559,8 @@ LEFT JOIN (
 		                                              encryption_key,
 		                                              file_info.file_path,
 		                                              deletions_to_write,
-		                                              DeleteFileSource::FLUSH};
+		                                              DeleteFileSource::FLUSH,
+		                                              data_file_format};
 		auto delete_file = DuckLakeDeleteFileWriter::WriteDeleteFileWithSnapshots(context, file_input);
 		delete_file.data_file_id = DataFileIndex(file_id);
 		delete_file.max_snapshot = file_info.max_snapshot;

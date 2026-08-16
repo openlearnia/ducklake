@@ -1,0 +1,31 @@
+# name: test/sql/add_files/vortex_add_files_type_check_uuid.test
+# description: Vortex twin of add_files_type_check_uuid
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_uuid')
+
+statement ok
+COPY (SELECT uuid() AS col1) TO '${DATA_PATH}/uuid.vortex' (FORMAT vortex);
+
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 UUID);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/uuid.vortex')
+
+query I
+SELECT uuid_extract_version(col1) FROM ducklake.test
+----
+4

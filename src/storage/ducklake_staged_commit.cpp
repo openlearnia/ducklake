@@ -181,9 +181,9 @@ void DuckLakeStagedCommit::EmitDataFileRow(string &sql, const DuckLakeDataFile &
                                            const string &compaction_id_literal) const {
 	sql += StringUtil::Format(
 	    "INSERT INTO %s VALUES "
-	    "(%llu, %llu, %llu, %s, false, 'parquet', %llu, %llu, %s, %s, %s, %s, %s, %s, %s, %s);",
+	    "(%llu, %llu, %llu, %s, false, %s, %llu, %llu, %s, %s, %s, %s, %s, %s, %s, %s);",
 	    DuckLakeStagedTable::BaseName(DuckLakeStagedTableType::DATA_FILE), local_file_id, table_id.index, file_order,
-	    SQLString(file.file_name), file.row_count, file.file_size_bytes,
+	    SQLString(file.file_name), SQLString(file.file_format), file.row_count, file.file_size_bytes,
 	    DuckLakeUtil::OptionalIdxOrNull(file.footer_size), DuckLakeUtil::OptionalIdxOrNull(file.flush_row_id_start),
 	    DuckLakeUtil::OptionalIdxOrNull(file.partition_id), DuckLakeUtil::EncryptionKeyLiteral(file.encryption_key),
 	    DuckLakeUtil::MappingIdOrNull(file.mapping_id), DuckLakeUtil::OptionalIdxOrNull(file.max_partial_file_snapshot),

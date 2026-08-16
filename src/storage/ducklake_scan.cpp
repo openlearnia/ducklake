@@ -215,17 +215,19 @@ vector<PartitionStatistics> DuckLakeGetPartitionStats(ClientContext &context, Ge
 	return result;
 }
 
-TableFunction DuckLakeFunctions::GetDuckLakeScanFunction(DatabaseInstance &instance) {
-	// The ducklake_scan function is constructed by grabbing the parquet scan from the Catalog, then injecting the
-	// DuckLakeMultiFileReader into it to create a DuckLake-based multi file read
-	ExtensionHelper::TryAutoLoadExtension(instance, "parquet");
+TableFunction DuckLakeFunctions::GetDuckLakeScanFunction(DatabaseInstance &instance, const string &file_format) {
+	// Construct ducklake_scan from the selected format's MultiFileFunction and inject DuckLake's file reader.
+	if (file_format == "parquet") {
+		ExtensionHelper::TryAutoLoadExtension(instance, "parquet");
+	}
 	ExtensionLoader loader(instance, "ducklake");
 
 	TableFunction function("ducklake_scan", {LogicalType::VARCHAR}, nullptr, nullptr);
-	auto parquet_entry = loader.TryGetTableFunction("parquet_scan");
-	if (parquet_entry) {
-		auto &parquet_scan = parquet_entry->Cast<TableFunctionCatalogEntry>();
-		function = parquet_scan.functions.GetFunctionByOffset(0);
+	auto scan_name = file_format == "vortex" ? "vortex_multi_file_scan" : "parquet_scan";
+	auto scan_entry = loader.TryGetTableFunction(scan_name);
+	if (scan_entry) {
+		auto &scan = scan_entry->Cast<TableFunctionCatalogEntry>();
+		function = scan.functions.GetFunctionByOffset(0);
 		function.get_multi_file_reader = DuckLakeMultiFileReader::CreateInstance;
 	}
 
@@ -286,6 +288,7 @@ void DuckLakeScanSerialize(Serializer &serializer, const optional_ptr<FunctionDa
 		serializer.WriteObject(106, "start_snapshot",
 		                       [&](Serializer &obj) { func_info.start_snapshot->Serialize(obj); });
 	}
+	serializer.WriteProperty(107, "file_format", func_info.file_format);
 }
 
 unique_ptr<FunctionData> DuckLakeScanDeserialize(Deserializer &deserializer, TableFunction &function) {
@@ -304,13 +307,11 @@ unique_ptr<FunctionData> DuckLakeScanDeserialize(Deserializer &deserializer, Tab
 			start_snapshot = make_uniq<DuckLakeSnapshot>(DuckLakeSnapshot::Deserialize(obj));
 		});
 	}
+	auto file_format = deserializer.ReadPropertyWithExplicitDefault<string>(107, "file_format", "parquet");
 
-	// If ducklake_scan was registered before parquet was loaded, we set it now
+	function = DuckLakeFunctions::GetDuckLakeScanFunction(*context.db, file_format);
 	if (!function.bind) {
-		function = DuckLakeFunctions::GetDuckLakeScanFunction(*context.db);
-		if (!function.bind) {
-			throw InvalidInputException("ducklake_scan requires the parquet extension to be loaded");
-		}
+		throw InvalidInputException("ducklake_scan requires the %s extension to be loaded", file_format);
 	}
 
 	// Look up the DuckLake catalog and table
@@ -322,6 +323,7 @@ unique_ptr<FunctionData> DuckLakeScanDeserialize(Deserializer &deserializer, Tab
 
 	auto function_info = DuckLakeFunctionInfo::Create(table_entry, transaction, snapshot);
 	function_info->scan_type = scan_type;
+	function_info->file_format = file_format;
 	function_info->start_snapshot = std::move(start_snapshot);
 	function.function_info = std::move(function_info);
 
