@@ -1,0 +1,43 @@
+# name: test/sql/add_files/vortex_add_rollback.test
+# description: Vortex twin — external .vortex survives add_data_files rollback
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/add_rollback_vortex');
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE test(col1 INTEGER, col2 VARCHAR);
+
+statement ok
+INSERT INTO test VALUES (1,2);
+
+statement ok
+COPY (SELECT 200 col1, 'world' col2 LIMIT 1) TO '${DATA_PATH}/add_rollback_vortex/file.vortex' (FORMAT vortex);
+
+statement ok
+BEGIN
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/add_rollback_vortex/file.vortex');
+
+statement ok
+ROLLBACK
+
+query I
+SELECT COUNT(*) FROM GLOB('${DATA_PATH}/add_rollback_vortex/*.vortex')
+----
+1

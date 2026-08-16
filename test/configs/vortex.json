@@ -1,0 +1,110 @@
+{
+  "description": "Run DuckLake tests with Vortex as the default managed data-file format.",
+  "on_init": "SET ducklake_default_data_file_format = 'vortex'; SET ducklake_default_data_inlining_row_limit = 0;",
+  "statically_loaded_extensions": [
+    "core_functions",
+    "parquet",
+    "ducklake",
+    "icu",
+    "vortex"
+  ],
+  "skip_tests": [
+    {
+      "reason": "Parquet is statically loaded in this config, test requires missing parquet",
+      "paths": [
+        "test/sql/general/missing_parquet.test"
+      ]
+    },
+    {
+      "reason": "External Parquet ingestion is out of scope for Vortex-managed table matrix (exact paths: directory skips are not prefix-matched)",
+      "paths": [
+        "test/sql/add_files/add_columns_named_array_element.test",
+        "test/sql/add_files/add_empty_file.test",
+        "test/sql/add_files/add_file_footer_size.test",
+        "test/sql/add_files/add_file_partitioned.test",
+        "test/sql/add_files/add_file_specific_schema.test",
+        "test/sql/add_files/add_file_with_three_level_list.test",
+        "test/sql/add_files/add_files.test",
+        "test/sql/add_files/add_files_compaction.test",
+        "test/sql/add_files/add_files_complex_nested_stats_mre.test",
+        "test/sql/add_files/add_files_extra_columns.test",
+        "test/sql/add_files/add_files_hive.test",
+        "test/sql/add_files/add_files_hive_many_columns.test",
+        "test/sql/add_files/add_files_hive_mismatch.test",
+        "test/sql/add_files/add_files_hive_partition_cast.test",
+        "test/sql/add_files/add_files_list.test",
+        "test/sql/add_files/add_files_missing_columns.test",
+        "test/sql/add_files/add_files_missing_fields.test",
+        "test/sql/add_files/add_files_nested.test",
+        "test/sql/add_files/add_files_nested_list_struct_nulls.test",
+        "test/sql/add_files/add_files_overlapping_globs.test",
+        "test/sql/add_files/add_files_rename.test",
+        "test/sql/add_files/add_files_table_changes.test",
+        "test/sql/add_files/add_files_transaction_local.test",
+        "test/sql/add_files/add_files_type_check_decimal.test",
+        "test/sql/add_files/add_files_type_check_float.test",
+        "test/sql/add_files/add_files_type_check_integer.test",
+        "test/sql/add_files/add_files_type_check_nested.test",
+        "test/sql/add_files/add_files_type_check_string_blob.test",
+        "test/sql/add_files/add_files_type_check_timestamp.test",
+        "test/sql/add_files/add_files_type_check_uuid.test",
+        "test/sql/add_files/add_old_list.test",
+        "test/sql/add_files/add_removed_files.test",
+        "test/sql/add_files/add_rollback.test",
+        "test/sql/delete/delete_add_files_creates_delete_dir.test",
+        "test/sql/delete/delete_legacy_missing_mapping_after_rename_add_files.test",
+        "test/sql/compaction/merge_adjacent_after_add_files_schema_evolution.test",
+        "test/sql/rewrite_data_files/test_rewrite_inlined_file_deletes_add_files.test",
+        "test/sql/partitioning/partition_insert_bug.test",
+        "test/sql/stats/filter_stress.test",
+        "test/sql/stats/count_star_optimization_file_operations.test"
+      ]
+    },
+    {
+      "reason": "Hardcoded .parquet / read_parquet / puffin path assertions, or Parquet add_files into Vortex tables",
+      "paths": [
+        "test/sql/partitioning/merge_adjacent_null_partition.test",
+        "test/sql/list_files/ducklake_list_files.test",
+        "test/sql/update/update_rollback.test",
+        "test/sql/secrets/ducklake_secrets.test",
+        "test/sql/delete/deletion_vector.test",
+        "test/sql/deletion_inlining/test_deletion_inlining.test",
+        "test/sql/deletion_inlining/test_deletion_inlining_large.test",
+        "test/sql/deletion_inlining/test_deletion_from_inlined_multiple_snapshots.test",
+        "test/sql/deletion_inlining/test_deletion_from_inlined_insertion.test",
+        "test/sql/deletion_inlining/test_deletion_inlining_partitions.test",
+        "test/sql/compaction/compaction_partitioned_table.test",
+        "test/sql/compaction/compaction_partitioned_non_adjacent.test",
+        "test/sql/compaction/mix_large_small_insertions.test",
+        "test/sql/cleanup/create_drop_cleanup.test",
+        "test/sql/cleanup/drop_table_cleans_delete_files.test",
+        "test/sql/rewrite_data_files/test_rewrite_partitioning.test",
+        "test/sql/partitioning/disable_hive_partitioning.test",
+        "test/sql/partitioning/bucket_partitioning.test",
+        "test/sql/partitioning/partition_nop_schema_version.test",
+        "test/sql/migration/v01_partitioned.test",
+        "test/sql/migration/migration.test",
+        "test/sql/settings/data_file_format.test",
+        "test/sql/remove_orphans/remove_orphaned_files.test",
+        "test/sql/remove_orphans/mixed_paths.test",
+        "test/sql/remove_orphans/metadata_in_data_path.test",
+        "test/sql/remove_orphans/concurrent_insert_orphan_cleanup.test",
+        "test/sql/encryption/encryption.test",
+        "test/sql/insert/insert_file_size.test",
+        "test/sql/insert/insert_session_target_file_size.test",
+        "test/sql/settings/parquet_compression.test",
+        "test/sql/settings/parquet_row_group_size_bytes.test",
+        "test/sql/settings/per_table_settings.test",
+        "test/sql/schema_evolution/field_ids.test",
+        "test/sql/geo/ducklake_geometry_add_files.test"
+      ]
+    },
+    {
+      "reason": "Asserts reserved names rejected under default inlining; matrix sets data_inlining_row_limit=0 (same as no_inline.json)",
+      "paths": [
+        "test/sql/data_inlining/inlining_reserved_column_names.test",
+        "test/sql/alter/issue_944.test"
+      ]
+    }
+  ]
+}

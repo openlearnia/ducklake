@@ -1,0 +1,48 @@
+# name: test/sql/add_files/vortex_add_files_missing_columns.test
+# description: Vortex twin — allow_missing for external Vortex files
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_missing_columns_vortex');
+
+statement ok
+CREATE TABLE ducklake.test(i INTEGER, j INTEGER);
+
+statement ok
+COPY (SELECT 42 j) TO '${DATA_PATH}/missing_column.vortex' (FORMAT vortex);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/missing_column.vortex')
+----
+Column "i" exists in table "test" but was not found in file
+
+statement ok
+BEGIN
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/missing_column.vortex', allow_missing => true)
+
+query II
+FROM ducklake.test
+----
+NULL	42
+
+statement ok
+COMMIT
+
+query II
+FROM ducklake.test
+----
+NULL	42

@@ -167,6 +167,22 @@ void LocalTableChanges::DropTransactionLocalFile(ClientContext &context, TableIn
 void LocalTableChanges::AppendFiles(TableIndex table_id, vector<DuckLakeDataFile> files) {
 	lock_guard<mutex> guard(lock);
 	auto &table_changes = changes[table_id];
+	if (!files.empty()) {
+		string expected_format = files[0].file_format;
+		for (auto &file : files) {
+			if (!StringUtil::CIEquals(file.file_format, expected_format)) {
+				throw InvalidInputException(
+				    "Cannot append mixed data file formats to the same table in one transaction (found %s and %s)",
+				    expected_format, file.file_format);
+			}
+		}
+		if (!table_changes.new_data_files.empty() &&
+		    !StringUtil::CIEquals(table_changes.new_data_files[0].file_format, expected_format)) {
+			throw InvalidInputException(
+			    "Cannot append mixed data file formats to the same table in one transaction (found %s and %s)",
+			    table_changes.new_data_files[0].file_format, expected_format);
+		}
+	}
 	if (table_changes.new_data_files.empty()) {
 		// If empty, just move the entire vector
 		table_changes.new_data_files = std::move(files);
@@ -1228,6 +1244,7 @@ DuckLakeFileInfo DuckLakeTransaction::BuildDataFileInfo(const DuckLakeDataFile &
 	data_file.id = DataFileIndex(commit_snapshot.next_file_id++);
 	data_file.table_id = table_id;
 	data_file.file_name = file.file_name;
+	data_file.file_format = file.file_format;
 	data_file.row_count = file.row_count;
 	data_file.file_size_bytes = file.file_size_bytes;
 	data_file.footer_size = file.footer_size;

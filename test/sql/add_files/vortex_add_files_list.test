@@ -1,0 +1,39 @@
+# name: test/sql/add_files/vortex_add_files_list.test
+# description: Vortex twin — list API for ducklake_add_data_files
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_vortex_list/', METADATA_CATALOG 'metadata');
+
+statement ok
+CREATE TABLE ducklake.test(col1 INTEGER, col2 VARCHAR);
+
+statement ok
+INSERT INTO ducklake.test VALUES (100, 'hello');
+
+statement ok
+COPY (SELECT 200 col1, 'world' col2) TO '${DATA_PATH}/ducklake_add_files_vortex_list/main/test/my_file.vortex' (FORMAT vortex);
+
+statement ok
+COPY (SELECT 300 col1, '!' col2) TO '${DATA_PATH}/ducklake_add_files_vortex_list/main/test/my_file_2.vortex' (FORMAT vortex);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', ['${DATA_PATH}/ducklake_add_files_vortex_list/main/test/my_file.vortex','${DATA_PATH}/ducklake_add_files_vortex_list/main/test/my_file_2.vortex'])
+
+query II
+FROM ducklake.test ORDER BY col1;
+----
+100	hello
+200	world
+300	!

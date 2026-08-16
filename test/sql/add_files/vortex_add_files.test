@@ -1,0 +1,179 @@
+# name: test/sql/add_files/vortex_add_files.test
+# description: Vortex twin of add_files.test — external .vortex into Vortex-managed tables
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_vortex/', METADATA_CATALOG 'metadata');
+
+statement ok
+CREATE TABLE ducklake.test(col1 INTEGER, col2 VARCHAR);
+
+statement ok
+INSERT INTO ducklake.test VALUES (100, 'hello');
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+COPY (SELECT 200 col1, 'world' col2) TO '${DATA_PATH}/ducklake_add_files_vortex/main/test/my_file.vortex' (FORMAT vortex);
+
+statement ok
+BEGIN
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/ducklake_add_files_vortex/main/test/my_file.vortex')
+
+query II
+FROM ducklake.test
+----
+100	hello
+200	world
+
+statement ok
+COMMIT
+
+query II rowsort
+FROM ducklake.test
+----
+100	hello
+200	world
+
+statement ok
+COPY (SELECT 'abcd' col2, 300 col1) TO '${DATA_PATH}/ducklake_add_files_vortex/main/test/my_file2.vortex' (FORMAT vortex);
+
+statement ok
+BEGIN
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/ducklake_add_files_vortex/main/test/my_file2.vortex')
+
+query II
+FROM ducklake.test
+----
+100	hello
+200	world
+300	abcd
+
+statement ok
+COMMIT
+
+query II
+FROM ducklake.test
+----
+100	hello
+200	world
+300	abcd
+
+query I
+SELECT COUNT(*) FROM metadata.ducklake_column_mapping
+----
+1
+
+statement ok
+ALTER TABLE ducklake.test ADD COLUMN col3 TINYINT
+
+query III
+FROM ducklake.test
+----
+100	hello	NULL
+200	world	NULL
+300	abcd	NULL
+
+statement ok
+COPY (SELECT 'efgh' col2, 400 col1, 50::TINYINT col3) TO '${DATA_PATH}/ducklake_add_files_vortex/main/test/my_file3.vortex' (FORMAT vortex);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/ducklake_add_files_vortex/main/test/my_file3.vortex')
+
+query III
+FROM ducklake.test
+----
+100	hello	NULL
+200	world	NULL
+300	abcd	NULL
+400	efgh	50
+
+query I
+SELECT COUNT(*) FROM metadata.ducklake_column_mapping
+----
+2
+
+statement ok
+ALTER TABLE ducklake.test DROP COLUMN col2
+
+query II
+FROM ducklake.test
+----
+100	NULL
+200	NULL
+300	NULL
+400	50
+
+statement ok
+SET VARIABLE v_file3 = (SELECT snapshot_id FROM (SELECT snapshot_id, row_number() OVER (ORDER BY snapshot_id) as rn FROM ducklake_snapshots('ducklake') WHERE changes::VARCHAR LIKE '%insert%') WHERE rn = 4);
+
+query III
+FROM ducklake.test AT (VERSION => getvariable('v_file3'))
+----
+100	hello	NULL
+200	world	NULL
+300	abcd	NULL
+400	efgh	50
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE ducklake.test ADD COLUMN col2 VARCHAR
+
+statement ok
+COPY (SELECT 'ijkl' col2, 500 col1, 100::TINYINT col3) TO '${DATA_PATH}/ducklake_add_files_vortex/main/test/my_file4.vortex' (FORMAT vortex);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/ducklake_add_files_vortex/main/test/my_file4.vortex')
+
+query III
+SELECT col1, col2, col3 FROM ducklake.test
+----
+100	NULL	NULL
+200	NULL	NULL
+300	NULL	NULL
+400	NULL	50
+500	ijkl	100
+
+statement ok
+COMMIT
+
+query III
+SELECT col1, col2, col3 FROM ducklake.test
+----
+100	NULL	NULL
+200	NULL	NULL
+300	NULL	NULL
+400	NULL	50
+500	ijkl	100
+
+query III
+FROM ducklake.test AT (VERSION => getvariable('v_file3'))
+----
+100	hello	NULL
+200	world	NULL
+300	abcd	NULL
+400	efgh	50
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/abcd.vortex')
+----
+Failed to add data files
