@@ -356,6 +356,9 @@ unique_ptr<FunctionData> DuckLakeFunctions::BindDuckLakeScan(ClientContext &cont
 
 TableFunction DuckLakeTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
                                                   const EntryLookupInfo &lookup_info) {
+	auto &ducklake_catalog = ParentCatalog().Cast<DuckLakeCatalog>();
+	ducklake_catalog.VerifyMaterializedViewStaleRead(context, *this);
+
 	auto file_format = GetDataFileFormat(context, *this);
 	auto function = DuckLakeFunctions::GetDuckLakeScanFunction(*context.db, file_format);
 	auto &transaction = DuckLakeTransaction::Get(context, ParentCatalog());

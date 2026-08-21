@@ -140,4 +140,24 @@ public:
 	DuckLakeCommitFunction();
 };
 
+class DuckLakeCreateMaterializedViewFunction : public TableFunction {
+public:
+	DuckLakeCreateMaterializedViewFunction();
+};
+
+class DuckLakeRefreshMaterializedViewFunction : public TableFunction {
+public:
+	DuckLakeRefreshMaterializedViewFunction();
+};
+
+class DuckLakeDropMaterializedViewFunction : public TableFunction {
+public:
+	DuckLakeDropMaterializedViewFunction();
+};
+
+class DuckLakeMaterializedViewsFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeMaterializedViewsFunction();
+};
+
 } // namespace duckdb

@@ -1735,8 +1735,27 @@ void DuckLakeTransaction::DropSchema(DuckLakeSchemaEntry &schema) {
 
 void DuckLakeTransaction::DropTable(DuckLakeTableEntry &table) {
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
-	auto &new_tables = state->new_tables;
 	auto table_id = table.GetTableId();
+	// dropping the backing table of a materialized view drops the materialized view with it
+	if (ducklake_catalog.IsMaterializedViewBackingTable(*this, table_id)) {
+		optional_ptr<const DuckLakeMaterializedViewInfo> dropped_mv;
+		for (auto &staged : state->new_materialized_views) {
+			if (staged.backing_table_id == table_id) {
+				dropped_mv = &staged;
+				break;
+			}
+		}
+		if (!dropped_mv) {
+			auto *persisted = ducklake_catalog.GetMaterializedViewByBackingTable(*this, table_id);
+			if (persisted) {
+				dropped_mv = persisted;
+			}
+		}
+		if (dropped_mv) {
+			DropMaterializedView(dropped_mv->id);
+		}
+	}
+	auto &new_tables = state->new_tables;
 	if (table.IsTransactionLocal()) {
 		auto schema_entry = new_tables.find(table.ParentSchema().name);
 		if (schema_entry == new_tables.end()) {
@@ -1781,6 +1800,55 @@ void DuckLakeTransaction::DropView(DuckLakeViewEntry &view) {
 
 void DuckLakeTransaction::DropScalarMacro(DuckLakeScalarMacroEntry &macro) {
 	state->dropped_scalar_macros.insert(macro.GetIndex());
+}
+
+void DuckLakeTransaction::CreateMaterializedView(DuckLakeMaterializedViewInfo info) {
+	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
+	// the creating statement also writes the backing files in this transaction
+	info.pending_refresh_stamp = true;
+	auto entry = std::find_if(state->new_materialized_views.begin(), state->new_materialized_views.end(),
+	                          [&](const DuckLakeMaterializedViewInfo &existing) {
+		                          return existing.backing_table_id == info.backing_table_id;
+	                          });
+	if (entry != state->new_materialized_views.end()) {
+		// re-creating a materialized view created in this same transaction - replace the staged row
+		*entry = std::move(info);
+		return;
+	}
+	state->new_materialized_views.push_back(std::move(info));
+}
+
+void DuckLakeTransaction::RefreshMaterializedView(TableIndex view_id) {
+	// refreshing a view created in this same transaction only updates the staged row
+	for (auto &info : state->new_materialized_views) {
+		if (info.id == view_id) {
+			info.pending_refresh_stamp = true;
+			return;
+		}
+	}
+	if (view_id.IsTransactionLocal()) {
+		throw InternalException("Refreshing a materialized view with a transaction local id that was not created in "
+		                        "this transaction");
+	}
+	state->refreshed_materialized_views.insert(view_id);
+}
+
+void DuckLakeTransaction::DropMaterializedView(TableIndex view_id) {
+	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
+	auto entry = std::find_if(state->new_materialized_views.begin(), state->new_materialized_views.end(),
+	                          [&](const DuckLakeMaterializedViewInfo &existing) {
+		                          return existing.id == view_id;
+	                          });
+	if (entry != state->new_materialized_views.end()) {
+		// created and dropped in the same transaction - never persists
+		state->new_materialized_views.erase(entry);
+		return;
+	}
+	state->dropped_materialized_views.insert(view_id);
+}
+
+const vector<DuckLakeMaterializedViewInfo> &DuckLakeTransaction::GetNewMaterializedViews() const {
+	return state->new_materialized_views;
 }
 
 void DuckLakeTransaction::DropTableMacro(DuckLakeTableMacroEntry &macro) {

@@ -197,6 +197,8 @@ CREATE TABLE {METADATA_CATALOG}.ducklake_snapshot_changes(snapshot_id BIGINT PRI
 CREATE TABLE {METADATA_CATALOG}.ducklake_schema(schema_id BIGINT PRIMARY KEY, schema_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
 CREATE TABLE {METADATA_CATALOG}.ducklake_table(table_id BIGINT, table_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
 CREATE TABLE {METADATA_CATALOG}.ducklake_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, column_aliases VARCHAR);
+CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT);
+CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view_dependency(view_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_tag(object_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, key VARCHAR, value VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_column_tag(table_id BIGINT, column_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, key VARCHAR, value VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_data_file(data_file_id BIGINT PRIMARY KEY, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, footer_size BIGINT, row_id_start BIGINT, partition_id BIGINT, encryption_key VARCHAR,  mapping_id BIGINT, partial_max BIGINT);
@@ -221,7 +223,7 @@ CREATE TABLE {METADATA_CATALOG}.ducklake_sort_info(sort_id BIGINT, table_id BIGI
 CREATE TABLE {METADATA_CATALOG}.ducklake_sort_expression(sort_id BIGINT, table_id BIGINT, sort_key_index BIGINT, expression VARCHAR, dialect VARCHAR, sort_direction VARCHAR, null_order VARCHAR);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot VALUES (0, NOW(), 0, 1, 0);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes VALUES (0, 'created_schema:"main"',  NULL, NULL, NULL);
-INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '1.0'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
+INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '1.1'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
 INSERT INTO {METADATA_CATALOG}.ducklake_schema VALUES (0, UUID(), 0, NULL, 'main', 'main/', true);
 	)",
 	                                       DuckDB::SourceID(), SQLString(data_path), encryption_str);
@@ -346,6 +348,17 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.0' WHERE key = 'versi
 	)");
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to migrate DuckLake from v0.4 to v1.0: ");
+	}
+}
+
+void DuckLakeMetadataManager::MigrateV05() {
+	auto result = transaction.Query(R"(
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT);
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view_dependency(view_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT);
+UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1' WHERE key = 'version';
+	)");
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to migrate DuckLake from v1.0 to v1.1: ");
 	}
 }
 
@@ -2719,6 +2732,120 @@ string DuckLakeMetadataManager::WriteNewViews(const vector<DuckLakeViewInfo> &ne
 		return "INSERT INTO {METADATA_CATALOG}.ducklake_view VALUES " + view_insert_sql + ";";
 	}
 	return {};
+}
+
+string DuckLakeMetadataManager::WriteNewMaterializedViews(const vector<DuckLakeMaterializedViewInfo> &new_views) {
+	string view_insert_sql;
+	string dependency_insert_sql;
+	for (auto &view : new_views) {
+		if (!view_insert_sql.empty()) {
+			view_insert_sql += ", ";
+		}
+		string last_refreshed = "NULL";
+		if (view.pending_refresh_stamp) {
+			// the creating transaction also wrote the backing files - stamp with the commit snapshot
+			last_refreshed = "{SNAPSHOT_ID}";
+		} else if (view.last_refreshed_snapshot.IsValid()) {
+			last_refreshed = to_string(view.last_refreshed_snapshot.GetIndex());
+		}
+		view_insert_sql +=
+		    StringUtil::Format("(%d, '%s', {SNAPSHOT_ID}, NULL, %d, %s, %s, %s, %d, %s)", view.id.index, view.uuid,
+		                       view.schema_id.index, SQLString(view.name), SQLString(view.dialect), SQLString(view.sql),
+		                       view.backing_table_id.index, last_refreshed);
+		for (auto &dependency : view.dependencies) {
+			if (!dependency_insert_sql.empty()) {
+				dependency_insert_sql += ", ";
+			}
+			dependency_insert_sql +=
+			    StringUtil::Format("(%d, {SNAPSHOT_ID}, NULL, %d)", view.id.index, dependency.index);
+		}
+	}
+	string result;
+	if (!view_insert_sql.empty()) {
+		result += "INSERT INTO {METADATA_CATALOG}.ducklake_materialized_view VALUES " + view_insert_sql + ";";
+	}
+	if (!dependency_insert_sql.empty()) {
+		result += "INSERT INTO {METADATA_CATALOG}.ducklake_materialized_view_dependency VALUES " +
+		          dependency_insert_sql + ";";
+	}
+	return result;
+}
+
+string DuckLakeMetadataManager::UpdateMaterializedViewRefreshes(const set<TableIndex> &refreshed_views) {
+	if (refreshed_views.empty()) {
+		return {};
+	}
+	string id_list;
+	for (auto &id : refreshed_views) {
+		if (!id_list.empty()) {
+			id_list += ", ";
+		}
+		id_list += to_string(id.index);
+	}
+	return StringUtil::Format(R"(
+UPDATE {METADATA_CATALOG}.ducklake_materialized_view
+SET last_refreshed_snapshot = {SNAPSHOT_ID}
+WHERE view_id IN (%s) AND end_snapshot IS NULL;
+)", id_list);
+}
+
+string DuckLakeMetadataManager::DropMaterializedViews(const set<TableIndex> &dropped_views) {
+	if (dropped_views.empty()) {
+		return {};
+	}
+	string result = FlushDrop("ducklake_materialized_view", "view_id", dropped_views);
+	result += FlushDrop("ducklake_materialized_view_dependency", "view_id", dropped_views);
+	return result;
+}
+
+vector<DuckLakeMaterializedViewInfo> DuckLakeMetadataManager::LoadMaterializedViews(DuckLakeSnapshot snapshot) {
+	vector<DuckLakeMaterializedViewInfo> result;
+	string view_query = R"(
+SELECT view_id, view_uuid, schema_id, view_name, dialect, sql, backing_table_id, last_refreshed_snapshot
+FROM {METADATA_CATALOG}.ducklake_materialized_view
+WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
+)";
+	auto view_result = Query(snapshot, view_query);
+	if (view_result->HasError()) {
+		view_result->GetErrorObject().Throw("Failed to load materialized views from DuckLake: ");
+	}
+	for (auto &row : *view_result) {
+		DuckLakeMaterializedViewInfo info;
+		info.id = TableIndex(row.GetValue<uint64_t>(0));
+		info.uuid = row.GetValue<string>(1);
+		info.schema_id = SchemaIndex(row.GetValue<uint64_t>(2));
+		info.name = row.GetValue<string>(3);
+		info.dialect = row.GetValue<string>(4);
+		info.sql = row.GetValue<string>(5);
+		info.backing_table_id = TableIndex(row.GetValue<uint64_t>(6));
+		if (!row.IsNull(7)) {
+			info.last_refreshed_snapshot = row.GetValue<uint64_t>(7);
+		}
+		result.push_back(std::move(info));
+	}
+	string dependency_query = R"(
+SELECT view_id, table_id
+FROM {METADATA_CATALOG}.ducklake_materialized_view_dependency
+WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
+)";
+	auto dependency_result = Query(snapshot, dependency_query);
+	if (dependency_result->HasError()) {
+		dependency_result->GetErrorObject().Throw("Failed to load materialized view dependencies from DuckLake: ");
+	}
+	// stitch dependencies onto the views they belong to (two queries keep this portable across backends)
+	unordered_map<idx_t, idx_t> view_index_by_id;
+	for (idx_t i = 0; i < result.size(); i++) {
+		view_index_by_id.emplace(result[i].id.index, i);
+	}
+	for (auto &row : *dependency_result) {
+		auto view_id = row.GetValue<uint64_t>(0);
+		auto entry = view_index_by_id.find(view_id);
+		if (entry == view_index_by_id.end()) {
+			continue;
+		}
+		result[entry->second].dependencies.push_back(TableIndex(row.GetValue<uint64_t>(1)));
+	}
+	return result;
 }
 
 string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_snapshot,

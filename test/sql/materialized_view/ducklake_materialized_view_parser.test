@@ -1,0 +1,90 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_parser.test
+# description: test CREATE/REFRESH/DROP MATERIALIZED VIEW syntax sugar and refresh-mode fallbacks
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+SET allow_parser_override_extension='STRICT'
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/ducklake_mv_parser.db' AS ducklake (DATA_PATH '__TEST_DIR__/ducklake_mv_parser_files')
+
+statement ok
+CREATE TABLE ducklake.base AS SELECT i AS id, (i % 5) AS grp, (i * 10) AS val FROM range(20) t(i)
+
+# create through the SQL syntax
+statement ok
+CREATE MATERIALIZED VIEW ducklake.mv_avg AS SELECT grp, avg(val) AS mean, min(val) AS lo, max(val) AS hi FROM ducklake.base GROUP BY grp
+
+query IRII
+SELECT grp, mean, lo, hi FROM ducklake.mv_avg ORDER BY grp
+----
+0	75.0	0	150
+1	85.0	10	160
+2	95.0	20	170
+3	105.0	30	180
+4	115.0	40	190
+
+statement ok
+INSERT INTO ducklake.base VALUES (100, 0, 1000)
+
+# refresh through the SQL syntax (incremental: avg/min/max recomputed per changed group)
+query TTTI
+REFRESH MATERIALIZED VIEW ducklake.mv_avg
+----
+main	mv_avg	incremental	5
+
+query IRII
+SELECT grp, mean, lo, hi FROM ducklake.mv_avg WHERE grp = 0
+----
+0	260.0	0	1000
+
+# non-eligible definitions (joins) fall back to full refresh
+statement ok
+CREATE MATERIALIZED VIEW ducklake.mv_join AS SELECT b.grp, sum(b.val) AS total FROM ducklake.base b JOIN ducklake.base b2 ON b.id = b2.id GROUP BY b.grp
+
+statement ok
+INSERT INTO ducklake.base VALUES (101, 3, 500)
+
+query TTTI
+REFRESH MATERIALIZED VIEW ducklake.mv_join
+----
+main	mv_join	full	5
+
+query II
+SELECT grp, total FROM ducklake.mv_join ORDER BY grp
+----
+0	1300
+1	340
+2	380
+3	920
+4	460
+
+# unqualified view names are rejected with a helpful error
+statement error
+CREATE MATERIALIZED VIEW mv_x AS SELECT 42
+----
+qualified with the lake catalog name
+
+# the override declines everything else - normal statements keep working
+statement ok
+CREATE TABLE ducklake.other AS SELECT 42 AS x
+
+query I
+SELECT * FROM ducklake.other
+----
+42
+
+# drop through the SQL syntax
+query TTTI
+DROP MATERIALIZED VIEW ducklake.mv_avg
+----
+main	mv_avg	dropped	0
+
+statement error
+REFRESH MATERIALIZED VIEW ducklake.mv_avg
+----
+does not exist

@@ -1,0 +1,236 @@
+# name: test/sql/materialized_view/ducklake_materialized_view.test
+# description: test ducklake materialized views - create, query, refresh, drop
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/ducklake_materialized_view.db' AS ducklake (DATA_PATH '__TEST_DIR__/ducklake_materialized_view_files')
+
+statement ok
+CREATE TABLE ducklake.base AS SELECT i AS id, (i % 5) AS grp, (i * 10) AS val FROM range(20) t(i)
+
+# create a materialized view over an aggregate
+query TTTI
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv1', query := 'SELECT grp, sum(val) AS total, count(*) AS cnt FROM base GROUP BY grp ORDER BY grp')
+----
+main	mv1	full	5
+
+# the materialized view is queryable like a table
+query III
+SELECT grp, total, cnt FROM ducklake.mv1 ORDER BY grp
+----
+0	300	4
+1	340	4
+2	380	4
+3	420	4
+4	460	4
+
+# materialized views show up in the listing
+query TI
+SELECT view_name, last_refreshed_snapshot FROM ducklake_materialized_views('ducklake') ORDER BY view_name
+----
+mv1	2
+
+# writes into the base table do not change the view until refresh
+statement ok
+INSERT INTO ducklake.base VALUES (100, 0, 1000)
+
+query III
+SELECT grp, total, cnt FROM ducklake.mv1 WHERE grp = 0
+----
+0	300	4
+
+# refreshing picks up the change (incremental - only group 0 was touched)
+query TTTI
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv1')
+----
+main	mv1	delta	5
+
+query III
+SELECT grp, total, cnt FROM ducklake.mv1 WHERE grp = 0
+----
+0	1300	5
+
+# refreshing with no changes is a no-op
+query TTTI
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv1')
+----
+main	mv1	skipped	0
+
+# unrelated catalog write advances the snapshot but must not mark the MV stale
+statement ok
+CREATE TABLE ducklake.other AS SELECT 1 AS x
+
+query T
+SELECT is_stale FROM ducklake_materialized_views('ducklake') WHERE view_name = 'mv1'
+----
+false
+
+statement ok
+INSERT INTO ducklake.base VALUES (999, 1, 50)
+
+query T
+SELECT is_stale FROM ducklake_materialized_views('ducklake') WHERE view_name = 'mv1'
+----
+true
+
+# restore base + MV so later cases keep their expected totals
+statement ok
+DELETE FROM ducklake.base WHERE id = 999
+
+query TTTI
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv1')
+----
+main	mv1	delta	5
+
+# a deletion followed by refresh goes through the incremental path
+statement ok
+DELETE FROM ducklake.base WHERE id = 100
+
+query TTTI
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv1')
+----
+main	mv1	delta	5
+
+query III
+SELECT grp, total, cnt FROM ducklake.mv1 ORDER BY grp
+----
+0	300	4
+1	340	4
+2	380	4
+3	420	4
+4	460	4
+
+# an update followed by incremental refresh stays consistent
+statement ok
+UPDATE ducklake.base SET val = val + 1 WHERE grp = 2
+
+query TTTI
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv1')
+----
+main	mv1	delta	5
+
+query III
+SELECT grp, total, cnt FROM ducklake.mv1 ORDER BY grp
+----
+0	300	4
+1	340	4
+2	384	4
+3	420	4
+4	460	4
+
+# the incremental result equals the direct query
+statement ok
+INSERT INTO ducklake.base VALUES (200, 1, 7), (201, 1, 8)
+
+query TTTI
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv1')
+----
+main	mv1	delta	5
+
+query III
+SELECT grp, total, cnt FROM ducklake.mv1 ORDER BY grp
+----
+0	300	4
+1	355	6
+2	384	4
+3	420	4
+4	460	4
+
+query III
+SELECT grp, sum(val) AS total, count(*) AS cnt FROM ducklake.base GROUP BY grp ORDER BY grp
+----
+0	300	4
+1	355	6
+2	384	4
+3	420	4
+4	460	4
+
+# direct writes into a materialized view are rejected
+statement error
+INSERT INTO ducklake.mv1 VALUES (99, 1, 1)
+----
+Cannot insert into materialized view
+
+statement error
+DELETE FROM ducklake.mv1
+----
+Cannot delete from materialized view
+
+statement error
+UPDATE ducklake.mv1 SET total = 0
+----
+Cannot update materialized view
+
+# refresh of a missing view errors
+statement error
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'missing')
+----
+does not exist
+
+# drop the materialized view through the function
+query TTTI
+SELECT * FROM ducklake_drop_materialized_view('ducklake', view_name := 'mv1')
+----
+main	mv1	dropped	0
+
+statement error
+SELECT * FROM ducklake.mv1
+----
+does not exist
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('ducklake')
+----
+0
+
+# drop via DROP TABLE also removes the sidecar metadata
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv2', query := 'SELECT grp, min(val) AS lo, max(val) AS hi, avg(val) AS mean FROM base GROUP BY grp')
+
+statement ok
+DROP TABLE ducklake.mv2
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('ducklake')
+----
+0
+
+# materialized views survive detach + re-attach and can be refreshed afterwards
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv3', query := 'SELECT grp, sum(val) AS total FROM base WHERE val > 50 GROUP BY grp')
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/ducklake_materialized_view.db' AS ducklake (DATA_PATH '__TEST_DIR__/ducklake_materialized_view_files')
+
+query II
+SELECT grp, total FROM ducklake.mv3 ORDER BY grp
+----
+0	250
+1	330
+2	363
+3	390
+4	420
+
+statement ok
+INSERT INTO ducklake.base VALUES (300, 4, 500)
+
+query TTTI
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv3')
+----
+main	mv3	delta	5
+
+query II
+SELECT grp, total FROM ducklake.mv3 ORDER BY grp
+----
+0	250
+1	330
+2	363
+3	390
+4	920

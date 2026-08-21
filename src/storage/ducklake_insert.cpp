@@ -784,6 +784,7 @@ PhysicalOperator &DuckLakeCatalog::PlanInsert(ClientContext &context, PhysicalPl
 		plan = planner.ResolveDefaultsProjection(op, *plan);
 	}
 	auto &ducklake_table = op.table.Cast<DuckLakeTableEntry>();
+	VerifyNotMaterializedViewBackingTable(context, ducklake_table, "insert into");
 
 	// Sort data according to the table's SET SORTED BY configuration
 	auto sort_data = ducklake_table.GetSortData();

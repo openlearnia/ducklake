@@ -1,0 +1,36 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_stale_read.test
+# description: ducklake_mv_stale_read allow|warn|error when scanning stale MVs
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_stale_read.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_stale_read_files')
+
+statement ok
+CREATE TABLE ducklake.base AS SELECT 1 AS grp, 10 AS val
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv',
+  query := 'SELECT grp, sum(val) AS s FROM base GROUP BY grp')
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 5)
+
+statement ok
+SET ducklake_mv_stale_read = 'error'
+
+statement error
+SELECT * FROM ducklake.mv
+----
+stale
+
+statement ok
+SET ducklake_mv_stale_read = 'allow'
+
+query II
+SELECT grp, s FROM ducklake.mv
+----
+1	10

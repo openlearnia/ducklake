@@ -263,6 +263,7 @@ PhysicalOperator &DuckLakeCatalog::PlanUpdate(ClientContext &context, PhysicalPl
 		throw BinderException("RETURNING clause not yet supported for updates of a DuckLake table");
 	}
 	auto &table = op.table.Cast<DuckLakeTableEntry>();
+	VerifyNotMaterializedViewBackingTable(context, table, "update");
 
 	DuckLakeCopyInput copy_input(context, table);
 	copy_input.virtual_columns = InsertVirtualColumns::WRITE_ROW_ID;

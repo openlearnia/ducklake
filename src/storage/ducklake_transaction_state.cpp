@@ -1400,6 +1400,10 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 		batch_queries += DuckLakeMetadataManager::DropViews(renamed_views, true);
 	}
 
+	if (!dropped_materialized_views.empty()) {
+		batch_queries += DuckLakeMetadataManager::DropMaterializedViews(dropped_materialized_views);
+	}
+
 	if (!dropped_scalar_macros.empty()) {
 		batch_queries += DuckLakeMetadataManager::DropMacros(dropped_scalar_macros);
 	}
@@ -1451,6 +1455,34 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 		batch_queries += DuckLakeMetadataManager::WriteNewSortKeys(existing_catalog.sorts, result.new_sort_keys);
 		new_tables_result = result.new_tables;
 		new_inlined_data_tables_result = result.new_inlined_data_tables;
+	}
+
+	// write new materialized views - must run after new tables so backing table/schema ids are remapped
+	if (!new_materialized_views.empty()) {
+		vector<DuckLakeMaterializedViewInfo> remapped_views;
+		remapped_views.reserve(new_materialized_views.size());
+		for (auto &mv : new_materialized_views) {
+			DuckLakeMaterializedViewInfo remapped = mv;
+			if (remapped.id.IsTransactionLocal()) {
+				auto new_id = TableIndex(commit_state.commit_snapshot.next_catalog_id++);
+				commit_state.committed_tables.emplace(remapped.id, new_id);
+				remapped.id = new_id;
+			} else {
+				commit_state.RemapIdentifier(remapped.id);
+			}
+			commit_state.RemapIdentifier(remapped.schema_id);
+			commit_state.RemapIdentifier(remapped.backing_table_id);
+			for (auto &dep : remapped.dependencies) {
+				commit_state.RemapIdentifier(dep);
+			}
+			remapped_views.push_back(std::move(remapped));
+		}
+		batch_queries += DuckLakeMetadataManager::WriteNewMaterializedViews(remapped_views);
+	}
+
+	// stamp refreshes of persisted materialized views with the commit snapshot
+	if (!refreshed_materialized_views.empty()) {
+		batch_queries += DuckLakeMetadataManager::UpdateMaterializedViewRefreshes(refreshed_materialized_views);
 	}
 
 	if (!new_scalar_macros.empty() || !new_table_macros.empty()) {

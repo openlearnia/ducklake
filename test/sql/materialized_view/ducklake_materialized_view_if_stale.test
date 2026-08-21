@@ -1,0 +1,45 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_if_stale.test
+# description: if_stale refresh flag and REFRESH IF STALE sugar
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_if_stale.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_if_stale_files')
+
+statement ok
+CREATE TABLE ducklake.base AS SELECT i AS id, (i % 3) AS grp, i AS val FROM range(9) t(i)
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv', query := 'SELECT grp, sum(val) AS s FROM base GROUP BY grp')
+
+# fresh → if_stale refresh is skip
+query TTTI
+SELECT schema_name, view_name, refresh_mode, rows_refreshed
+FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv', if_stale := true)
+----
+main	mv	skipped	0
+
+statement ok
+INSERT INTO ducklake.base VALUES (100, 0, 10)
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv', if_stale := true)
+----
+delta
+
+query II
+SELECT grp, s FROM ducklake.mv WHERE grp = 0
+----
+0	19
+
+statement ok
+SET allow_parser_override_extension='STRICT'
+
+# IF STALE sugar when already fresh
+query TTTI
+REFRESH MATERIALIZED VIEW IF STALE ducklake.mv
+----
+main	mv	skipped	0

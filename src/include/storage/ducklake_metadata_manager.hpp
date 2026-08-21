@@ -241,6 +241,13 @@ public:
 	static string WriteNewTables(const vector<DuckLakeTableInfo> &new_tables,
 	                             const vector<DuckLakePath> &resolved_paths);
 	static string WriteNewViews(const vector<DuckLakeViewInfo> &new_views);
+	//! Materialized view metadata. New views insert with begin_snapshot={SNAPSHOT_ID}; refreshes stamp
+	//! last_refreshed_snapshot={SNAPSHOT_ID}; drops end-snapshot the view and its dependency rows.
+	static string WriteNewMaterializedViews(const vector<DuckLakeMaterializedViewInfo> &new_views);
+	static string UpdateMaterializedViewRefreshes(const set<TableIndex> &refreshed_views);
+	static string DropMaterializedViews(const set<TableIndex> &dropped_views);
+	//! Load the materialized view registry (views + dependencies) visible at the given snapshot.
+	vector<DuckLakeMaterializedViewInfo> LoadMaterializedViews(DuckLakeSnapshot snapshot);
 	//! Emits the partition-key diff SQL. Caller supplies the existing partition state (fetched
 	//! via GetCatalogForSnapshot) since the diff is computed against it.
 	static string WriteNewPartitionKeys(const vector<DuckLakePartitionInfo> &existing_partitions,
@@ -366,6 +373,7 @@ public:
 	virtual void MigrateV02(bool allow_failures = false);
 	virtual void MigrateV03(bool allow_failures = false);
 	virtual void MigrateV04();
+	virtual void MigrateV05();
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 

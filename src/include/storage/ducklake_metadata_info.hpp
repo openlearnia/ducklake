@@ -324,6 +324,25 @@ struct DuckLakeViewInfo {
 	vector<DuckLakeTag> tags;
 };
 
+struct DuckLakeMaterializedViewInfo {
+	//! id of the materialized view (allocated from the same catalog-id space as tables/views)
+	TableIndex id;
+	SchemaIndex schema_id;
+	string uuid;
+	string name;
+	string dialect;
+	//! the definition SQL, with the {DUCKLAKE_CATALOG}. placeholder for the attached catalog name
+	string sql;
+	//! the managed table that stores the materialized result
+	TableIndex backing_table_id;
+	//! snapshot the backing table was last refreshed at (invalid if never refreshed)
+	optional_idx last_refreshed_snapshot;
+	//! table ids of the lake tables the definition references
+	vector<TableIndex> dependencies;
+	//! staging-only: write last_refreshed_snapshot as the commit snapshot ({SNAPSHOT_ID} placeholder)
+	bool pending_refresh_stamp = false;
+};
+
 struct DuckLakeTagInfo {
 	idx_t id;
 	string key;

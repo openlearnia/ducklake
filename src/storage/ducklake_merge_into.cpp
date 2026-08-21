@@ -558,6 +558,7 @@ PhysicalOperator &DuckLakeCatalog::PlanMergeInto(ClientContext &context, Physica
 	if (op.return_chunk) {
 		throw NotImplementedException("RETURNING is not implemented for DuckLake yet");
 	}
+	VerifyNotMaterializedViewBackingTable(context, op.table.Cast<DuckLakeTableEntry>(), "merge into");
 	map<MergeActionCondition, vector<unique_ptr<MergeIntoOperator>>> actions;
 
 	// plan the merge into clauses

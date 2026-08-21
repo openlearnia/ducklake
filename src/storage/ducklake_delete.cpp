@@ -684,6 +684,7 @@ PhysicalOperator &DuckLakeCatalog::PlanDelete(ClientContext &context, PhysicalPl
 	if (op.return_chunk) {
 		throw BinderException("RETURNING clause not yet supported for deletion of a DuckLake table");
 	}
+	VerifyNotMaterializedViewBackingTable(context, op.table.Cast<DuckLakeTableEntry>(), "delete from");
 	auto encryption_key = GenerateEncryptionKey(context);
 	vector<idx_t> row_id_indexes;
 	for (idx_t i = 0; i < 3; i++) {

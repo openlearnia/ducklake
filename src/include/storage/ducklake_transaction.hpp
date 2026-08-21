@@ -242,6 +242,14 @@ public:
 	void DropSchema(DuckLakeSchemaEntry &schema);
 	void DropTable(DuckLakeTableEntry &table);
 	void DropView(DuckLakeViewEntry &view);
+	//! Stage a materialized view created in this transaction (flushed after new tables are remapped)
+	void CreateMaterializedView(DuckLakeMaterializedViewInfo info);
+	//! Stage a refresh of a materialized view - stamps last_refreshed_snapshot at commit
+	void RefreshMaterializedView(TableIndex view_id);
+	//! Stage a materialized view drop - end-snapshots the view + dependencies at commit
+	void DropMaterializedView(TableIndex view_id);
+	//! Materialized views created in this transaction (not yet persisted)
+	const vector<DuckLakeMaterializedViewInfo> &GetNewMaterializedViews() const;
 	void DropScalarMacro(DuckLakeScalarMacroEntry &macro);
 	void DropTableMacro(DuckLakeTableMacroEntry &macro);
 	void DropFile(TableIndex table_id, DataFileIndex data_file_id, string path);

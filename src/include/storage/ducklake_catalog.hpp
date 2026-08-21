@@ -15,6 +15,7 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/storage/object_cache.hpp"
 #include "storage/ducklake_catalog_set.hpp"
+#include "storage/ducklake_metadata_info.hpp"
 #include "storage/ducklake_partition_data.hpp"
 #include "storage/ducklake_stats.hpp"
 
@@ -273,6 +274,28 @@ public:
 	//! Invalidate the cached schema entry for a given schema_version.
 	void InvalidateSchemaCache(idx_t schema_version);
 
+	//! Materialized view registry: the persisted views visible at the transaction's snapshot.
+	//! Cached per snapshot id; reloads when the transaction moves to a different snapshot.
+	const vector<DuckLakeMaterializedViewInfo> &GetMaterializedViews(DuckLakeTransaction &transaction);
+	//! Look up a persisted materialized view by backing table id.
+	const DuckLakeMaterializedViewInfo *GetMaterializedViewByBackingTable(DuckLakeTransaction &transaction,
+	                                                                     TableIndex backing_table_id);
+	//! Look up a persisted materialized view by schema + name.
+	const DuckLakeMaterializedViewInfo *GetMaterializedViewByName(DuckLakeTransaction &transaction,
+	                                                              const string &schema_name, const string &view_name);
+	//! Whether the given table id is the backing table of a materialized view (persisted or created this
+	//! transaction) - used to reject direct writes and to hook DROP TABLE cleanup.
+	bool IsMaterializedViewBackingTable(DuckLakeTransaction &transaction, TableIndex table_id);
+	//! Throw when an operation would write directly into a materialized view backing table
+	void VerifyNotMaterializedViewBackingTable(ClientContext &context, DuckLakeTableEntry &table,
+	                                           const char *operation);
+	//! Whether any dependency of the MV changed in (start_snapshot, end_snapshot]
+	bool MaterializedViewDependenciesChanged(DuckLakeTransaction &transaction,
+	                                         const DuckLakeMaterializedViewInfo &mv, idx_t start_snapshot,
+	                                         idx_t end_snapshot);
+	//! Enforce ducklake_mv_stale_read when scanning an MV backing table
+	void VerifyMaterializedViewStaleRead(ClientContext &context, DuckLakeTableEntry &table);
+
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 	unique_ptr<DuckLakeCatalogSet> LoadSchemaForSnapshot(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot);
@@ -319,6 +342,10 @@ private:
 	//! The id of the last committed snapshot, set at FlushChanges on a successful commit
 	mutable mutex commit_lock;
 	optional_idx last_committed_snapshot;
+	//! Materialized view registry cache + the snapshot id it was loaded at
+	mutex materialized_views_lock;
+	optional_idx materialized_views_snapshot;
+	vector<DuckLakeMaterializedViewInfo> materialized_views_cache;
 	//! Optional callback for instrumenting metadata queries
 	QueryCallback query_callback;
 };
