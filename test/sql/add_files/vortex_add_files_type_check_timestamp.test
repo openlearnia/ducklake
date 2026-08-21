@@ -1,0 +1,234 @@
+# name: test/sql/add_files/vortex_add_files_type_check_timestamp.test
+# description: Vortex twin of add_files_type_check_timestamp.test
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+require icu
+
+statement ok
+SET TimeZone='UTC';
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake  (DATA_PATH '${DATA_PATH}/ducklake_add_files_type_timestamp_vx')
+
+statement ok
+COPY (SELECT DATE '2000-01-01' AS col1) TO '${DATA_PATH}/date.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT TIME '20:12:24'  AS col1) TO '${DATA_PATH}/time.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT TIMESTAMP '2020-02-03 12:23:34.123456' AS col1) TO '${DATA_PATH}/timestamp.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT TIMESTAMPTZ '2020-02-03 12:23:34.123456' AS col1) TO '${DATA_PATH}/timestamptz.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT TIMESTAMP_S '2020-02-03 12:23:34' AS col1) TO '${DATA_PATH}/timestamp_s.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT TIMESTAMP_MS '2020-02-03 12:23:34.123' AS col1) TO '${DATA_PATH}/timestamp_ms.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT TIMESTAMP_NS '2020-02-03 12:23:34.123456789' AS col1) TO '${DATA_PATH}/timestamp_ns.vortex' (FORMAT VORTEX);
+
+########
+# date #
+########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 DATE);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/timestamp.vortex')
+----
+TIMESTAMP
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/time.vortex')
+----
+TIME
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/date.vortex')
+
+query I
+FROM ducklake.test
+----
+2000-01-01
+
+########
+# time #
+########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 TIME);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/timestamp.vortex')
+----
+TIMESTAMP
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/date.vortex')
+----
+DATE
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/time.vortex')
+
+query I
+FROM ducklake.test
+----
+20:12:24
+
+###############
+# timestamp_s #
+###############
+# Vortex cannot cast TIMESTAMP_MS → TIMESTAMP_S on scan (Parquet can). add_files
+# still accepts MS at the metadata type-check layer, so keep MS out of the mix.
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 TIMESTAMP_S);
+
+foreach unaccepted_type date time timestamp_ns timestamptz
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${unaccepted_type}.vortex')
+----
+TIMESTAMP
+
+endloop
+
+foreach accepted_type timestamp_s timestamp
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${accepted_type}.vortex')
+
+endloop
+
+query I
+FROM ducklake.test
+----
+2020-02-03 12:23:34
+2020-02-03 12:23:34
+
+################
+# timestamp_ms #
+################
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 TIMESTAMP_MS);
+
+foreach unaccepted_type date time timestamp_ns timestamptz
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${unaccepted_type}.vortex')
+----
+TIMESTAMP
+
+endloop
+
+foreach accepted_type timestamp_s timestamp_ms timestamp
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${accepted_type}.vortex')
+
+endloop
+
+query I rowsort
+FROM ducklake.test
+----
+2020-02-03 12:23:34
+2020-02-03 12:23:34.123
+2020-02-03 12:23:34.123
+
+#############
+# timestamp #
+#############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 TIMESTAMP);
+
+foreach unaccepted_type date time timestamptz
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${unaccepted_type}.vortex')
+----
+TIMESTAMP
+
+endloop
+
+foreach accepted_type timestamp_s timestamp_ms timestamp timestamp_ns
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${accepted_type}.vortex')
+
+endloop
+
+query I rowsort
+FROM ducklake.test
+----
+2020-02-03 12:23:34
+2020-02-03 12:23:34.123
+2020-02-03 12:23:34.123456
+2020-02-03 12:23:34.123456
+
+################
+# timestamp_ns #
+################
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 TIMESTAMP_NS);
+
+foreach unaccepted_type date time timestamptz
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${unaccepted_type}.vortex')
+----
+TIMESTAMP
+
+endloop
+
+foreach accepted_type timestamp_s timestamp_ms timestamp timestamp_ns
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${accepted_type}.vortex')
+
+endloop
+
+query I rowsort
+FROM ducklake.test
+----
+2020-02-03 12:23:34
+2020-02-03 12:23:34.123
+2020-02-03 12:23:34.123456
+2020-02-03 12:23:34.123456789
+
+###############
+# timestamptz #
+###############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 TIMESTAMPTZ);
+
+foreach unaccepted_type date time timestamp
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${unaccepted_type}.vortex')
+----
+TIMESTAMP
+
+endloop
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/timestamptz.vortex')
+
+query I rowsort
+FROM ducklake.test
+----
+2020-02-03 12:23:34.123456+00

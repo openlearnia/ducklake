@@ -1,0 +1,276 @@
+# name: test/sql/add_files/vortex_add_files_type_check_integer.test
+# description: Vortex twin of add_files_type_check_integer.test
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_type_mismatch_vx')
+
+# create a bunch of vortex files with different types
+statement ok
+COPY (SELECT true col1) TO '${DATA_PATH}/bool.vortex' (FORMAT VORTEX);
+
+foreach SIGNED_TYPE tinyint smallint int bigint
+
+statement ok
+COPY (SELECT -1::${SIGNED_TYPE} col1) TO '${DATA_PATH}/${SIGNED_TYPE}.vortex' (FORMAT VORTEX);
+
+endloop
+
+foreach UNSIGNED_TYPE utinyint usmallint uinteger ubigint
+
+statement ok
+COPY (SELECT 42::${UNSIGNED_TYPE} col1) TO '${DATA_PATH}/${UNSIGNED_TYPE}.vortex' (FORMAT VORTEX);
+
+endloop
+
+############
+# booleans #
+############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 BOOLEAN);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int.vortex')
+----
+BOOLEAN
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/bool.vortex')
+
+query I
+FROM ducklake.test
+----
+true
+
+statement ok
+DROP TABLE ducklake.test
+
+############
+# tinyint #
+###########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 TINYINT);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int.vortex')
+----
+TINYINT
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/tinyint.vortex')
+
+query I
+FROM ducklake.test
+----
+-1
+
+############
+# smallint #
+############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 SMALLINT);
+
+foreach UNACCEPTED_TYPE bool int bigint uinteger ubigint
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${UNACCEPTED_TYPE}.vortex')
+----
+SMALLINT
+
+endloop
+
+foreach ACCEPTED_TYPE tinyint smallint utinyint
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${ACCEPTED_TYPE}.vortex')
+
+endloop
+
+query I
+FROM ducklake.test ORDER BY ALL
+----
+-1
+-1
+42
+
+###########
+# integer #
+###########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 INTEGER);
+
+foreach UNACCEPTED_TYPE bool bigint uinteger ubigint
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${UNACCEPTED_TYPE}.vortex')
+----
+Expected
+
+endloop
+
+foreach ACCEPTED_TYPE tinyint smallint int utinyint usmallint
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${ACCEPTED_TYPE}.vortex')
+
+endloop
+
+query I
+FROM ducklake.test ORDER BY ALL
+----
+-1
+-1
+-1
+42
+42
+
+###########
+# bigint #
+###########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 BIGINT);
+
+foreach UNACCEPTED_TYPE bool ubigint
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${UNACCEPTED_TYPE}.vortex')
+----
+Expected
+
+endloop
+
+foreach ACCEPTED_TYPE tinyint smallint int bigint utinyint usmallint uinteger
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${ACCEPTED_TYPE}.vortex')
+
+endloop
+
+query I
+FROM ducklake.test ORDER BY ALL
+----
+-1
+-1
+-1
+-1
+42
+42
+42
+
+#############
+# utinyint #
+############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 UTINYINT);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int.vortex')
+----
+UTINYINT
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/utinyint.vortex')
+
+query I
+FROM ducklake.test
+----
+42
+
+#############
+# usmallint #
+#############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 USMALLINT);
+
+foreach UNACCEPTED_TYPE bool tinyint smallint int bigint uinteger ubigint
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${UNACCEPTED_TYPE}.vortex')
+----
+USMALLINT
+
+endloop
+
+foreach ACCEPTED_TYPE utinyint usmallint
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${ACCEPTED_TYPE}.vortex')
+
+endloop
+
+query I
+FROM ducklake.test ORDER BY ALL
+----
+42
+42
+
+#############
+# uinteger #
+#############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 UINTEGER);
+
+foreach UNACCEPTED_TYPE bool tinyint smallint int bigint ubigint
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${UNACCEPTED_TYPE}.vortex')
+----
+UINTEGER
+
+endloop
+
+foreach ACCEPTED_TYPE utinyint usmallint uinteger
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${ACCEPTED_TYPE}.vortex')
+
+endloop
+
+query I
+FROM ducklake.test ORDER BY ALL
+----
+42
+42
+42
+
+#############
+# ubigint #
+#############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 UBIGINT);
+
+foreach UNACCEPTED_TYPE bool tinyint smallint int bigint
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${UNACCEPTED_TYPE}.vortex')
+----
+UBIGINT
+
+endloop
+
+foreach ACCEPTED_TYPE utinyint usmallint uinteger ubigint
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/${ACCEPTED_TYPE}.vortex')
+
+endloop
+
+query I
+FROM ducklake.test ORDER BY ALL
+----
+42
+42
+42
+42
