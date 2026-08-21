@@ -1,0 +1,108 @@
+# name: test/sql/add_files/vortex_add_files_type_check_nested.test
+# description: Vortex twin of add_files_type_check_nested.test
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_type_nested_vx')
+
+statement ok
+COPY (SELECT [true]::BOOL[] AS col1) TO '${DATA_PATH}/bool_list.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT [42]::INT[] AS col1) TO '${DATA_PATH}/int_list.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT {'list': true} AS col1) TO '${DATA_PATH}/bool_struct.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT {'list': 42::INTEGER} AS col1) TO '${DATA_PATH}/int_struct.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT MAP([true], [false]) AS col1) TO '${DATA_PATH}/bool_map.vortex' (FORMAT VORTEX);
+
+statement ok
+COPY (SELECT MAP([42], [84]) AS col1) TO '${DATA_PATH}/int_map.vortex' (FORMAT VORTEX);
+
+############
+# int list #
+############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 INT[]);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/bool_list.vortex')
+----
+BOOLEAN
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int_struct.vortex')
+----
+STRUCT
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int_list.vortex')
+
+query I
+FROM ducklake.test
+----
+[42]
+
+##############
+# int struct #
+##############
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 STRUCT(list INT));
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/bool_struct.vortex')
+----
+BOOLEAN
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int_list.vortex')
+----
+INTEGER[]
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int_struct.vortex')
+
+query I
+FROM ducklake.test
+----
+{'list': 42}
+
+###########
+# int map #
+###########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 MAP(INT, INT));
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/bool_map.vortex')
+----
+BOOLEAN
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int_list.vortex')
+----
+INTEGER[]
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/int_map.vortex')
+
+query I
+FROM ducklake.test
+----
+{42=84}
