@@ -1,0 +1,150 @@
+# Publish a Grain-facing linux_amd64 ducklake.duckdb_extension (MV + incremental).
+# Parquet-only — does not set DUCKLAKE_VORTEX_EXTENSION_DIR / does not call DuckDB CDN deploy.
+#
+# Grain download:
+#   gh run download <run_id> -n ducklake-linux_amd64-v1.5.5 -R openlearnia/ducklake
+#   # or Release assets:
+#   ducklake-v1.5.5-linux_amd64.duckdb_extension + build-info.json
+#
+# Spec: docs/grain-ducklake-extension-ci-requirements.md (in ducklake-vortex)
+
+name: Grain Extension Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: Create GitHub Release grain-ext-v1.5.5-<shortsha>
+        type: boolean
+        default: true
+  push:
+    branches:
+      - vortex-integration
+    paths:
+      - "src/**"
+      - "test/sql/materialized_view/**"
+      - "extension_config.cmake"
+      - ".github/duckdb-version"
+      - ".github/workflows/GrainExtensionPublish.yml"
+
+concurrency:
+  group: grain-ext-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  get-duckdb-version:
+    name: Get DuckDB version
+    runs-on: ubuntu-latest
+    outputs:
+      duckdb_version: ${{ steps.version.outputs.duckdb_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+      - id: version
+        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
+
+  build-linux-amd64:
+    name: Build linux_amd64 ducklake
+    needs: get-duckdb-version
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
+    with:
+      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
+      ci_tools_version: v1.5-variegata
+      extension_name: ducklake
+      # Focused: Grain lab VPS only. Keep arm64/osx/windows/wasm out of this oven.
+      exclude_archs: >-
+        linux_arm64;linux_amd64_musl;osx_amd64;osx_arm64;windows_amd64;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
+      skip_tests: false
+      build_duckdb_shell: true
+      reduced_ci_mode: disabled
+
+  publish:
+    name: Publish Grain artifact
+    needs: [get-duckdb-version, build-linux-amd64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download distribution artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ducklake-${{ needs.get-duckdb-version.outputs.duckdb_version }}-extension-linux_amd64
+          path: dist/
+
+      - name: Stage Grain package
+        id: stage
+        env:
+          DUCKDB_VERSION: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
+          GIT_SHA: ${{ github.sha }}
+          GIT_REF_NAME: ${{ github.ref_name }}
+          GIT_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p grain-pkg
+          EXT=$(find dist -type f -name 'ducklake.duckdb_extension' | head -n1)
+          if [[ -z "$EXT" ]]; then
+            echo "ducklake.duckdb_extension not found under dist/" >&2
+            find dist -type f | head -50 >&2
+            exit 1
+          fi
+          cp "$EXT" grain-pkg/ducklake.duckdb_extension
+          cp "$EXT" "grain-pkg/ducklake-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
+          SHORT_SHA="${GIT_SHA::7}"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export BUILT_AT
+          python3 -c 'import json,os,pathlib; pathlib.Path("grain-pkg/build-info.json").write_text(json.dumps({"extension":"ducklake","duckdb_version":os.environ["DUCKDB_VERSION"],"platform":"linux_amd64","git_repo":os.environ["GIT_REPO"],"git_ref":os.environ["GIT_REF_NAME"],"git_sha":os.environ["GIT_SHA"],"built_at":os.environ["BUILT_AT"],"features":["materialized_views","delta_refresh","join_incremental","staleness"],"vortex_bundled":False}, indent=2)+"\n")'
+          ls -lh grain-pkg/
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=grain-ext-${DUCKDB_VERSION}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Grain DuckLake extension"
+            echo ""
+            echo "- Artifact: \`ducklake-linux_amd64-${DUCKDB_VERSION}\`"
+            echo "- Platform: \`linux_amd64\`"
+            echo "- DuckDB: \`${DUCKDB_VERSION}\`"
+            echo "- SHA: \`${GIT_SHA}\`"
+            echo "- Vortex bundled: false"
+            echo ""
+            echo '```json'
+            cat grain-pkg/build-info.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Grain Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ducklake-linux_amd64-${{ needs.get-duckdb-version.outputs.duckdb_version }}
+          path: grain-pkg/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.stage.outputs.release_tag }}
+          name: Grain DuckLake ${{ needs.get-duckdb-version.outputs.duckdb_version }} (${{ steps.stage.outputs.short_sha }})
+          body: |
+            linux_amd64 `ducklake` extension for Grain MV lab (Parquet-only, unsigned).
+
+            - DuckDB ABI: `${{ needs.get-duckdb-version.outputs.duckdb_version }}`
+            - Commit: `${{ github.sha }}`
+            - Ref: `${{ github.ref_name }}`
+            - Features: materialized_views, delta_refresh, join_incremental, staleness
+            - Vortex: not bundled
+
+            Grain install:
+            ```bash
+            gh release download ${{ steps.stage.outputs.release_tag }} -R ${{ github.repository }} \
+              -p 'ducklake-*-linux_amd64.duckdb_extension' -p build-info.json
+            # or
+            gh run download -n ducklake-linux_amd64-${{ needs.get-duckdb-version.outputs.duckdb_version }} -R ${{ github.repository }}
+            ```
+            Then set `GRAIN_DUCKLAKE_EXTENSION_PATH=/opt/grain/extensions/ducklake.duckdb_extension`.
+          files: |
+            grain-pkg/ducklake-${{ needs.get-duckdb-version.outputs.duckdb_version }}-linux_amd64.duckdb_extension
+            grain-pkg/build-info.json
+          fail_on_unmatched_files: true
