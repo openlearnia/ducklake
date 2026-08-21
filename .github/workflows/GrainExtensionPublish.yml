@@ -1,10 +1,10 @@
 # Publish a Grain-facing linux_amd64 ducklake.duckdb_extension (MV + incremental).
 # Parquet-only — does not set DUCKLAKE_VORTEX_EXTENSION_DIR / does not call DuckDB CDN deploy.
 #
-# Grain download:
+# Grain / VPS download (public, no token) — Release assets preferred:
+#   https://github.com/openlearnia/ducklake/releases/download/grain-ext-v1.5.5-<sha>/ducklake-v1.5.5-linux_amd64.duckdb_extension
+# Actions artifact (auth required even on public repos):
 #   gh run download <run_id> -n ducklake-linux_amd64-v1.5.5 -R openlearnia/ducklake
-#   # or Release assets:
-#   ducklake-v1.5.5-linux_amd64.duckdb_extension + build-info.json
 #
 # Spec: docs/grain-ducklake-extension-ci-requirements.md (in ducklake-vortex)
 
@@ -122,7 +122,11 @@ jobs:
           if-no-files-found: error
 
       - name: Create GitHub Release
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release }}
+        # Public VPS bootstrap needs Release assets (Actions artifacts require auth).
+        # Mint on every vortex-integration push, and on dispatch when create_release=true.
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/vortex-integration')
+          || (github.event_name == 'workflow_dispatch' && inputs.create_release)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.stage.outputs.release_tag }}
