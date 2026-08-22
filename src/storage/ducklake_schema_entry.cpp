@@ -354,6 +354,12 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::LookupEntry(CatalogTransaction t
 		return nullptr;
 	}
 	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
+	if (catalog_type == CatalogType::TABLE_ENTRY) {
+		auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
+		if (auto backing = duck_catalog.TryResolveMaterializedViewBackingTable(duck_transaction, *this, entry_name)) {
+			return backing;
+		}
+	}
 	//! search in transaction local storage first
 	auto transaction_entry = duck_transaction.GetTransactionLocalEntry(catalog_type, name, entry_name);
 	if (transaction_entry) {

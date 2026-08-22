@@ -130,6 +130,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.stage.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           name: Grain DuckLake ${{ needs.get-duckdb-version.outputs.duckdb_version }} (${{ steps.stage.outputs.short_sha }})
           body: |
             linux_amd64 `ducklake` extension for Grain MV lab (Parquet-only, unsigned).

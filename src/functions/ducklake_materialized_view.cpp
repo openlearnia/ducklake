@@ -762,7 +762,14 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), schema);
 	auto &dl_schema = schema_entry.Cast<DuckLakeSchemaEntry>();
 
-	auto create_info = make_uniq<CreateTableInfo>(schema_entry, view_name);
+	if (ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name)) {
+		throw CatalogException("Materialized view \"%s.%s\" already exists!", schema, view_name);
+	}
+
+	auto mv_uuid = UUID::ToString(UUID::GenerateRandomUUID());
+	auto backing_table_name = DuckLakeUtil::MaterializedViewBackingTableName(mv_uuid);
+
+	auto create_info = make_uniq<CreateTableInfo>(schema_entry, backing_table_name);
 	for (idx_t i = 0; i < bound.types.size(); i++) {
 		create_info->columns.AddColumn(ColumnDefinition(column_names[i], bound.types[i]));
 	}
@@ -770,7 +777,8 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	auto bound_create = table_binder->BindCreateTableInfo(std::move(create_info));
 
 	auto table_uuid = transaction.GenerateUUID();
-	auto table_data_path = dl_schema.DataPath() + ducklake_catalog.GeneratePathFromName(table_uuid, view_name);
+	auto table_data_path =
+	    dl_schema.DataPath() + ducklake_catalog.GeneratePathFromName(table_uuid, backing_table_name);
 	auto entry = dl_schema.CreateTableExtended(ducklake_catalog.GetCatalogTransaction(context), *bound_create,
 	                                           table_uuid, table_data_path);
 	if (!entry) {
@@ -782,7 +790,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	DuckLakeMaterializedViewInfo mv_info;
 	mv_info.id = TableIndex(transaction.GetLocalCatalogId());
 	mv_info.schema_id = dl_schema.GetSchemaId();
-	mv_info.uuid = UUID::ToString(UUID::GenerateRandomUUID());
+	mv_info.uuid = std::move(mv_uuid);
 	mv_info.name = view_name;
 	mv_info.dialect = "duckdb";
 	mv_info.sql = DuckLakeUtil::ReplaceSkippingQuotes(stored_sql, ducklake_catalog.GetName() + ".",

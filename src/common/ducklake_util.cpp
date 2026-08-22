@@ -456,4 +456,9 @@ string DuckLakeUtil::ChunkRowToSQL(DuckLakeMetadataManager &metadata_manager, Cl
 	return result;
 }
 
+string DuckLakeUtil::MaterializedViewBackingTableName(const string &view_uuid) {
+	// Hidden from typical mart/master name collisions; path-safe (no hyphens).
+	return "__ducklake_mv_" + StringUtil::Replace(view_uuid, "-", "_");
+}
+
 } // namespace duckdb

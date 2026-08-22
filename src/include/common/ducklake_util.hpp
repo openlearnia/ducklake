@@ -66,6 +66,9 @@ public:
 	                            idx_t row);
 	//! Throws if any column in the list conflicts with inlined data system columns
 	static void ValidateNoInlinedSystemColumns(const ColumnList &columns, const string &table_name = "");
+
+	//! Internal managed-table name for a materialized view's storage (user-facing name lives in MV metadata).
+	static string MaterializedViewBackingTableName(const string &view_uuid);
 };
 
 } // namespace duckdb
