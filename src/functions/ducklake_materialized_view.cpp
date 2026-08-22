@@ -885,7 +885,10 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	auto mv_uuid = UUID::ToString(UUID::GenerateRandomUUID());
 	auto backing_table_name = DuckLakeUtil::MaterializedViewBackingTableName(mv_uuid);
 
-	auto create_info = make_uniq<CreateTableInfo>(schema_entry, backing_table_name);
+	// The backing table is represented in the DuckDB catalog by the logical MV
+	// name. Its UUID-derived storage path remains private, while standard catalog
+	// discovery exposes the same name that users query.
+	auto create_info = make_uniq<CreateTableInfo>(schema_entry, view_name);
 	for (idx_t i = 0; i < bound.types.size(); i++) {
 		create_info->columns.AddColumn(ColumnDefinition(column_names[i], bound.types[i]));
 	}

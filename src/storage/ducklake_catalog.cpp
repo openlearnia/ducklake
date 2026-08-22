@@ -512,6 +512,10 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 
 	auto schema_set = make_uniq<DuckLakeCatalogSet>(std::move(schema_map));
 	auto &schema_id_map = schema_set->GetSchemaIdMap();
+	map<TableIndex, string> materialized_view_names;
+	for (auto &materialized_view : metadata_manager.LoadMaterializedViews(snapshot)) {
+		materialized_view_names.emplace(materialized_view.backing_table_id, materialized_view.name);
+	}
 	// load the table entries
 	for (auto &table : catalog.tables) {
 		// find the schema for the table
@@ -522,7 +526,16 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			    table.name);
 		}
 		auto &schema_entry = entry->second.get();
-		auto create_table_info = make_uniq<CreateTableInfo>(schema_entry, table.name);
+		// Older DuckLake MV catalogs persisted the UUID-derived backing name in
+		// ducklake_table. Project those entries under their logical MV name when
+		// loading so every snapshot receives the corrected catalog surface without
+		// requiring a metadata rewrite.
+		string catalog_entry_name = table.name;
+		auto materialized_view_name = materialized_view_names.find(table.id);
+		if (materialized_view_name != materialized_view_names.end()) {
+			catalog_entry_name = materialized_view_name->second;
+		}
+		auto create_table_info = make_uniq<CreateTableInfo>(schema_entry, catalog_entry_name);
 		for (auto &tag : table.tags) {
 			if (tag.key == "comment") {
 				create_table_info->comment = tag.value;

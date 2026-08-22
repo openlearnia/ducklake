@@ -18,6 +18,13 @@ SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv1', 
 ----
 main	mv1	full	5
 
+# standard catalog discovery exposes the logical MV name, not its backing table
+query T
+SELECT table_name FROM information_schema.tables WHERE table_catalog = 'ducklake' AND table_schema = 'main' ORDER BY table_name
+----
+base
+mv1
+
 # the materialized view is queryable like a table
 query III
 SELECT grp, total, cnt FROM ducklake.mv1 ORDER BY grp
@@ -206,8 +213,33 @@ SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv3', 
 statement ok
 DETACH ducklake
 
+# simulate a catalog created by the original MV implementation, which stored
+# the UUID-derived backing name in ducklake_table
+statement ok
+ATTACH '__TEST_DIR__/ducklake_materialized_view.db' AS legacy_metadata
+
+statement ok
+UPDATE legacy_metadata.ducklake_table
+SET table_name = '__ducklake_mv_legacy'
+WHERE end_snapshot IS NULL
+  AND table_id = (
+    SELECT backing_table_id
+    FROM legacy_metadata.ducklake_materialized_view
+    WHERE end_snapshot IS NULL AND view_name = 'mv3'
+  )
+
+statement ok
+DETACH legacy_metadata
+
 statement ok
 ATTACH 'ducklake:__TEST_DIR__/ducklake_materialized_view.db' AS ducklake (DATA_PATH '__TEST_DIR__/ducklake_materialized_view_files')
+
+query T
+SELECT table_name FROM information_schema.tables WHERE table_catalog = 'ducklake' AND table_schema = 'main' ORDER BY table_name
+----
+base
+mv3
+other
 
 query II
 SELECT grp, total FROM ducklake.mv3 ORDER BY grp
