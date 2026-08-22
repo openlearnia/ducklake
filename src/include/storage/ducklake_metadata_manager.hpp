@@ -231,6 +231,7 @@ public:
 	static string DropTables(const set<TableIndex> &ids, bool renamed);
 	static string DropViews(const set<TableIndex> &ids, bool renamed);
 	static string DropMacros(const set<MacroIndex> &ids);
+	static string DropProcedures(const set<ProcedureIndex> &ids);
 
 	//! Emits the INSERT for new schemas. Caller supplies resolved paths (one per schema, same order)
 	//! since path resolution depends on the catalog's data_path / separator (instance state).
@@ -308,6 +309,7 @@ public:
 	static string WriteNewDeleteFiles(const vector<DuckLakeDeleteFileInfo> &new_delete_files,
 	                                  const vector<DuckLakePath> &resolved_paths);
 	static string WriteNewMacros(const vector<DuckLakeMacroInfo> &new_macros);
+	static string WriteNewProcedures(const vector<DuckLakeProcedureInfo> &new_procedures);
 
 	virtual vector<DuckLakeColumnMappingInfo> GetColumnMappings(optional_idx start_from);
 	static string WriteNewColumnMappings(const vector<DuckLakeColumnMappingInfo> &new_column_mappings);
@@ -374,6 +376,7 @@ public:
 	virtual void MigrateV03(bool allow_failures = false);
 	virtual void MigrateV04();
 	virtual void MigrateV05();
+	virtual void MigrateV06();
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 

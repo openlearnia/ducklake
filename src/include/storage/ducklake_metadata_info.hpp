@@ -128,6 +128,22 @@ struct DuckLakeMacroInfo {
 	vector<DuckLakeMacroImplementation> implementations;
 };
 
+//! Stored procedure metadata is snapshot-versioned independently from macros.
+struct DuckLakeProcedureParameter {
+	string parameter_name;
+	string parameter_type;
+};
+
+struct DuckLakeProcedureInfo {
+	SchemaIndex schema_id;
+	ProcedureIndex procedure_id;
+	string procedure_name;
+	string language;
+	string body;
+	string return_type;
+	vector<DuckLakeProcedureParameter> parameters;
+};
+
 struct DuckLakeColumnStatsInfo {
 	FieldIndex column_id;
 	string value_count;
@@ -372,6 +388,7 @@ struct DuckLakeCatalogInfo {
 	vector<DuckLakeTableInfo> tables;
 	vector<DuckLakeViewInfo> views;
 	vector<DuckLakeMacroInfo> macros;
+	vector<DuckLakeProcedureInfo> procedures;
 	vector<DuckLakePartitionInfo> partitions;
 	vector<DuckLakeSortInfo> sorts;
 };

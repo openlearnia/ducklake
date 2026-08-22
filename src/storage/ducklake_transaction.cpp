@@ -16,6 +16,7 @@
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_macro_entry.hpp"
+#include "storage/ducklake_procedure_entry.hpp"
 #include "storage/ducklake_schema_entry.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction_changes.hpp"
@@ -737,6 +738,9 @@ const set<MacroIndex> &DuckLakeTransaction::GetDroppedScalarMacros() {
 const set<MacroIndex> &DuckLakeTransaction::GetDroppedTableMacros() {
 	return state->dropped_table_macros;
 }
+const set<ProcedureIndex> &DuckLakeTransaction::GetDroppedProcedures() {
+	return state->dropped_procedures;
+}
 const set<TableIndex> &DuckLakeTransaction::GetRenamedTables() {
 	return state->renamed_tables;
 }
@@ -802,6 +806,8 @@ case_insensitive_map_t<unique_ptr<DuckLakeCatalogSet>> &DuckLakeTransaction::Get
 	case CatalogType::TABLE_MACRO_ENTRY:
 	case CatalogType::TABLE_FUNCTION_ENTRY:
 		return state->new_table_macros;
+	case CatalogType::PROCEDURE_ENTRY:
+		return state->new_procedures;
 	default:
 		throw InternalException("Unsupported catalog type for GetNewMacroMap");
 	}
@@ -900,10 +906,12 @@ TransactionChangeInformation DuckLakeTransaction::GetTransactionChanges() const 
 	auto &dropped_views = state->dropped_views;
 	auto &dropped_scalar_macros = state->dropped_scalar_macros;
 	auto &dropped_table_macros = state->dropped_table_macros;
+	auto &dropped_procedures = state->dropped_procedures;
 	auto &dropped_schemas = state->dropped_schemas;
 	auto &new_schemas = state->new_schemas;
 	auto &new_scalar_macros = state->new_scalar_macros;
 	auto &new_table_macros = state->new_table_macros;
+	auto &new_procedures = state->new_procedures;
 	auto &new_tables = state->new_tables;
 	auto &tables_deleted_from = state->tables_deleted_from;
 	auto &local_changes = state->local_changes;
@@ -920,6 +928,9 @@ TransactionChangeInformation DuckLakeTransaction::GetTransactionChanges() const 
 	}
 	for (auto &dropped_macro_idx : dropped_table_macros) {
 		changes.dropped_table_macros.insert(dropped_macro_idx);
+	}
+	for (auto &dropped_procedure_idx : dropped_procedures) {
+		changes.dropped_procedures.insert(dropped_procedure_idx);
 	}
 	for (auto &entry : dropped_schemas) {
 		changes.dropped_schemas.insert(entry);
@@ -942,6 +953,13 @@ TransactionChangeInformation DuckLakeTransaction::GetTransactionChanges() const 
 			auto &macro = *entry.second;
 			auto &schema = macro.ParentSchema().Cast<DuckLakeSchemaEntry>();
 			changes.created_table_macros[schema.name].insert(macro);
+		}
+	}
+	for (auto &schema_entry : new_procedures) {
+		for (auto &entry : schema_entry.second->GetEntries()) {
+			auto &procedure = *entry.second;
+			auto &schema = procedure.ParentSchema().Cast<DuckLakeSchemaEntry>();
+			changes.created_procedures[schema.name].insert(procedure);
 		}
 	}
 	for (auto &schema_entry : new_tables) {
@@ -1855,6 +1873,10 @@ void DuckLakeTransaction::DropTableMacro(DuckLakeTableMacroEntry &macro) {
 	state->dropped_table_macros.insert(macro.GetIndex());
 }
 
+void DuckLakeTransaction::DropProcedure(DuckLakeProcedureEntry &procedure) {
+	state->dropped_procedures.insert(procedure.GetIndex());
+}
+
 void DuckLakeTransaction::DropFile(TableIndex table_id, DataFileIndex data_file_id, string path) {
 	state->tables_deleted_from.insert(table_id);
 	state->dropped_files.emplace(std::move(path), data_file_id);
@@ -1890,7 +1912,8 @@ void DuckLakeTransaction::DropEntry(CatalogEntry &entry) {
 		DropView(entry.Cast<DuckLakeViewEntry>());
 		break;
 	case CatalogType::MACRO_ENTRY:
-	case CatalogType::TABLE_MACRO_ENTRY: {
+	case CatalogType::TABLE_MACRO_ENTRY:
+	case CatalogType::PROCEDURE_ENTRY: {
 		auto local_entry = GetTransactionLocalEntry(entry.type, entry.ParentSchema().name, entry.name);
 		if (local_entry) {
 			auto &macro_map = GetNewMacroMap(entry.type);
@@ -1904,8 +1927,10 @@ void DuckLakeTransaction::DropEntry(CatalogEntry &entry) {
 			}
 		} else if (entry.type == CatalogType::MACRO_ENTRY) {
 			DropScalarMacro(entry.Cast<DuckLakeScalarMacroEntry>());
-		} else {
+		} else if (entry.type == CatalogType::TABLE_MACRO_ENTRY) {
 			DropTableMacro(entry.Cast<DuckLakeTableMacroEntry>());
+		} else {
+			DropProcedure(entry.Cast<DuckLakeProcedureEntry>());
 		}
 		break;
 	}
@@ -1936,6 +1961,10 @@ bool DuckLakeTransaction::IsDeleted(CatalogEntry &entry) {
 		auto &macro_entry = entry.Cast<DuckLakeTableMacroEntry>();
 		return s.dropped_table_macros.find(macro_entry.GetIndex()) != s.dropped_table_macros.end();
 	}
+	case CatalogType::PROCEDURE_ENTRY: {
+		auto &procedure_entry = entry.Cast<DuckLakeProcedureEntry>();
+		return s.dropped_procedures.find(procedure_entry.GetIndex()) != s.dropped_procedures.end();
+	}
 	case CatalogType::SCHEMA_ENTRY: {
 		auto &schema_entry = entry.Cast<DuckLakeSchemaEntry>();
 		return s.dropped_schemas.find(schema_entry.GetSchemaId()) != s.dropped_schemas.end();
@@ -1957,6 +1986,7 @@ bool DuckLakeTransaction::IsRenamed(CatalogEntry &entry) {
 		return s.renamed_views.find(view_entry.GetViewId()) != s.renamed_views.end();
 	}
 	case CatalogType::MACRO_ENTRY:
+	case CatalogType::PROCEDURE_ENTRY:
 	case CatalogType::SCHEMA_ENTRY:
 	case CatalogType::TABLE_MACRO_ENTRY: {
 		return false;
@@ -2072,7 +2102,8 @@ DuckLakeCatalogSet &DuckLakeTransaction::GetOrCreateTransactionLocalEntries(Cata
 		return result;
 	}
 	case CatalogType::MACRO_ENTRY:
-	case CatalogType::TABLE_MACRO_ENTRY: {
+	case CatalogType::TABLE_MACRO_ENTRY:
+	case CatalogType::PROCEDURE_ENTRY: {
 		auto &macro_map = GetNewMacroMap(catalog_type);
 		auto new_macro_list = make_uniq<DuckLakeCatalogSet>();
 		auto &result = *new_macro_list;
@@ -2117,6 +2148,14 @@ optional_ptr<DuckLakeCatalogSet> DuckLakeTransaction::GetTransactionLocalEntries
 		auto &macro_map = GetNewMacroMap(catalog_type);
 		auto entry = macro_map.find(schema_name);
 		if (entry == macro_map.end()) {
+			return nullptr;
+		}
+		return entry->second;
+	}
+	case CatalogType::PROCEDURE_ENTRY: {
+		auto &procedure_map = state->new_procedures;
+		auto entry = procedure_map.find(schema_name);
+		if (entry == procedure_map.end()) {
 			return nullptr;
 		}
 		return entry->second;

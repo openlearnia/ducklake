@@ -24,8 +24,10 @@ enum class ChangeType {
 	REWRITE_DELETE,
 	CREATED_SCALAR_MACRO,
 	CREATED_TABLE_MACRO,
+	CREATED_PROCEDURE,
 	DROPPED_SCALAR_MACRO,
-	DROPPED_TABLE_MACRO
+	DROPPED_TABLE_MACRO,
+	DROPPED_PROCEDURE
 };
 
 struct ParsedChange {
@@ -49,6 +51,8 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 		return ChangeType::CREATED_SCALAR_MACRO;
 	} else if (StringUtil::CIEquals(change_type_str, "created_table_macro")) {
 		return ChangeType::CREATED_TABLE_MACRO;
+	} else if (StringUtil::CIEquals(change_type_str, "created_procedure")) {
+		return ChangeType::CREATED_PROCEDURE;
 	} else if (StringUtil::CIEquals(change_type_str, "created_schema")) {
 		return ChangeType::CREATED_SCHEMA;
 	} else if (StringUtil::CIEquals(change_type_str, "dropped_schema")) {
@@ -63,6 +67,8 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 		return ChangeType::DROPPED_SCALAR_MACRO;
 	} else if (StringUtil::CIEquals(change_type_str, "dropped_table_macro")) {
 		return ChangeType::DROPPED_TABLE_MACRO;
+	} else if (StringUtil::CIEquals(change_type_str, "dropped_procedure")) {
+		return ChangeType::DROPPED_PROCEDURE;
 	} else if (StringUtil::CIEquals(change_type_str, "altered_table")) {
 		return ChangeType::ALTERED_TABLE;
 	} else if (StringUtil::CIEquals(change_type_str, "altered_view")) {
@@ -155,6 +161,12 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			    make_pair(std::move(catalog_value.name), "table_macro"));
 			break;
 		}
+		case ChangeType::CREATED_PROCEDURE: {
+			auto catalog_value = DuckLakeUtil::ParseCatalogEntry(entry.change_value);
+			result.created_procedures[catalog_value.schema].insert(
+			    make_pair(std::move(catalog_value.name), "procedure"));
+			break;
+		}
 		case ChangeType::CREATED_VIEW: {
 			auto catalog_value = DuckLakeUtil::ParseCatalogEntry(entry.change_value);
 			result.created_tables[catalog_value.schema].insert(make_pair(std::move(catalog_value.name), "view"));
@@ -177,6 +189,9 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			break;
 		case ChangeType::DROPPED_TABLE_MACRO:
 			result.dropped_table_macros.insert(MacroIndex(StringUtil::ToUnsigned(entry.change_value)));
+			break;
+		case ChangeType::DROPPED_PROCEDURE:
+			result.dropped_procedures.insert(ProcedureIndex(StringUtil::ToUnsigned(entry.change_value)));
 			break;
 		case ChangeType::DROPPED_VIEW:
 			result.dropped_views.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));

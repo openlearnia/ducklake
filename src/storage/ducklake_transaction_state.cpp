@@ -9,6 +9,7 @@
 #include "storage/ducklake_commit_state.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
 #include "storage/ducklake_schema_entry.hpp"
+#include "storage/ducklake_procedure_entry.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction_changes.hpp"
 #include "common/ducklake_util.hpp"
@@ -67,7 +68,8 @@ void DuckLakeTransactionState::CleanupFiles() {
 bool DuckLakeTransactionState::SchemaChangesMade() const {
 	return !new_tables.empty() || !dropped_tables.empty() || new_schemas || !dropped_schemas.empty() ||
 	       !dropped_views.empty() || !renamed_views.empty() || !new_scalar_macros.empty() ||
-	       !new_table_macros.empty() || !dropped_scalar_macros.empty() || !dropped_table_macros.empty();
+	       !new_table_macros.empty() || !dropped_scalar_macros.empty() || !dropped_table_macros.empty() ||
+	       !new_procedures.empty() || !dropped_procedures.empty();
 }
 
 namespace {
@@ -156,6 +158,9 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 	for (auto &dropped_idx : changes.dropped_table_macros) {
 		ConflictCheck(dropped_idx, other_changes.dropped_table_macros, "drop macro", "dropped it already");
 	}
+	for (auto &dropped_idx : changes.dropped_procedures) {
+		ConflictCheck(dropped_idx, other_changes.dropped_procedures, "drop procedure", "dropped it already");
+	}
 	// check if we are dropping the same schema as another transaction
 	for (auto &entry : changes.dropped_schemas) {
 		auto &dropped_schema = entry.second.get();
@@ -173,6 +178,7 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 	// check if we are creating the same macro as another transaction
 	ConflictCheck(changes.created_table_macros, other_changes.dropped_schemas, other_changes.created_table_macros);
 	ConflictCheck(changes.created_scalar_macros, other_changes.dropped_schemas, other_changes.created_scalar_macros);
+	ConflictCheck(changes.created_procedures, other_changes.dropped_schemas, other_changes.created_procedures);
 	ConflictCheck(changes.created_tables, other_changes.dropped_schemas, other_changes.created_tables);
 	// check if we are creating the same table as another transaction
 	for (auto &entry : changes.created_tables) {
@@ -363,6 +369,17 @@ string DuckLakeTransactionState::WriteSnapshotChanges(DuckLakeCommitState &commi
 			change_info.changes_made += schema_prefix + KeywordHelper::WriteQuoted(created_macro.get().name, '"');
 		}
 	}
+	for (auto &entry : changes.created_procedures) {
+		auto &schema = entry.first;
+		auto schema_prefix = KeywordHelper::WriteQuoted(schema, '"') + ".";
+		for (auto &created_procedure : entry.second) {
+			if (!change_info.changes_made.empty()) {
+				change_info.changes_made += ",";
+			}
+			change_info.changes_made += "created_procedure:";
+			change_info.changes_made += schema_prefix + KeywordHelper::WriteQuoted(created_procedure.get().name, '"');
+		}
+	}
 
 	for (auto &entry : changes.dropped_scalar_macros) {
 		if (!change_info.changes_made.empty()) {
@@ -377,6 +394,13 @@ string DuckLakeTransactionState::WriteSnapshotChanges(DuckLakeCommitState &commi
 			change_info.changes_made += ",";
 		}
 		change_info.changes_made += "dropped_table_macro:";
+		change_info.changes_made += to_string(entry.index);
+	}
+	for (auto &entry : changes.dropped_procedures) {
+		if (!change_info.changes_made.empty()) {
+			change_info.changes_made += ",";
+		}
+		change_info.changes_made += "dropped_procedure:";
 		change_info.changes_made += to_string(entry.index);
 	}
 
@@ -489,6 +513,26 @@ void GetNewMacroInfo(DuckLakeCommitState &commit_state, reference<CatalogEntry> 
 		new_macro_info.implementations.push_back(std::move(macro_impl));
 	}
 	result.new_macros.push_back(std::move(new_macro_info));
+}
+
+void GetNewProcedureInfo(DuckLakeCommitState &commit_state, reference<CatalogEntry> entry,
+                         NewProcedureInfo &result) {
+	DuckLakeProcedureInfo procedure_info;
+	auto &procedure_entry = entry.get().Cast<DuckLakeProcedureEntry>();
+	auto &ducklake_schema = procedure_entry.schema.Cast<DuckLakeSchemaEntry>();
+	procedure_info.procedure_id = ProcedureIndex(commit_state.commit_snapshot.next_catalog_id++);
+	procedure_info.procedure_name = procedure_entry.name;
+	procedure_info.schema_id = commit_state.GetSchemaId(ducklake_schema);
+	procedure_info.language = procedure_entry.language;
+	procedure_info.body = procedure_entry.body;
+	procedure_info.return_type = DuckLakeTypes::ToString(procedure_entry.return_type);
+	for (idx_t i = 0; i < procedure_entry.parameter_names.size(); i++) {
+		DuckLakeProcedureParameter parameter;
+		parameter.parameter_name = procedure_entry.parameter_names[i];
+		parameter.parameter_type = DuckLakeTypes::ToString(procedure_entry.parameter_types[i]);
+		procedure_info.parameters.push_back(std::move(parameter));
+	}
+	result.new_procedures.push_back(std::move(procedure_info));
 }
 
 static void ConvertNameMapColumn(const DuckLakeNameMapEntry &name_map_entry, MappingIndex map_id, idx_t &column_idx,
@@ -1047,6 +1091,17 @@ NewMacroInfo DuckLakeTransactionState::GetNewMacros(DuckLakeCommitState &commit_
 	return result;
 }
 
+NewProcedureInfo DuckLakeTransactionState::GetNewProcedures(DuckLakeCommitState &commit_state,
+	                                                        TransactionChangeInformation &transaction_changes) {
+	NewProcedureInfo result;
+	for (auto &schema_entry : new_procedures) {
+		for (auto &entry : schema_entry.second->GetEntries()) {
+			GetNewProcedureInfo(commit_state, *entry.second, result);
+		}
+	}
+	return result;
+}
+
 void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state, DuckLakeCatalogSet &catalog_set,
                                                reference<CatalogEntry> table_entry, NewTableInfo &result,
                                                TransactionChangeInformation &transaction_changes) {
@@ -1411,6 +1466,9 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 	if (!dropped_table_macros.empty()) {
 		batch_queries += DuckLakeMetadataManager::DropMacros(dropped_table_macros);
 	}
+	if (!dropped_procedures.empty()) {
+		batch_queries += DuckLakeMetadataManager::DropProcedures(dropped_procedures);
+	}
 	if (!dropped_schemas.empty()) {
 		set<SchemaIndex> dropped_schema_ids;
 		for (auto &entry : dropped_schemas) {
@@ -1488,6 +1546,10 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 	if (!new_scalar_macros.empty() || !new_table_macros.empty()) {
 		auto result = GetNewMacros(commit_state, transaction_changes);
 		batch_queries += DuckLakeMetadataManager::WriteNewMacros(result.new_macros);
+	}
+	if (!new_procedures.empty()) {
+		auto result = GetNewProcedures(commit_state, transaction_changes);
+		batch_queries += DuckLakeMetadataManager::WriteNewProcedures(result.new_procedures);
 	}
 
 	// write new name maps
