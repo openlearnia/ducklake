@@ -1,4 +1,7 @@
 #include "storage/ducklake_scan.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/main/database.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_multi_file_reader.hpp"
 #include "storage/ducklake_multi_file_list.hpp"
@@ -31,10 +34,9 @@ static InsertionOrderPreservingMap<string> DuckLakeFunctionToString(TableFunctio
 	return result;
 }
 
-static InsertionOrderPreservingMap<string> DuckLakeDynamicToString(TableFunctionDynamicToStringInput &input) {
-	InsertionOrderPreservingMap<string> result;
+static void DuckLakeGetMetrics(TableFunctionGetMetricsInput &input) {
 	if (!input.global_state) {
-		return result;
+		return;
 	}
 	auto &gstate = input.global_state->Cast<MultiFileGlobalState>();
 	auto &file_list = gstate.file_list.Cast<DuckLakeMultiFileList>();
@@ -64,12 +66,12 @@ static InsertionOrderPreservingMap<string> DuckLakeDynamicToString(TableFunction
 		}
 	}
 
-	result.insert(make_pair("Total Files Read", std::to_string(data_files_read)));
+	input.operator_metrics.AddExtraInfo("Total Files Read", std::to_string(data_files_read));
 	if (data_files_skipped > 0) {
-		result.insert(make_pair("Total Files Skipped", std::to_string(data_files_skipped)));
+		input.operator_metrics.AddExtraInfo("Total Files Skipped", std::to_string(data_files_skipped));
 	}
 	if (inlined_tables_read > 0) {
-		result.insert(make_pair("Inlined Tables Read", std::to_string(inlined_tables_read)));
+		input.operator_metrics.AddExtraInfo("Inlined Tables Read", std::to_string(inlined_tables_read));
 	}
 
 	// Build filename list showing only actual data files (not inlined data tables)
@@ -85,10 +87,8 @@ static InsertionOrderPreservingMap<string> DuckLakeDynamicToString(TableFunction
 			file_path_names.resize(FILE_NAME_LIST_LIMIT);
 			file_path_names.push_back("...");
 		}
-		auto list_of_files = StringUtil::Join(file_path_names, ", ");
-		result.insert(make_pair("Filename(s)", list_of_files));
+		input.operator_metrics.AddExtraInfo("Filename(s)", StringUtil::Join(file_path_names, ", "));
 	}
-	return result;
 }
 
 unique_ptr<BaseStatistics> DuckLakeStatistics(ClientContext &context, const FunctionData *bind_data,
@@ -98,13 +98,18 @@ unique_ptr<BaseStatistics> DuckLakeStatistics(ClientContext &context, const Func
 	}
 	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
 	auto &file_list = multi_file_data.file_list->Cast<DuckLakeMultiFileList>();
-	if (file_list.HasTransactionLocalData()) {
-		// don't read stats if we have transaction-local inserts
-		// FIXME: we could unify the stats with the global stats
+	if (!file_list.CanUseGlobalStats()) {
 		return nullptr;
 	}
 	auto &table = file_list.GetTable();
 	return table.GetStatistics(context, column_index);
+}
+
+unique_ptr<BaseStatistics> DuckLakeStatisticsExtended(ClientContext &context, TableFunctionGetStatisticsInput &input) {
+	if (input.column_index.IsVirtualColumn()) {
+		return nullptr;
+	}
+	return DuckLakeStatistics(context, input.bind_data.get(), input.column_index.GetPrimaryIndex());
 }
 
 BindInfo DuckLakeBindInfo(const optional_ptr<FunctionData> bind_data) {
@@ -148,8 +153,14 @@ struct DuckLakePartitionRowGroup : public PartitionRowGroup {
 		return table.GetStatistics(context, storage_index.GetPrimaryIndex());
 	}
 
-	bool MinMaxIsExact(const BaseStatistics &stats, const StorageIndex &storage_index) override {
+	bool MinMaxIsExact(const StorageIndex &storage_index) override {
 		return min_max_exact;
+	}
+
+	// DuckLakeGetPartitionStats bails out when the transaction has local changes, so
+	// any constructed row group only ever describes durably committed data.
+	bool HasPendingWrites() override {
+		return false;
 	}
 };
 
@@ -161,8 +172,7 @@ vector<PartitionStatistics> DuckLakeGetPartitionStats(ClientContext &context, Ge
 	}
 	auto &func_info = input.table_function.function_info->Cast<DuckLakeFunctionInfo>();
 
-	// Only use partition stats for regular table scans
-	if (func_info.scan_type != DuckLakeScanType::SCAN_TABLE) {
+	if (!func_info.CanUseGlobalStats()) {
 		return result;
 	}
 
@@ -172,17 +182,6 @@ vector<PartitionStatistics> DuckLakeGetPartitionStats(ClientContext &context, Ge
 	auto transaction = func_info.GetTransaction();
 
 	auto table_id = table.GetTableId();
-
-	// Check if this is a time travel query - if so, fall back to scanning
-	// After merge_adjacent_files, multiple files are merged into one with a combined record_count.
-	// The merged file contains an embedded snapshot_id column for time travel filtering,
-	// but the metadata record_count represents ALL rows, not per-snapshot counts.
-	// Only a full scan can filter by snapshot_id to get the correct historical count.
-	// Time travel can occur via: (1) per-query AT clause, or (2) catalog attached at historical snapshot
-	auto current_snapshot = transaction->GetSnapshot();
-	if (func_info.snapshot.snapshot_id != current_snapshot.snapshot_id || transaction->GetCatalog().CatalogSnapshot()) {
-		return result;
-	}
 
 	// Check if this is a transaction-local table (no committed stats)
 	if (table.IsTransactionLocal()) {
@@ -232,6 +231,7 @@ TableFunction DuckLakeFunctions::GetDuckLakeScanFunction(DatabaseInstance &insta
 	}
 
 	function.statistics = DuckLakeStatistics;
+	function.statistics_extended = DuckLakeStatisticsExtended;
 	function.get_bind_info = DuckLakeBindInfo;
 	function.get_virtual_columns = DuckLakeVirtualColumns;
 	function.get_row_id_columns = DuckLakeGetRowIdColumn;
@@ -241,9 +241,9 @@ TableFunction DuckLakeFunctions::GetDuckLakeScanFunction(DatabaseInstance &insta
 	function.deserialize = DuckLakeScanDeserialize;
 
 	function.to_string = DuckLakeFunctionToString;
-	function.dynamic_to_string = DuckLakeDynamicToString;
+	function.get_metrics = DuckLakeGetMetrics;
 
-	function.name = "ducklake_scan";
+	function.SetName("ducklake_scan");
 	return function;
 }
 
@@ -255,9 +255,9 @@ DuckLakeFunctionInfo::DuckLakeFunctionInfo(DuckLakeTableEntry &table, DuckLakeTr
 shared_ptr<DuckLakeFunctionInfo>
 DuckLakeFunctionInfo::Create(DuckLakeTableEntry &table, DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot) {
 	auto result = make_shared_ptr<DuckLakeFunctionInfo>(table, transaction, snapshot);
-	result->table_name = table.name;
+	result->table_name = table.name.GetIdentifierName();
 	for (auto &col : table.GetColumns().Logical()) {
-		result->column_names.push_back(col.Name());
+		result->column_names.push_back(col.Name().GetIdentifierName());
 		result->column_types.push_back(col.Type());
 	}
 	result->table_id = table.GetTableId();
@@ -271,6 +271,15 @@ shared_ptr<DuckLakeTransaction> DuckLakeFunctionInfo::GetTransaction() {
 		    "Scanning a DuckLake table after the transaction has ended - this use case is not yet supported");
 	}
 	return result;
+}
+
+bool DuckLakeFunctionInfo::CanUseGlobalStats() {
+	if (scan_type != DuckLakeScanType::SCAN_TABLE) {
+		return false;
+	}
+	auto active_transaction = GetTransaction();
+	return snapshot.snapshot_id == active_transaction->GetSnapshot().snapshot_id &&
+	       !active_transaction->GetCatalog().CatalogSnapshot();
 }
 
 void DuckLakeScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
@@ -300,12 +309,12 @@ unique_ptr<FunctionData> DuckLakeScanDeserialize(Deserializer &deserializer, Tab
 	deserializer.ReadObject(103, "snapshot", [&](Deserializer &obj) { snapshot = DuckLakeSnapshot::Deserialize(obj); });
 	auto scan_type = static_cast<DuckLakeScanType>(deserializer.ReadPropertyWithExplicitDefault<uint8_t>(
 	    104, "scan_type", static_cast<uint8_t>(DuckLakeScanType::SCAN_TABLE)));
-	auto has_start_snapshot = deserializer.ReadPropertyWithExplicitDefault<bool>(105, "has_start_snapshot", false);
+	bool has_start_snapshot = deserializer.ReadPropertyWithExplicitDefault<bool>(105, "has_start_snapshot", false);
 	unique_ptr<DuckLakeSnapshot> start_snapshot;
 	if (has_start_snapshot) {
-		deserializer.ReadObject(106, "start_snapshot", [&](Deserializer &obj) {
-			start_snapshot = make_uniq<DuckLakeSnapshot>(DuckLakeSnapshot::Deserialize(obj));
-		});
+		start_snapshot = make_uniq<DuckLakeSnapshot>();
+		deserializer.ReadObject(106, "start_snapshot",
+		                        [&](Deserializer &obj) { *start_snapshot = DuckLakeSnapshot::Deserialize(obj); });
 	}
 	auto file_format = deserializer.ReadPropertyWithExplicitDefault<string>(107, "file_format", "parquet");
 
@@ -315,17 +324,18 @@ unique_ptr<FunctionData> DuckLakeScanDeserialize(Deserializer &deserializer, Tab
 	}
 
 	// Look up the DuckLake catalog and table
-	auto &catalog = Catalog::GetCatalog(context, catalog_name);
+	auto &catalog = Catalog::GetCatalog(context, Identifier(catalog_name));
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 
-	auto &table_entry =
-	    Catalog::GetEntry<TableCatalogEntry>(context, catalog_name, schema_name, table_name).Cast<DuckLakeTableEntry>();
+	auto &table_entry = Catalog::GetEntry<TableCatalogEntry>(context, Identifier(catalog_name), Identifier(schema_name),
+	                                                         Identifier(table_name))
+	                        .Cast<DuckLakeTableEntry>();
 
-	auto function_info = DuckLakeFunctionInfo::Create(table_entry, transaction, snapshot);
-	function_info->scan_type = scan_type;
-	function_info->file_format = file_format;
-	function_info->start_snapshot = std::move(start_snapshot);
-	function.function_info = std::move(function_info);
+	function.function_info = DuckLakeFunctionInfo::Create(table_entry, transaction, snapshot);
+	auto &func_info = function.function_info->Cast<DuckLakeFunctionInfo>();
+	func_info.scan_type = scan_type;
+	func_info.file_format = file_format;
+	func_info.start_snapshot = std::move(start_snapshot);
 
 	return DuckLakeFunctions::BindDuckLakeScan(context, function);
 }

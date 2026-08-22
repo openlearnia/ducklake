@@ -30,7 +30,7 @@ ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFil
 	children.push_back(Value(file.path));
 	named_parameter_map_t named_params;
 	vector<LogicalType> input_types;
-	vector<string> input_names;
+	vector<Identifier> input_names;
 
 	// ducklake-managed paths may contain incidental key=value segments
 	named_params["hive_partitioning"] = Value::BOOLEAN(false);
@@ -43,7 +43,7 @@ ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFil
 
 	TableFunctionRef empty;
 	TableFunction dummy_table_function;
-	dummy_table_function.name = "ParquetFileScanner";
+	dummy_table_function.SetName("ParquetFileScanner");
 
 	if (multi_file_reader_creator_p) {
 		dummy_table_function.get_multi_file_reader = multi_file_reader_creator_p;
@@ -62,7 +62,7 @@ const vector<LogicalType> &ParquetFileScanner::GetTypes() const {
 	return return_types;
 }
 
-const vector<string> &ParquetFileScanner::GetNames() const {
+const vector<Identifier> &ParquetFileScanner::GetNames() const {
 	return return_names;
 }
 

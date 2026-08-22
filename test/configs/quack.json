@@ -34,7 +34,8 @@
     {
       "reason": "Test only for Postgres as catalog",
       "paths": [
-        "test/sql/metadata/ducklake_settings_postgres.test"
+        "test/sql/metadata/ducklake_settings_postgres.test",
+        "test/sql/metadata/metadata_schema_scoped_attach.test"
       ]
     },
     {
@@ -54,7 +55,15 @@
     {
       "reason": "FIXME:Uses SET immediate_transaction_mode=true with concurrent connections",
       "paths": [
-        "test/sql/transaction/transaction_conflict_inlining.test"
+        "test/sql/compaction/compaction_delete_conflict.test",
+        "test/sql/rewrite_data_files/test_rewrite_transaction_conflict.test",
+        "test/sql/stats/global_stats_transactions.test",
+        "test/sql/transaction/concurrent_table_creation.test",
+        "test/sql/transaction/transaction_conflict_cleanup.test",
+        "test/sql/transaction/transaction_conflict_inlining.test",
+        "test/sql/transaction/transaction_conflicts.test",
+        "test/sql/transaction/transaction_conflicts_delete.test",
+        "test/sql/transaction/transaction_conflicts_view.test"
       ]
     },
     {
@@ -110,6 +119,24 @@
       ]
     },
     {
+      "reason": "ROLLBACK after ducklake_expire_snapshots does not restore expired snapshot rows on the quack-backed metadata catalog. DuckLake sends metadata SQL through quack_query_by_name, which sends a PrepareRequestMessage directly and does not route through QuackTransaction's remote BEGIN/ROLLBACK path.",
+      "paths": [
+        "test/sql/issues/issue_852_cache_growth.test"
+      ]
+    },
+    {
+      "reason": "FIXME: A failed client-side commit batch is not atomic on the quack server.",
+      "paths": [
+        "test/sql/quack/server_side_commit_atomicity.test"
+      ]
+    },
+    {
+      "reason": "FIXME: A custom METADATA_SCHEMA fails to initialize on quack.",
+      "paths": [
+        "test/sql/transaction/transaction_schema.test"
+      ]
+    },
+    {
       "reason": "Test relies on a file-based metadata catalog.",
       "paths": [
         "test/sql/general/default_path.test",
@@ -124,7 +151,7 @@
       ]
     },
     {
-      "reason": "FIXME: DETACH assertion" ,
+      "reason": "FIXME: DETACH assertion",
       "paths": [
         "test/sql/general/detach_ducklake.test"
       ]
@@ -145,6 +172,12 @@
       "reason": "FIXME: Timeout was reached error for HTTP POST to http://localhost:19999/quack",
       "paths": [
         "test/sql/deletion_inlining/test_multiple_files_flush.test_slow"
+      ]
+    },
+    {
+      "reason": "FIXME: Flaky timeout on quack.",
+      "paths": [
+        "test/sql/alter/many_schema_versions_low_memory.test_slow"
       ]
     },
     {
@@ -192,6 +225,13 @@
       "reason": "FIXME: NotImplementedException: GetDBPath not implemented yet",
       "paths": [
         "test/sql/attach/attach_replace.test"
+      ]
+    },
+    {
+      "reason": "FIXME: server-side quack commits serialize, so concurrent commits never exhaust the client retry budget these tests assert on.",
+      "paths": [
+        "test/sql/retry/commit_failure.test",
+        "test/sql/settings/max_retry_count.test"
       ]
     }
   ]

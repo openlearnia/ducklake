@@ -6,12 +6,12 @@ require ducklake
 
 require parquet
 
-test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
 
-test-env DATA_PATH __TEST_DIR__
+test-env DATA_PATH {TEST_DIR}
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/expire_snapshots_invalid_params', METADATA_CATALOG 'metadata')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/expire_snapshots_invalid_params', METADATA_CATALOG 'metadata')
 
 # Create table and make multiple snapshots
 statement ok
@@ -36,3 +36,13 @@ statement error
 SELECT COUNT(*) FROM ducklake_expire_snapshots('ducklake', dry_run => true, versions => [1, 2], older_than => NOW())
 ----
 cannot specify both 'versions' and 'older_than'
+
+statement error
+SELECT COUNT(*) FROM ducklake_expire_snapshots('ducklake', dry_run => NULL, versions => [1, 2])
+----
+dry_run option must be a non-null boolean
+
+statement error
+SELECT COUNT(*) FROM ducklake_expire_snapshots('ducklake', older_than => NULL, dry_run => true)
+----
+older_than option must be a non-null timestamp

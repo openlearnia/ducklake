@@ -6,17 +6,17 @@ require ducklake
 
 require parquet
 
-test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
 
-test-env DATA_PATH __TEST_DIR__
+test-env DATA_PATH {TEST_DIR}
 
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_compaction_mix_files', METADATA_CATALOG 'metadata')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_compaction_mix_files', METADATA_CATALOG 'metadata')
 
 # set target file size very small
 statement ok
-CALL ducklake.set_option('target_file_size', '2KB');
+CALL ducklake.set_option('target_file_size', '4KB');
 
 # snapshot 1
 statement ok
@@ -79,22 +79,22 @@ SELECT rowid, * FROM ducklake.tbl WHERE id < 10 ORDER BY ALL
 
 # we should have 7 files now
 query I
-SELECT COUNT(*) FROM GLOB('${DATA_PATH}/ducklake_compaction_mix_files/**/*.parquet')
+SELECT COUNT(*) FROM GLOB('{DATA_PATH}/ducklake_compaction_mix_files/**/*.parquet')
 ----
 7
 
 # now compact and cleanup
-query II
-SELECT table_name, files_created FROM ducklake_merge_adjacent_files('ducklake')
+query III
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake')
 ----
-tbl	1
+tbl	5	1
 
 statement ok
 CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true);
 
 # we should have fewer files now (2 large files + 1 merged small file)
 query I
-SELECT COUNT(*) < 7 FROM GLOB('${DATA_PATH}/ducklake_compaction_mix_files/**/*.parquet')
+SELECT COUNT(*) < 7 FROM GLOB('{DATA_PATH}/ducklake_compaction_mix_files/**/*.parquet')
 ----
 true
 

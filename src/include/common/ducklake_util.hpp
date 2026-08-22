@@ -10,6 +10,7 @@
 
 #include "common/index.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -20,7 +21,7 @@ class ColumnList;
 class DuckLakeMetadataManager;
 class FileSystem;
 class TableFilter;
-class DynamicFilter;
+struct DynamicFilterData;
 
 struct ParsedCatalogEntry {
 	string schema;
@@ -33,6 +34,7 @@ public:
 	static string ToQuotedList(const vector<string> &input, char list_separator = ',');
 	static vector<string> ParseQuotedList(const string &input, char list_separator = ',');
 	static string SQLIdentifierToString(const string &text);
+	static string SQLIdentifierToString(const Identifier &identifier);
 	static string SQLLiteralToString(const string &text);
 	static string StatsToString(const string &text);
 	static string ValueToSQL(DuckLakeMetadataManager &metadata_manager, ClientContext &context, const Value &val);
@@ -40,7 +42,7 @@ public:
 	static ParsedCatalogEntry ParseCatalogEntry(const string &input);
 	static string JoinPath(FileSystem &fs, const string &a, const string &b);
 
-	static DynamicFilter *GetOptionalDynamicFilter(const TableFilter &filter);
+	static shared_ptr<DynamicFilterData> GetOptionalDynamicFilterData(const TableFilter &filter);
 
 	//! Create the data path directory if it does not yet exist
 	static void EnsureDirectoryExists(FileSystem &fs, const string &data_path);
@@ -66,6 +68,10 @@ public:
 	                            idx_t row);
 	//! Throws if any column in the list conflicts with inlined data system columns
 	static void ValidateNoInlinedSystemColumns(const ColumnList &columns, const string &table_name = "");
+
+	//! Copy extension-registered settings from one context onto another. Core engine settings
+	//! are not copied.
+	static void CopyExtensionSettings(ClientContext &from, ClientContext &to);
 };
 
 } // namespace duckdb

@@ -6,12 +6,12 @@ require ducklake
 
 require parquet
 
-test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
 
-test-env DATA_PATH __TEST_DIR__
+test-env DATA_PATH {TEST_DIR}
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/repro_partition_retry/', METADATA_CATALOG 'metadata', DATA_INLINING_ROW_LIMIT 0);
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/repro_partition_retry/', METADATA_CATALOG 'metadata', DATA_INLINING_ROW_LIMIT 0);
 
 statement ok
 USE ducklake;
@@ -26,7 +26,7 @@ COPY (
     SELECT 2 AS id, 'google_ads_data_hub' AS source, 20 AS value
     UNION ALL
     SELECT 3 AS id, 'bing' AS source, 30 AS value
-) TO '${DATA_PATH}/repro_slice.parquet' (FORMAT parquet);
+) TO '{DATA_PATH}/repro_slice.parquet' (FORMAT parquet);
 
 statement ok con1
 USE ducklake;
@@ -38,7 +38,7 @@ statement ok con1
 BEGIN;
 
 statement ok con1
-CREATE TABLE first_write AS SELECT * FROM read_parquet('${DATA_PATH}/repro_slice.parquet') LIMIT 0;
+CREATE TABLE first_write AS SELECT * FROM read_parquet('{DATA_PATH}/repro_slice.parquet') LIMIT 0;
 
 statement ok con1
 ALTER TABLE first_write SET PARTITIONED BY (source);
@@ -49,7 +49,7 @@ DELETE FROM first_write WHERE source IN ('google_ads_data_hub');
 0
 
 statement ok con1
-INSERT INTO first_write BY NAME SELECT * FROM read_parquet('${DATA_PATH}/repro_slice.parquet');
+INSERT INTO first_write BY NAME SELECT * FROM read_parquet('{DATA_PATH}/repro_slice.parquet');
 
 # concurrent unrelated commit forces con1's first commit attempt to fail retryably
 statement ok con2
@@ -95,7 +95,7 @@ statement ok con1
 ALTER TABLE first_write SET PARTITIONED BY (id);
 
 statement ok con1
-INSERT INTO first_write BY NAME SELECT * FROM read_parquet('${DATA_PATH}/repro_slice.parquet');
+INSERT INTO first_write BY NAME SELECT * FROM read_parquet('{DATA_PATH}/repro_slice.parquet');
 
 statement ok con2
 INSERT INTO unrelated_table VALUES (1);

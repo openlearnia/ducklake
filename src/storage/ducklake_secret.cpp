@@ -10,7 +10,7 @@ unique_ptr<BaseSecret> DuckLakeSecret::CreateDuckLakeSecretFunction(ClientContex
 		throw InvalidInputException("metadata_path must be defined when creating a DuckLake secret");
 	}
 	for (const auto &named_param : input.options) {
-		result->secret_map[named_param.first] = named_param.second;
+		result->secret_map[Identifier(named_param.first)] = named_param.second;
 	}
 	return std::move(result);
 }
@@ -45,21 +45,14 @@ CreateSecretFunction DuckLakeSecret::GetFunction() {
 	function.named_parameters["metadata_path"] = LogicalType::VARCHAR;
 	function.named_parameters["metadata_parameters"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
 	function.named_parameters["encrypted"] = LogicalType::BOOLEAN;
+	function.named_parameters["ducklake_version"] = LogicalType::VARCHAR;
 	return function;
 }
 
 unique_ptr<SecretEntry> DuckLakeSecret::GetSecret(ClientContext &context, const string &secret_name) {
 	auto &secret_manager = SecretManager::Get(context);
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	// FIXME: this should be adjusted once the `GetSecretByName` API supports this use case
-	auto secret_entry = secret_manager.GetSecretByName(transaction, secret_name, "memory");
-	if (secret_entry) {
-		return secret_entry;
-	}
-	secret_entry = secret_manager.GetSecretByName(transaction, secret_name, "local_file");
-	if (secret_entry) {
-		return secret_entry;
-	}
-	return nullptr;
+	// omitting the storage searches all registered secret storages, including extension-registered ones
+	return secret_manager.GetSecretByName(transaction, secret_name);
 }
 } // namespace duckdb
