@@ -76,7 +76,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	};
 	config.AddExtensionOption("ducklake_mv_stale_read",
 	                          "Behavior when querying a stale DuckLake materialized view: allow, warn, or error",
-	                          LogicalType::VARCHAR, Value("allow"), set_mv_stale_read, SetScope::GLOBAL);
+	                          LogicalType::VARCHAR, Value("allow"), set_mv_stale_read, SetScope::SESSION);
 
 	DuckLakeSnapshotsFunction snapshots;
 	loader.RegisterFunction(snapshots);

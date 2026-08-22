@@ -28,7 +28,7 @@ INSERT INTO ducklake.base VALUES (100, 0, 10)
 query T
 SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv', if_stale := true)
 ----
-delta
+incremental
 
 query II
 SELECT grp, s FROM ducklake.mv WHERE grp = 0

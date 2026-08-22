@@ -1,0 +1,63 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_setop_dependencies.test
+# description: full-mode set-operation definitions track every lake dependency exactly
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_setop_dependencies.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_setop_dependencies_files')
+
+statement ok
+CREATE TABLE ducklake.left_base(id INTEGER)
+
+statement ok
+CREATE TABLE ducklake.right_base(id INTEGER)
+
+statement ok
+CREATE TABLE ducklake.unrelated(id INTEGER)
+
+statement ok
+INSERT INTO ducklake.left_base VALUES (1)
+
+statement ok
+INSERT INTO ducklake.right_base VALUES (2)
+
+query I
+SELECT refresh_mode FROM ducklake_create_materialized_view('ducklake', view_name := 'setop_mv', query := 'SELECT id FROM left_base UNION ALL SELECT id FROM right_base')
+----
+full
+
+statement ok
+INSERT INTO ducklake.unrelated VALUES (99)
+
+query I
+SELECT is_stale FROM ducklake_materialized_views('ducklake') WHERE view_name = 'setop_mv'
+----
+false
+
+query I
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'setop_mv')
+----
+skipped
+
+statement ok
+INSERT INTO ducklake.right_base VALUES (3)
+
+query I
+SELECT is_stale FROM ducklake_materialized_views('ducklake') WHERE view_name = 'setop_mv'
+----
+true
+
+query I
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'setop_mv')
+----
+full
+
+query I rowsort
+SELECT id FROM ducklake.setop_mv
+----
+1
+2
+3

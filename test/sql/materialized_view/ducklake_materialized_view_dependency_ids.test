@@ -1,0 +1,62 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_dependency_ids.test
+# description: staleness matches complete dependency table ids rather than string prefixes
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_dependency_ids.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_dependency_ids_files')
+
+statement ok
+CREATE TABLE ducklake.base AS SELECT 1 AS grp, 10 AS val
+
+query I
+SELECT table_id FROM ducklake_table_info('ducklake') WHERE table_name = 'base'
+----
+1
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv', query := 'SELECT grp, sum(val) AS total FROM base GROUP BY grp')
+
+# The MV backing table and sidecar consume ids 2 and 3. Create unrelated tables through id 10.
+statement ok
+CREATE TABLE ducklake.unrelated_3(i INTEGER)
+
+statement ok
+CREATE TABLE ducklake.unrelated_4(i INTEGER)
+
+statement ok
+CREATE TABLE ducklake.unrelated_5(i INTEGER)
+
+statement ok
+CREATE TABLE ducklake.unrelated_6(i INTEGER)
+
+statement ok
+CREATE TABLE ducklake.unrelated_7(i INTEGER)
+
+statement ok
+CREATE TABLE ducklake.unrelated_8(i INTEGER)
+
+statement ok
+CREATE TABLE ducklake.unrelated_9(i INTEGER)
+
+query I
+SELECT table_id FROM ducklake_table_info('ducklake') WHERE table_name = 'unrelated_9'
+----
+10
+
+statement ok
+INSERT INTO ducklake.unrelated_9 VALUES (42)
+
+# "inserted_into_table:10" must not match dependency id 1.
+query T
+SELECT is_stale FROM ducklake_materialized_views('ducklake') WHERE view_name = 'mv'
+----
+false
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+----
+skipped

@@ -16,6 +16,7 @@
 #include "storage/ducklake_schema_entry.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
+#include "storage/ducklake_transaction_changes.hpp"
 #include "storage/ducklake_transaction_manager.hpp"
 #include "storage/ducklake_view_entry.hpp"
 #include "duckdb/main/database_path_and_type.hpp"
@@ -1126,7 +1127,7 @@ ObjectCache &DuckLakeCatalog::GetObjectCacheInstance() {
 	return GetDatabase().GetObjectCache();
 }
 
-const vector<DuckLakeMaterializedViewInfo> &DuckLakeCatalog::GetMaterializedViews(DuckLakeTransaction &transaction) {
+vector<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViews(DuckLakeTransaction &transaction) {
 	lock_guard<mutex> guard(materialized_views_lock);
 	auto snapshot = transaction.GetSnapshot();
 	if (!materialized_views_snapshot.IsValid() ||
@@ -1137,12 +1138,12 @@ const vector<DuckLakeMaterializedViewInfo> &DuckLakeCatalog::GetMaterializedView
 	return materialized_views_cache;
 }
 
-const DuckLakeMaterializedViewInfo *DuckLakeCatalog::GetMaterializedViewByBackingTable(
+unique_ptr<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViewByBackingTable(
     DuckLakeTransaction &transaction, TableIndex backing_table_id) {
-	auto &views = GetMaterializedViews(transaction);
+	auto views = GetMaterializedViews(transaction);
 	for (auto &mv : views) {
 		if (mv.backing_table_id == backing_table_id) {
-			return &mv;
+			return make_uniq<DuckLakeMaterializedViewInfo>(mv);
 		}
 	}
 	return nullptr;
@@ -1150,7 +1151,7 @@ const DuckLakeMaterializedViewInfo *DuckLakeCatalog::GetMaterializedViewByBackin
 
 optional_ptr<CatalogEntry> DuckLakeCatalog::TryResolveMaterializedViewBackingTable(
     DuckLakeTransaction &transaction, const DuckLakeSchemaEntry &schema, const string &view_name) {
-	auto *mv = GetMaterializedViewByName(transaction, schema.name, view_name);
+	auto mv = GetMaterializedViewByName(transaction, schema.name, view_name);
 	if (!mv) {
 		return nullptr;
 	}
@@ -1160,10 +1161,9 @@ optional_ptr<CatalogEntry> DuckLakeCatalog::TryResolveMaterializedViewBackingTab
 	return GetEntryById(transaction, transaction.GetSnapshot(), mv->backing_table_id);
 }
 
-const DuckLakeMaterializedViewInfo *DuckLakeCatalog::GetMaterializedViewByName(DuckLakeTransaction &transaction,
-                                                                               const string &schema_name,
-                                                                               const string &view_name) {
-	auto &views = GetMaterializedViews(transaction);
+unique_ptr<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViewByName(
+    DuckLakeTransaction &transaction, const string &schema_name, const string &view_name) {
+	auto views = GetMaterializedViews(transaction);
 	if (views.empty()) {
 		return nullptr;
 	}
@@ -1173,7 +1173,7 @@ const DuckLakeMaterializedViewInfo *DuckLakeCatalog::GetMaterializedViewByName(D
 	SchemaIndex schema_id;
 	bool found_schema = false;
 	for (auto &entry : schema_set.GetSchemaIdMap()) {
-		if (entry.second.get().name == schema_name) {
+		if (StringUtil::CIEquals(entry.second.get().name, schema_name)) {
 			schema_id = entry.first;
 			found_schema = true;
 			break;
@@ -1183,8 +1183,8 @@ const DuckLakeMaterializedViewInfo *DuckLakeCatalog::GetMaterializedViewByName(D
 		return nullptr;
 	}
 	for (auto &mv : views) {
-		if (mv.schema_id == schema_id && mv.name == view_name) {
-			return &mv;
+		if (mv.schema_id == schema_id && StringUtil::CIEquals(mv.name, view_name)) {
+			return make_uniq<DuckLakeMaterializedViewInfo>(mv);
 		}
 	}
 	return nullptr;
@@ -1227,19 +1227,19 @@ WHERE snapshot_id > %d AND snapshot_id <= %d
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to read snapshot changes for materialized view: ");
 	}
-	static const char *change_types[] = {"inserted_into_table", "deleted_from_table", "altered_table",
-	                                     "dropped_table",     "inlined_insert",      "inlined_delete"};
 	for (auto &row : *result) {
 		if (row.IsNull(0)) {
 			continue;
 		}
-		auto changes = row.GetValue<string>(0);
+		auto changes = SnapshotChangeInformation::ParseChangesMade(row.GetValue<string>(0));
 		for (auto &dep : mv.dependencies) {
-			for (auto *change_type : change_types) {
-				string needle = StringUtil::Format("%s:%d", change_type, dep.index);
-				if (changes.find(needle) != string::npos) {
-					return true;
-				}
+			if (changes.inserted_tables.find(dep) != changes.inserted_tables.end() ||
+			    changes.tables_deleted_from.find(dep) != changes.tables_deleted_from.end() ||
+			    changes.altered_tables.find(dep) != changes.altered_tables.end() ||
+			    changes.dropped_tables.find(dep) != changes.dropped_tables.end() ||
+			    changes.tables_inserted_inlined.find(dep) != changes.tables_inserted_inlined.end() ||
+			    changes.tables_deleted_inlined.find(dep) != changes.tables_deleted_inlined.end()) {
+				return true;
 			}
 		}
 	}
@@ -1258,9 +1258,9 @@ void DuckLakeCatalog::VerifyMaterializedViewStaleRead(ClientContext &context, Du
 	auto &transaction = DuckLakeTransaction::Get(context, *this);
 	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
 	DuckLakeMaterializedViewInfo staged_copy;
-	auto *persisted = GetMaterializedViewByBackingTable(transaction, table.GetTableId());
+	auto persisted = GetMaterializedViewByBackingTable(transaction, table.GetTableId());
 	if (persisted) {
-		mv = persisted;
+		mv = persisted.get();
 	} else {
 		for (auto &staged : transaction.GetNewMaterializedViews()) {
 			if (staged.backing_table_id == table.GetTableId()) {

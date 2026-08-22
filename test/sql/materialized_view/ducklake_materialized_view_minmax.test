@@ -1,5 +1,5 @@
 # name: test/sql/materialized_view/ducklake_materialized_view_minmax.test
-# description: MIN/MAX views use key-recompute incremental (not pure delta)
+# description: MIN/MAX uses deltas except for keys invalidated by an extremum deletion
 # group: [materialized_view]
 
 require ducklake
@@ -13,34 +13,67 @@ statement ok
 CREATE TABLE ducklake.b AS SELECT i AS id, 1 AS grp, i AS val FROM range(5) t(i)
 
 statement ok
-SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mvm',
-  query := 'SELECT grp, min(val) AS mn, max(val) AS mx, sum(val) AS s FROM b GROUP BY grp')
+INSERT INTO ducklake.b VALUES (10, 2, 10), (11, 2, 20)
 
-# delete non-extremum → key-recompute incremental (MIN/MAX block pure delta)
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mvm',
+  query := 'SELECT grp, min(val) AS mn, max(val) AS mx, sum(val) AS s, count(val) AS value_count, count(*) AS row_count FROM b GROUP BY grp')
+
+# A non-extremum deletion and a new extremum insertion stay on the delta-safe side.
 statement ok
 DELETE FROM ducklake.b WHERE id = 2
+
+statement ok
+INSERT INTO ducklake.b VALUES (12, 2, 30)
 
 query T
 SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mvm')
 ----
-incremental
+delta
 
-query IIII
-SELECT grp, mn, mx, s FROM ducklake.mvm
+query IIIIII
+SELECT grp, mn, mx, s, value_count, row_count FROM ducklake.mvm ORDER BY grp
 ----
-1	0	4	8
+1	0	4	8	4	4
+2	10	30	60	3	3
 
-# delete current max → still incremental, values update
+# Deleting the current max invalidates only grp=1. grp=2 remains delta-maintained.
 statement ok
 DELETE FROM ducklake.b WHERE id = 4
+
+statement ok
+DELETE FROM ducklake.b WHERE id = 10
 
 query TTTI
 SELECT schema_name, view_name, refresh_mode, rows_refreshed
 FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mvm')
 ----
-main	mvm	incremental	1
+main	mvm	delta	2
 
-query IIII
-SELECT grp, mn, mx, s FROM ducklake.mvm
+query IIIIII
+SELECT grp, mn, mx, s, value_count, row_count FROM ducklake.mvm ORDER BY grp
 ----
-1	0	3	4
+1	0	3	4	3	3
+2	20	30	50	2	2
+
+# NULL-safe extremum comparison must not spuriously invalidate a non-empty all-NULL group.
+statement ok
+INSERT INTO ducklake.b VALUES (20, 3, NULL), (21, 3, NULL)
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mvm')
+----
+delta
+
+statement ok
+DELETE FROM ducklake.b WHERE id = 20
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mvm')
+----
+delta
+
+query IIIIII
+SELECT grp, mn, mx, s, value_count, row_count FROM ducklake.mvm WHERE grp = 3
+----
+3	NULL	NULL	NULL	0	1

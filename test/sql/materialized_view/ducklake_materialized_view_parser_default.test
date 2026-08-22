@@ -1,0 +1,53 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_parser_default.test
+# description: DuckLake materialized-view syntax works without a session parser-override setting
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_parser_default.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_parser_default_files')
+
+statement ok
+CREATE TABLE ducklake.base AS SELECT 1 AS grp, 10 AS val
+
+# A statement owned by DuckLake reports DuckLake's validation error under the default policy.
+statement error
+CREATE MATERIALIZED VIEW unqualified_mv AS SELECT 1
+----
+must be qualified with the lake catalog
+
+# Statements outside DuckLake's grammar still fall through to DuckDB's parser.
+statement error
+CREATE MATERIALIZED TABLE nope
+----
+syntax error
+
+query TTTI
+CREATE MATERIALIZED VIEW ducklake.mv AS SELECT grp, sum(val) AS total FROM base GROUP BY grp
+----
+main	mv	full	1
+
+query II
+SELECT grp, total FROM ducklake.mv
+----
+1	10
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 5)
+
+query TTTI
+REFRESH MATERIALIZED VIEW ducklake.mv
+----
+main	mv	incremental	1
+
+query II
+SELECT grp, total FROM ducklake.mv
+----
+1	15
+
+query TTTI
+DROP MATERIALIZED VIEW ducklake.mv
+----
+main	mv	dropped	0

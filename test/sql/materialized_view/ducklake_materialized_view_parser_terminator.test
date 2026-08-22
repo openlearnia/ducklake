@@ -1,0 +1,34 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_parser_terminator.test
+# description: materialized view SQL sugar accepts standard statement terminators
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+SET allow_parser_override_extension='STRICT'
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_parser_terminator.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_parser_terminator_files')
+
+statement ok
+CREATE TABLE ducklake.base AS SELECT 1 AS grp, 10 AS val
+
+statement ok
+CREATE MATERIALIZED VIEW ducklake.mv AS SELECT grp, sum(val) AS total FROM ducklake.base GROUP BY grp;
+
+query II
+SELECT * FROM ducklake.mv
+----
+1	10
+
+query TTTI
+REFRESH MATERIALIZED VIEW IF STALE ducklake.mv;
+----
+main	mv	skipped	0
+
+query TTTI
+DROP MATERIALIZED VIEW ducklake.mv;
+----
+main	mv	dropped	0

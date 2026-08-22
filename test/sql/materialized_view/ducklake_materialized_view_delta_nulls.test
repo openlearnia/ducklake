@@ -1,0 +1,67 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_delta_nulls.test
+# description: delta refresh preserves DuckDB NULL semantics for SUM and COUNT
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_delta_nulls.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_delta_nulls_files')
+
+statement ok
+CREATE TABLE ducklake.base(grp INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, NULL), (1, 5)
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv', query := 'SELECT grp, sum(val) AS total, count(*) AS row_count, count(val) AS value_count FROM base GROUP BY grp')
+
+statement ok
+DELETE FROM ducklake.base WHERE val = 5
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+----
+delta
+
+# The group still has one row, but SUM is NULL because every remaining value is NULL.
+query IIII
+SELECT grp, total, row_count, value_count FROM ducklake.mv
+----
+1	NULL	1	0
+
+# NULL-only CDC must not null an existing non-NULL SUM.
+statement ok
+INSERT INTO ducklake.base VALUES (1, NULL)
+
+statement ok
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+
+query IIII
+SELECT grp, total, row_count, value_count FROM ducklake.mv
+----
+1	NULL	2	0
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 7)
+
+statement ok
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+
+query IIII
+SELECT grp, total, row_count, value_count FROM ducklake.mv
+----
+1	7	3	1
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, NULL)
+
+statement ok
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+
+query IIII
+SELECT grp, total, row_count, value_count FROM ducklake.mv
+----
+1	7	4	1

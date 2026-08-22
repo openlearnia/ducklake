@@ -141,8 +141,8 @@ string BuildRewrite(const ParsedMVStatement &parsed) {
 
 //! Parser override enabling CREATE / REFRESH / DROP MATERIALIZED VIEW syntax. Only statements that
 //! start with one of those keyword sequences are rewritten into table-function calls; everything
-//! else is declined back to the default parser. Requires the session setting
-//! allow_parser_override_extension='FALLBACK' (or STRICT) to take effect.
+//! else is declined back to the default parser. DuckLake opts this narrowly scoped override into
+//! DuckDB's default parser policy; FALLBACK and STRICT remain supported explicit policies.
 ParserOverrideResult DuckLakeMaterializedViewParserOverride(ParserExtensionInfo *info, const string &query,
                                                             ParserOptions &options) {
 	idx_t pos = 0;
@@ -230,11 +230,6 @@ ParserOverrideResult DuckLakeMaterializedViewParserOverride(ParserExtensionInfo 
 		if (!parsed.query.empty() && parsed.query.back() == ';') {
 			parsed.query.pop_back();
 			StringUtil::Trim(parsed.query);
-			// anything after the terminator means this is not a single statement - decline
-			SkipWhitespaceAndComments(query, pos);
-			if (pos < query.size()) {
-				return ParserOverrideResult();
-			}
 		}
 		if (parsed.query.empty()) {
 			return ExtensionError("CREATE MATERIALIZED VIEW has an empty definition");
@@ -263,6 +258,7 @@ ParserOverrideResult DuckLakeMaterializedViewParserOverride(ParserExtensionInfo 
 void DuckLakeRegisterMaterializedViewParser(DBConfig &config) {
 	ParserExtension extension;
 	extension.parser_override = DuckLakeMaterializedViewParserOverride;
+	extension.parser_override_default = true;
 	ParserExtension::Register(config, std::move(extension));
 }
 

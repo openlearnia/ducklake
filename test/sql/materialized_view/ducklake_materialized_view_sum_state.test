@@ -1,0 +1,48 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_sum_state.test
+# description: SUM requires matching non-null count state for pure delta maintenance
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_sum_state.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_sum_state_files')
+
+statement ok
+CREATE TABLE ducklake.base(grp INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 10)
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'unsafe_delta', query := 'SELECT grp, sum(val) AS total, count(*) AS row_count FROM base GROUP BY grp')
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 5)
+
+query I
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'unsafe_delta')
+----
+incremental
+
+query III
+SELECT grp, total, row_count FROM ducklake.unsafe_delta
+----
+1	15	2
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'safe_delta', query := 'SELECT grp, sum(val) AS total, count(*) AS row_count, count(val) AS value_count FROM base GROUP BY grp')
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, NULL)
+
+query I
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'safe_delta')
+----
+delta
+
+query IIII
+SELECT grp, total, row_count, value_count FROM ducklake.safe_delta
+----
+1	15	3	2

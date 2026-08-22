@@ -14,7 +14,7 @@ CREATE TABLE ducklake.base AS SELECT i AS id, (i % 5) AS grp, (i * 10) AS val FR
 
 # create a materialized view over an aggregate
 query TTTI
-SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv1', query := 'SELECT grp, sum(val) AS total, count(*) AS cnt FROM base GROUP BY grp ORDER BY grp')
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv1', query := 'SELECT grp, sum(val) AS total, count(*) AS cnt, count(val) AS value_count FROM base GROUP BY grp ORDER BY grp')
 ----
 main	mv1	full	5
 
@@ -151,7 +151,7 @@ SELECT grp, sum(val) AS total, count(*) AS cnt FROM ducklake.base GROUP BY grp O
 
 # direct writes into a materialized view are rejected
 statement error
-INSERT INTO ducklake.mv1 VALUES (99, 1, 1)
+INSERT INTO ducklake.mv1 VALUES (99, 1, 1, 1)
 ----
 Cannot insert into materialized view
 
@@ -224,7 +224,7 @@ INSERT INTO ducklake.base VALUES (300, 4, 500)
 query TTTI
 SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv3')
 ----
-main	mv3	delta	5
+main	mv3	incremental	5
 
 query II
 SELECT grp, total FROM ducklake.mv3 ORDER BY grp

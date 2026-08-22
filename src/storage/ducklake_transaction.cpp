@@ -1739,6 +1739,7 @@ void DuckLakeTransaction::DropTable(DuckLakeTableEntry &table) {
 	// dropping the backing table of a materialized view drops the materialized view with it
 	if (ducklake_catalog.IsMaterializedViewBackingTable(*this, table_id)) {
 		optional_ptr<const DuckLakeMaterializedViewInfo> dropped_mv;
+		unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
 		for (auto &staged : state->new_materialized_views) {
 			if (staged.backing_table_id == table_id) {
 				dropped_mv = &staged;
@@ -1746,9 +1747,9 @@ void DuckLakeTransaction::DropTable(DuckLakeTableEntry &table) {
 			}
 		}
 		if (!dropped_mv) {
-			auto *persisted = ducklake_catalog.GetMaterializedViewByBackingTable(*this, table_id);
-			if (persisted) {
-				dropped_mv = persisted;
+			persisted_mv = ducklake_catalog.GetMaterializedViewByBackingTable(*this, table_id);
+			if (persisted_mv) {
+				dropped_mv = persisted_mv.get();
 			}
 		}
 		if (dropped_mv) {

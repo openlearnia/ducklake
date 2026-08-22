@@ -276,13 +276,13 @@ public:
 
 	//! Materialized view registry: the persisted views visible at the transaction's snapshot.
 	//! Cached per snapshot id; reloads when the transaction moves to a different snapshot.
-	const vector<DuckLakeMaterializedViewInfo> &GetMaterializedViews(DuckLakeTransaction &transaction);
+	vector<DuckLakeMaterializedViewInfo> GetMaterializedViews(DuckLakeTransaction &transaction);
 	//! Look up a persisted materialized view by backing table id.
-	const DuckLakeMaterializedViewInfo *GetMaterializedViewByBackingTable(DuckLakeTransaction &transaction,
-	                                                                     TableIndex backing_table_id);
+	unique_ptr<DuckLakeMaterializedViewInfo> GetMaterializedViewByBackingTable(DuckLakeTransaction &transaction,
+	                                                                          TableIndex backing_table_id);
 	//! Look up a persisted materialized view by schema + name.
-	const DuckLakeMaterializedViewInfo *GetMaterializedViewByName(DuckLakeTransaction &transaction,
-	                                                              const string &schema_name, const string &view_name);
+	unique_ptr<DuckLakeMaterializedViewInfo> GetMaterializedViewByName(DuckLakeTransaction &transaction,
+	                                                                 const string &schema_name, const string &view_name);
 	//! Resolve a user-facing MV name in schema to its internal backing table entry (nullptr if not an MV).
 	optional_ptr<CatalogEntry> TryResolveMaterializedViewBackingTable(DuckLakeTransaction &transaction,
 	                                                                  const DuckLakeSchemaEntry &schema,

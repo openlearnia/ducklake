@@ -10,6 +10,7 @@
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/expression/comparison_expression.hpp"
+#include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/tableref/joinref.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
@@ -75,6 +76,8 @@ struct MaterializedViewAnalysis {
 	bool eligible = false;
 	//! all aggregates are SUM/COUNT(/derivable AVG) — safe for pure delta path
 	bool delta_eligible = false;
+	//! all aggregate state is delta-maintainable, with MIN/MAX invalidations rebuilt per key
+	bool conditional_delta_eligible = false;
 	//! why not (when ineligible)
 	string reason;
 	//! base table location (schema normalized to "main" when unqualified)
@@ -113,6 +116,32 @@ static bool IsSupportedAggregate(const string &function_name) {
 	auto lowered = StringUtil::Lower(function_name);
 	return lowered == "sum" || lowered == "count" || lowered == "count_star" || lowered == "min" || lowered == "max" ||
 	       lowered == "avg";
+}
+
+static bool ExpressionReferencesOnlyRelation(const ParsedExpression &expr, const string &alias, const string &table,
+                                             bool &saw_column) {
+	bool valid = true;
+	std::function<void(const ParsedExpression &)> visit = [&](const ParsedExpression &child) {
+		if (child.expression_class != ExpressionClass::COLUMN_REF) {
+			ParsedExpressionIterator::EnumerateChildren(child, visit);
+			return;
+		}
+		saw_column = true;
+		auto &column = child.Cast<const ColumnRefExpression>();
+		if (!column.IsQualified()) {
+			valid = false;
+			return;
+		}
+		auto qualifier = StringUtil::Lower(column.GetTableName());
+		auto expected_alias = StringUtil::Lower(alias);
+		auto expected_table = StringUtil::Lower(table);
+		if ((!expected_alias.empty() && qualifier == expected_alias) || qualifier == expected_table) {
+			return;
+		}
+		valid = false;
+	};
+	visit(expr);
+	return valid;
 }
 
 //! Recursively verify that a select-list expression either is a supported non-distinct aggregate
@@ -210,6 +239,28 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		join_condition_sql = join.condition->ToString();
 		fact_ref = &join.left->Cast<const BaseTableRef>();
 		dim_ref = &join.right->Cast<const BaseTableRef>();
+		bool left_fact_column = false;
+		bool right_dim_column = false;
+		bool left_dim_column = false;
+		bool right_fact_column = false;
+		auto left_is_fact = ExpressionReferencesOnlyRelation(*cmp.left, fact_ref->alias, fact_ref->table_name,
+		                                                  left_fact_column);
+		auto right_is_dim = ExpressionReferencesOnlyRelation(*cmp.right, dim_ref->alias, dim_ref->table_name,
+		                                                   right_dim_column);
+		auto left_is_dim = ExpressionReferencesOnlyRelation(*cmp.left, dim_ref->alias, dim_ref->table_name,
+		                                                 left_dim_column);
+		auto right_is_fact = ExpressionReferencesOnlyRelation(*cmp.right, fact_ref->alias, fact_ref->table_name,
+		                                                   right_fact_column);
+		if (!((left_is_fact && left_fact_column && right_is_dim && right_dim_column) ||
+		      (left_is_dim && left_dim_column && right_is_fact && right_fact_column))) {
+			result.reason = "definition join equality must connect the fact and dimension relations";
+			return result;
+		}
+		if ((!fact_ref->catalog_name.empty() || !dim_ref->catalog_name.empty()) &&
+		    StringUtil::Lower(fact_ref->catalog_name) != StringUtil::Lower(dim_ref->catalog_name)) {
+			result.reason = "definition join relations must belong to the same catalog";
+			return result;
+		}
 		result.join_eligible = true;
 	} else {
 		result.reason = "definition must read from a single base table or one INNER equijoin";
@@ -255,6 +306,9 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 	// select list: each item must be a group key (verbatim) or a supported aggregate
 	bool any_aggregate = false;
 	bool only_delta_aggs = true;
+	bool conditional_state_safe = true;
+	bool has_minmax = false;
+	bool has_count_star = false;
 	for (idx_t select_idx = 0; select_idx < node.select_list.size(); select_idx++) {
 		auto &item = node.select_list[select_idx];
 		bool is_aggregate = false;
@@ -280,7 +334,25 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		}
 		if (!func) {
 			only_delta_aggs = false;
+			conditional_state_safe = false;
 			continue;
+		}
+		if (result.join_eligible) {
+			for (auto &child : func->children) {
+				bool saw_column = false;
+				if (!ExpressionReferencesOnlyRelation(*child, fact_ref->alias, fact_ref->table_name, saw_column) ||
+				    !saw_column) {
+					result.reason = "join-incremental aggregates must reference only fact-side columns";
+					return result;
+				}
+			}
+		}
+		// The delta expressions below model plain aggregate arguments only. FILTER,
+		// aggregate ORDER BY and exported aggregate state retain incremental support
+		// through changed-key recomputation, but are not safe for algebraic deltas.
+		if (func->filter || (func->order_bys && !func->order_bys->orders.empty()) || func->export_state) {
+			only_delta_aggs = false;
+			conditional_state_safe = false;
 		}
 		auto fname = StringUtil::Lower(func->function_name);
 		MVAggregateInfo info;
@@ -292,6 +364,7 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 			if (fname == "count_star" || func->children.empty() ||
 			    func->children[0]->expression_class == ExpressionClass::STAR) {
 				info.kind = MVAggKind::COUNT_STAR;
+				has_count_star = true;
 			} else {
 				info.kind = MVAggKind::COUNT_COL;
 				info.child_sql = func->children[0]->ToString();
@@ -299,14 +372,15 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		} else if (fname == "min") {
 			info.kind = MVAggKind::MIN;
 			only_delta_aggs = false;
+			has_minmax = true;
 			info.child_sql = func->children.empty() ? string() : func->children[0]->ToString();
 		} else if (fname == "max") {
 			info.kind = MVAggKind::MAX;
 			only_delta_aggs = false;
+			has_minmax = true;
 			info.child_sql = func->children.empty() ? string() : func->children[0]->ToString();
 		} else if (fname == "avg") {
 			info.kind = MVAggKind::AVG;
-			only_delta_aggs = false;
 			info.child_sql = func->children.empty() ? string() : func->children[0]->ToString();
 		} else {
 			only_delta_aggs = false;
@@ -372,8 +446,33 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		result.group_by_sql += group->ToString();
 	}
 	result.eligible = true;
+	bool has_derived_state = true;
+	for (auto &aggregate : result.aggregates) {
+		if (aggregate.kind != MVAggKind::SUM && aggregate.kind != MVAggKind::AVG) {
+			continue;
+		}
+		bool has_matching_count = false;
+		bool has_matching_sum = aggregate.kind == MVAggKind::SUM;
+		for (auto &candidate : result.aggregates) {
+			if (candidate.kind == MVAggKind::COUNT_COL && candidate.child_sql == aggregate.child_sql) {
+				has_matching_count = true;
+			}
+			if (candidate.kind == MVAggKind::SUM && candidate.child_sql == aggregate.child_sql) {
+				has_matching_sum = true;
+			}
+		}
+		if (!has_matching_count || !has_matching_sum) {
+			has_derived_state = false;
+			break;
+		}
+	}
 	// Joins use join_incremental, not pure delta
-	result.delta_eligible = !result.join_eligible && only_delta_aggs && !result.aggregates.empty();
+	// COUNT(*) tracks group liveness. Each SUM also needs COUNT(its argument) so
+	// pure delta maintenance can distinguish a real zero from SQL's all-NULL result.
+	result.delta_eligible =
+	    !result.join_eligible && only_delta_aggs && has_count_star && has_derived_state && !result.aggregates.empty();
+	result.conditional_delta_eligible = !result.join_eligible && has_minmax && conditional_state_safe &&
+	                                    has_count_star && has_derived_state && !result.aggregates.empty();
 	return result;
 }
 
@@ -637,31 +736,27 @@ static unique_ptr<LogicalOperator> BindDefinitionPlan(Binder &parent_binder, Cli
 // Create
 //===--------------------------------------------------------------------===//
 
-static void CollectBaseTableRefs(TableRef &ref, vector<reference<BaseTableRef>> &out) {
-	switch (ref.type) {
-	case TableReferenceType::BASE_TABLE:
-		out.push_back(ref.Cast<BaseTableRef>());
-		break;
-	case TableReferenceType::JOIN: {
-		auto &join = ref.Cast<JoinRef>();
-		CollectBaseTableRefs(*join.left, out);
-		CollectBaseTableRefs(*join.right, out);
-		break;
-	}
-	case TableReferenceType::SUBQUERY: {
-		auto &subquery = ref.Cast<SubqueryRef>();
-		if (subquery.subquery && subquery.subquery->node &&
-		    subquery.subquery->node->type == QueryNodeType::SELECT_NODE) {
-			auto &from = subquery.subquery->node->Cast<SelectNode>().from_table;
-			if (from) {
-				CollectBaseTableRefs(*from, out);
-			}
+static void CollectBaseTableRefs(QueryNode &node, vector<reference<BaseTableRef>> &out);
+
+static void CollectBaseTableRefs(ParsedExpression &expression, vector<reference<BaseTableRef>> &out) {
+	if (expression.GetExpressionClass() == ExpressionClass::SUBQUERY) {
+		auto &subquery = expression.Cast<SubqueryExpression>();
+		if (subquery.subquery && subquery.subquery->node) {
+			CollectBaseTableRefs(*subquery.subquery->node, out);
 		}
-		break;
 	}
-	default:
-		break;
-	}
+	ParsedExpressionIterator::EnumerateChildren(expression,
+	                                            [&](ParsedExpression &child) { CollectBaseTableRefs(child, out); });
+}
+
+static void CollectBaseTableRefs(QueryNode &node, vector<reference<BaseTableRef>> &out) {
+	ParsedExpressionIterator::EnumerateQueryNodeChildren(
+	    node, [&](unique_ptr<ParsedExpression> &expression) { CollectBaseTableRefs(*expression, out); },
+	    [&](TableRef &ref) {
+		    if (ref.type == TableReferenceType::BASE_TABLE) {
+			    out.push_back(ref.Cast<BaseTableRef>());
+		    }
+	    });
 }
 
 //! Qualify base table references that live inside the lake with the lake catalog so the statement
@@ -669,11 +764,8 @@ static void CollectBaseTableRefs(TableRef &ref, vector<reference<BaseTableRef>> 
 static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &ducklake_catalog,
                                   SelectStatement &statement, vector<TableIndex> &dependencies) {
 	vector<reference<BaseTableRef>> base_refs;
-	if (statement.node && statement.node->type == QueryNodeType::SELECT_NODE) {
-		auto &from = statement.node->Cast<SelectNode>().from_table;
-		if (from) {
-			CollectBaseTableRefs(*from, base_refs);
-		}
+	if (statement.node) {
+		CollectBaseTableRefs(*statement.node, base_refs);
 	}
 	auto &lake_name = ducklake_catalog.GetName();
 	for (auto &base_ref : base_refs) {
@@ -706,7 +798,17 @@ static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &duckl
 		ref.catalog_name = lake_name;
 		ref.schema_name = base_schema;
 		if (dep_entry->type == CatalogType::TABLE_ENTRY) {
-			dependencies.push_back(dep_entry->Cast<DuckLakeTableEntry>().GetTableId());
+			auto table_id = dep_entry->Cast<DuckLakeTableEntry>().GetTableId();
+			bool already_tracked = false;
+			for (auto &dependency : dependencies) {
+				if (dependency == table_id) {
+					already_tracked = true;
+					break;
+				}
+			}
+			if (!already_tracked) {
+				dependencies.push_back(table_id);
+			}
 		}
 	}
 }
@@ -763,8 +865,21 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), schema);
 	auto &dl_schema = schema_entry.Cast<DuckLakeSchemaEntry>();
 
-	if (ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name)) {
+	bool materialized_view_exists = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name) != nullptr;
+	for (auto &staged : transaction.GetNewMaterializedViews()) {
+		if (staged.schema_id == dl_schema.GetSchemaId() && StringUtil::CIEquals(staged.name, view_name)) {
+			materialized_view_exists = true;
+			break;
+		}
+	}
+	if (materialized_view_exists) {
 		throw CatalogException("Materialized view \"%s.%s\" already exists!", schema, view_name);
+	}
+	auto existing_entry = dl_schema.GetEntry(ducklake_catalog.GetCatalogTransaction(context),
+	                                       CatalogType::TABLE_ENTRY, view_name);
+	if (existing_entry) {
+		throw CatalogException("%s with name \"%s\" already exists!", CatalogTypeToString(existing_entry->type),
+		                       view_name);
 	}
 
 	auto mv_uuid = UUID::ToString(UUID::GenerateRandomUUID());
@@ -834,7 +949,8 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
                                    const vector<string> &bound_column_names, const vector<LogicalType> &bound_types,
                                    idx_t start_snapshot, idx_t end_snapshot) {
 	auto &lake_name = catalog.GetName();
-	string base_alias = analysis.base_alias.empty() ? "" : " AS " + SQLIdentifier(analysis.base_alias);
+	auto base_relation_name = analysis.base_alias.empty() ? analysis.base_table : analysis.base_alias;
+	string base_alias = " AS " + SQLIdentifier(base_relation_name);
 	string base_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(analysis.base_schema),
 	                                     SQLIdentifier(analysis.base_table));
 	string mv_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(mv_schema_name),
@@ -881,12 +997,31 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 			pos_expr = StringUtil::Format("CAST(CASE WHEN %s IS NULL THEN 0 ELSE 1 END AS BIGINT)", agg.child_sql);
 			neg_expr = StringUtil::Format("CAST(CASE WHEN %s IS NULL THEN 0 ELSE -1 END AS BIGINT)", agg.child_sql);
 			break;
+		case MVAggKind::AVG:
+			// AVG is derived from the matching persisted SUM and COUNT(argument) state.
+			pos_expr = "CAST(0 AS BIGINT)";
+			neg_expr = "CAST(0 AS BIGINT)";
+			break;
+		case MVAggKind::MIN:
+		case MVAggKind::MAX:
+			pos_expr = agg.child_sql;
+			neg_expr = agg.child_sql;
+			break;
 		default:
 			throw InternalException("BuildDeltaRefreshSQL called with non-delta aggregate");
 		}
 		ins_measures += StringUtil::Format("%s AS __m%d", pos_expr, a);
 		del_measures += StringUtil::Format("%s AS __m%d", neg_expr, a);
-		delta_aggs += StringUtil::Format("SUM(__m%d) AS __d%d", a, a);
+		if (agg.kind == MVAggKind::SUM) {
+			// A CDC batch containing only NULL inputs contributes zero to an existing SUM.
+			delta_aggs += StringUtil::Format("COALESCE(SUM(__m%d), 0) AS __d%d", a, a);
+		} else if (agg.kind == MVAggKind::MIN) {
+			delta_aggs += StringUtil::Format("MIN(__m%d) FILTER (WHERE __sgn = 1) AS __d%d", a, a);
+		} else if (agg.kind == MVAggKind::MAX) {
+			delta_aggs += StringUtil::Format("MAX(__m%d) FILTER (WHERE __sgn = 1) AS __d%d", a, a);
+		} else {
+			delta_aggs += StringUtil::Format("SUM(__m%d) AS __d%d", a, a);
+		}
 	}
 
 	string kept_condition;
@@ -895,7 +1030,8 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 			kept_condition += " AND ";
 		}
 		kept_condition +=
-		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i, SQLIdentifier(bound_column_names[i]));
+		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
 	string kept_select;
 	for (idx_t col = 0; col < bound_column_names.size(); col++) {
@@ -914,7 +1050,8 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 			join_condition += " AND ";
 		}
 		join_condition +=
-		    StringUtil::Format("d.__k%d IS NOT DISTINCT FROM __mv.%s", i, SQLIdentifier(bound_column_names[i]));
+		    StringUtil::Format("d.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
 
 	// build updated select list in bound column order
@@ -945,12 +1082,70 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 		idx_t agg_i = next_agg++;
 		auto &agg = analysis.aggregates[agg_i];
 		auto type_sql = bound_types[col].ToString();
-		if (agg.kind == MVAggKind::COUNT_STAR || agg.kind == MVAggKind::COUNT_COL) {
+		if (agg.kind == MVAggKind::COUNT_STAR) {
 			cnt_guard = StringUtil::Format("CAST(coalesce(__mv.%s, 0) + d.__d%d AS %s)",
 			                               SQLIdentifier(bound_column_names[col]), agg_i, type_sql);
 			updated_select += StringUtil::Format("CAST(coalesce(__mv.%s, 0) + d.__d%d AS %s) AS %s",
 			                                    SQLIdentifier(bound_column_names[col]), agg_i, type_sql,
 			                                    SQLIdentifier(bound_column_names[col]));
+		} else if (agg.kind == MVAggKind::SUM) {
+			auto candidate = StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
+			                                    SQLIdentifier(bound_column_names[col]), agg_i);
+			optional_idx count_agg_i;
+			for (idx_t candidate_i = 0; candidate_i < analysis.aggregates.size(); candidate_i++) {
+				auto &count_agg = analysis.aggregates[candidate_i];
+				if (count_agg.kind == MVAggKind::COUNT_COL && count_agg.child_sql == agg.child_sql) {
+					count_agg_i = candidate_i;
+					break;
+				}
+			}
+			if (!count_agg_i.IsValid()) {
+				throw InternalException("Delta SUM is missing matching COUNT argument state");
+			}
+			auto &count_agg = analysis.aggregates[count_agg_i.GetIndex()];
+			auto non_null_count = StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
+			                                             SQLIdentifier(bound_column_names[count_agg.select_index]),
+			                                             count_agg_i.GetIndex());
+			updated_select += StringUtil::Format(
+			    "CASE WHEN (%s) > 0 "
+			    "THEN CAST(%s AS %s) ELSE CAST(NULL AS %s) END AS %s",
+			    non_null_count, candidate, type_sql, type_sql,
+			    SQLIdentifier(bound_column_names[col]));
+		} else if (agg.kind == MVAggKind::MIN || agg.kind == MVAggKind::MAX) {
+			auto fn = agg.kind == MVAggKind::MIN ? "LEAST" : "GREATEST";
+			updated_select += StringUtil::Format(
+			    "CAST(CASE WHEN d.__d%d IS NULL THEN __mv.%s WHEN __mv.%s IS NULL THEN d.__d%d ELSE %s(__mv.%s, "
+			    "d.__d%d) END AS %s) AS %s",
+			    agg_i, SQLIdentifier(bound_column_names[col]), SQLIdentifier(bound_column_names[col]), agg_i, fn,
+			    SQLIdentifier(bound_column_names[col]), agg_i, type_sql, SQLIdentifier(bound_column_names[col]));
+		} else if (agg.kind == MVAggKind::AVG) {
+			optional_idx sum_agg_i;
+			optional_idx count_agg_i;
+			for (idx_t candidate_i = 0; candidate_i < analysis.aggregates.size(); candidate_i++) {
+				auto &state_agg = analysis.aggregates[candidate_i];
+				if (state_agg.child_sql != agg.child_sql) {
+					continue;
+				}
+				if (state_agg.kind == MVAggKind::SUM) {
+					sum_agg_i = candidate_i;
+				} else if (state_agg.kind == MVAggKind::COUNT_COL) {
+					count_agg_i = candidate_i;
+				}
+			}
+			if (!sum_agg_i.IsValid() || !count_agg_i.IsValid()) {
+				throw InternalException("Delta AVG is missing matching SUM/COUNT argument state");
+			}
+			auto &sum_agg = analysis.aggregates[sum_agg_i.GetIndex()];
+			auto &count_agg = analysis.aggregates[count_agg_i.GetIndex()];
+			auto sum_value = StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
+			                                        SQLIdentifier(bound_column_names[sum_agg.select_index]),
+			                                        sum_agg_i.GetIndex());
+			auto count_value = StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
+			                                          SQLIdentifier(bound_column_names[count_agg.select_index]),
+			                                          count_agg_i.GetIndex());
+			updated_select += StringUtil::Format(
+			    "CASE WHEN (%s) > 0 THEN CAST((%s) / (%s) AS %s) ELSE CAST(NULL AS %s) END AS %s", count_value,
+			    sum_value, count_value, type_sql, type_sql, SQLIdentifier(bound_column_names[col]));
 		} else {
 			updated_select += StringUtil::Format("CAST(coalesce(__mv.%s, 0) + d.__d%d AS %s) AS %s",
 			                                    SQLIdentifier(bound_column_names[col]), agg_i, type_sql,
@@ -960,14 +1155,25 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 	if (cnt_guard.empty()) {
 		cnt_guard = "1"; // SUM-only views: keep row if any delta (still emit)
 	}
+	string invalid_filter;
+	if (analysis.conditional_delta_eligible) {
+		string invalid_key_match;
+		for (idx_t i = 0; i < analysis.key_positions.size(); i++) {
+			if (!invalid_key_match.empty()) {
+				invalid_key_match += " AND ";
+			}
+			invalid_key_match += StringUtil::Format("ik.__k%d IS NOT DISTINCT FROM d.__k%d", i, i);
+		}
+		invalid_filter = " AND NOT EXISTS (SELECT 1 FROM __invalid ik WHERE " + invalid_key_match + ")";
+	}
 	string updated = StringUtil::Format(
 	    R"(
 SELECT %s
 FROM __deltas d
 LEFT JOIN %s AS __mv ON %s
-WHERE (%s) <> 0
+WHERE (%s) <> 0%s
 )",
-	    updated_select, mv_ref, join_condition, cnt_guard);
+	    updated_select, mv_ref, join_condition, cnt_guard, invalid_filter);
 
 	string cte_columns;
 	for (idx_t i = 0; i < analysis.key_expr_sql.size(); i++) {
@@ -976,16 +1182,17 @@ WHERE (%s) <> 0
 		}
 		cte_columns += StringUtil::Format("__k%d", i);
 	}
-	return StringUtil::Format(R"(
+	if (!analysis.conditional_delta_eligible) {
+		return StringUtil::Format(R"(
 WITH __mv_changed(%s) AS (
 	SELECT DISTINCT %s FROM %s%s%s
 	UNION
 	SELECT DISTINCT %s FROM %s%s%s
 ),
 __cdc AS (
-	SELECT %s, %s FROM %s%s%s
+	SELECT %s, %s, 1 AS __sgn FROM %s%s%s
 	UNION ALL
-	SELECT %s, %s FROM %s%s%s
+	SELECT %s, %s, -1 AS __sgn FROM %s%s%s
 ),
 __deltas AS (
 	SELECT %s, %s FROM __cdc GROUP BY %s
@@ -996,6 +1203,70 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 	                          base_alias, cdc_where, cdc_key_select, ins_measures, ins_call, base_alias, cdc_where,
 	                          cdc_key_select, del_measures, del_call, base_alias, cdc_where, cte_columns, delta_aggs,
 	                          cte_columns, kept, updated);
+	}
+
+	string invalid_key_join;
+	for (idx_t i = 0; i < analysis.key_positions.size(); i++) {
+		if (!invalid_key_join.empty()) {
+			invalid_key_join += " AND ";
+		}
+		invalid_key_join += StringUtil::Format("c.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                                      SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
+	}
+	string extremum_deleted;
+	for (idx_t a = 0; a < analysis.aggregates.size(); a++) {
+		auto &agg = analysis.aggregates[a];
+		if (agg.kind != MVAggKind::MIN && agg.kind != MVAggKind::MAX) {
+			continue;
+		}
+		if (!extremum_deleted.empty()) {
+			extremum_deleted += " OR ";
+		}
+		extremum_deleted += StringUtil::Format("c.__m%d IS NOT DISTINCT FROM __mv.%s", a,
+		                                      SQLIdentifier(bound_column_names[agg.select_index]));
+	}
+	string invalid_columns;
+	string invalid_select;
+	string rebuild_condition;
+	for (idx_t i = 0; i < analysis.key_positions.size(); i++) {
+		if (i > 0) {
+			invalid_columns += ", ";
+			invalid_select += ", ";
+			rebuild_condition += " AND ";
+		}
+		invalid_columns += StringUtil::Format("__k%d", i);
+		invalid_select += StringUtil::Format("c.__k%d", i);
+		rebuild_condition += StringUtil::Format("ik.__k%d IS NOT DISTINCT FROM %s", i, analysis.key_expr_sql[i]);
+	}
+	string rebuild_where = analysis.where_sql.empty() ? " WHERE " : " WHERE (" + analysis.where_sql + ") AND ";
+	rebuild_where += "EXISTS (SELECT 1 FROM __invalid ik WHERE " + rebuild_condition + ")";
+	string rebuild = StringUtil::Format("SELECT %s FROM %s%s%s GROUP BY %s", analysis.select_list_sql, base_ref,
+	                                    base_alias, rebuild_where, analysis.group_by_sql);
+	return StringUtil::Format(R"(
+WITH __mv_changed(%s) AS (
+	SELECT DISTINCT %s FROM %s%s%s
+	UNION
+	SELECT DISTINCT %s FROM %s%s%s
+),
+__cdc AS (
+	SELECT %s, %s, 1 AS __sgn FROM %s%s%s
+	UNION ALL
+	SELECT %s, %s, -1 AS __sgn FROM %s%s%s
+),
+__deltas AS (
+	SELECT %s, %s FROM __cdc GROUP BY %s
+),
+__invalid(%s) AS (
+	SELECT DISTINCT %s FROM __cdc c JOIN %s AS __mv ON %s
+	WHERE c.__sgn = -1 AND (%s)
+)
+SELECT * FROM (%s) UNION ALL SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
+)",
+	                          cte_columns, cdc_key_select, ins_call, base_alias, cdc_where, cdc_key_select, del_call,
+	                          base_alias, cdc_where, cdc_key_select, ins_measures, ins_call, base_alias, cdc_where,
+	                          cdc_key_select, del_measures, del_call, base_alias, cdc_where, cte_columns, delta_aggs,
+	                          cte_columns, invalid_columns, invalid_select, mv_ref, invalid_key_join, extremum_deleted,
+	                          kept, updated, rebuild);
 }
 
 //! Build the incremental refresh SQL:
@@ -1006,7 +1277,8 @@ static string BuildIncrementalRefreshSQL(DuckLakeCatalog &catalog, const DuckLak
                                          const vector<string> &bound_column_names, idx_t start_snapshot,
                                          idx_t end_snapshot) {
 	auto &lake_name = catalog.GetName();
-	string base_alias = analysis.base_alias.empty() ? "" : " AS " + SQLIdentifier(analysis.base_alias);
+	auto base_relation_name = analysis.base_alias.empty() ? analysis.base_table : analysis.base_alias;
+	string base_alias = " AS " + SQLIdentifier(base_relation_name);
 	string base_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(analysis.base_schema),
 	                                     SQLIdentifier(analysis.base_table));
 	string mv_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(mv_schema_name),
@@ -1035,7 +1307,8 @@ static string BuildIncrementalRefreshSQL(DuckLakeCatalog &catalog, const DuckLak
 			kept_condition += " AND ";
 		}
 		kept_condition +=
-		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i, SQLIdentifier(bound_column_names[i]));
+		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
 	string kept = StringUtil::Format(
 	    R"(
@@ -1090,8 +1363,10 @@ static string BuildJoinIncrementalRefreshSQL(DuckLakeCatalog &catalog, const Duc
                                              const vector<string> &bound_column_names, idx_t start_snapshot,
                                              idx_t end_snapshot) {
 	auto &lake_name = catalog.GetName();
-	string fact_alias = analysis.fact_alias.empty() ? "" : " AS " + SQLIdentifier(analysis.fact_alias);
-	string dim_alias = analysis.dim_alias.empty() ? "" : " AS " + SQLIdentifier(analysis.dim_alias);
+	auto fact_relation_name = analysis.fact_alias.empty() ? analysis.fact_table : analysis.fact_alias;
+	auto dim_relation_name = analysis.dim_alias.empty() ? analysis.dim_table : analysis.dim_alias;
+	string fact_alias = " AS " + SQLIdentifier(fact_relation_name);
+	string dim_alias = " AS " + SQLIdentifier(dim_relation_name);
 	string fact_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(analysis.fact_schema),
 	                                     SQLIdentifier(analysis.fact_table));
 	string dim_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(analysis.dim_schema),
@@ -1124,7 +1399,8 @@ static string BuildJoinIncrementalRefreshSQL(DuckLakeCatalog &catalog, const Duc
 			kept_condition += " AND ";
 		}
 		kept_condition +=
-		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i, SQLIdentifier(bound_column_names[i]));
+		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
 	string kept = StringUtil::Format(
 	    R"(SELECT * FROM %s AS __mv WHERE NOT EXISTS (SELECT 1 FROM __mv_changed ck WHERE %s))", mv_ref,
@@ -1190,21 +1466,22 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	// find the materialized view: staged in this transaction first, then persisted
 	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
 	DuckLakeMaterializedViewInfo staged_copy;
+	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
 	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), schema);
 	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
-		if (staged.name == view_name && staged.schema_id == schema_id) {
+		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
 			staged_copy = staged;
 			mv = &staged_copy;
 			break;
 		}
 	}
 	if (!mv) {
-		auto *persisted = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name);
-		if (!persisted) {
+		persisted_mv = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name);
+		if (!persisted_mv) {
 			throw InvalidInputException("Materialized view \"%s.%s\" does not exist", schema, view_name);
 		}
-		mv = persisted;
+		mv = persisted_mv.get();
 	}
 
 	auto current_snapshot = transaction.GetSnapshot().snapshot_id;
@@ -1213,12 +1490,21 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	if (has_last_refreshed) {
 		last_refreshed = mv->last_refreshed_snapshot.GetIndex();
 	}
+	bool local_dependencies_dirty = false;
+	for (auto &dependency : mv->dependencies) {
+		if (dependency.IsTransactionLocal() || transaction.HasAnyLocalChanges(dependency)) {
+			local_dependencies_dirty = true;
+			break;
+		}
+	}
 
-	// skip when nothing can have changed
-	if (has_last_refreshed && last_refreshed == current_snapshot) {
+	// The committed snapshot can remain unchanged while this transaction has modified a dependency.
+	// Snapshot CDC cannot represent those local changes, so continue to the safe full-refresh path.
+	if (has_last_refreshed && last_refreshed == current_snapshot && !local_dependencies_dirty) {
 		return BuildConstantResult(bind_index, schema, view_name, "skipped", 0, return_names);
 	}
-	if (has_last_refreshed && !DependenciesChanged(transaction, *mv, last_refreshed, current_snapshot)) {
+	if (has_last_refreshed && !local_dependencies_dirty &&
+	    !DependenciesChanged(transaction, *mv, last_refreshed, current_snapshot)) {
 		// covers plain REFRESH and REFRESH IF STALE / if_stale := true
 		(void)if_stale;
 		return BuildConstantResult(bind_index, schema, view_name, "skipped", 0, return_names);
@@ -1298,7 +1584,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 		auto binder = Binder::CreateBinder(context, input.binder);
 		auto &sql_statement = static_cast<SQLStatement &>(*parsed_definition);
 		auto bound = binder->Bind(sql_statement);
-		if (analysis.delta_eligible &&
+		if ((analysis.delta_eligible || analysis.conditional_delta_eligible) &&
 		    analysis.aggregates.size() + analysis.key_positions.size() == bound.names.size()) {
 			auto delta_sql = BuildDeltaRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names, bound.types,
 			                                      last_refreshed + 1, current_snapshot);
@@ -1347,21 +1633,22 @@ static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &conte
 
 	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
 	DuckLakeMaterializedViewInfo staged_copy;
+	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
 	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), schema);
 	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
-		if (staged.name == view_name && staged.schema_id == schema_id) {
+		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
 			staged_copy = staged;
 			mv = &staged_copy;
 			break;
 		}
 	}
 	if (!mv) {
-		auto *persisted = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name);
-		if (!persisted) {
+		persisted_mv = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name);
+		if (!persisted_mv) {
 			throw InvalidInputException("Materialized view \"%s.%s\" does not exist", schema, view_name);
 		}
-		mv = persisted;
+		mv = persisted_mv.get();
 	}
 
 	// drop the backing table through the regular table drop path
@@ -1403,7 +1690,7 @@ static unique_ptr<FunctionData> MaterializedViewsBind(ClientContext &context, Ta
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
 		bool already_listed = false;
 		for (auto &existing : entries) {
-			if (existing.name == staged.name && existing.schema_id == staged.schema_id) {
+			if (StringUtil::CIEquals(existing.name, staged.name) && existing.schema_id == staged.schema_id) {
 				already_listed = true;
 				break;
 			}

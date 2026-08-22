@@ -1,0 +1,33 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_stale_read_session.test
+# description: stale-read policy is isolated to the session that sets it
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_stale_read_session.db' AS setup_lake (DATA_PATH '__TEST_DIR__/mv_stale_read_session_files')
+
+statement ok
+CREATE TABLE setup_lake.base AS SELECT 1 AS grp, 10 AS val
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('setup_lake', view_name := 'mv', query := 'SELECT grp, sum(val) AS total FROM base GROUP BY grp')
+
+statement ok
+INSERT INTO setup_lake.base VALUES (1, 5)
+
+statement ok con1
+SET ducklake_mv_stale_read = 'error'
+
+statement error con1
+SELECT * FROM setup_lake.mv
+----
+stale
+
+# The other session retains the default allow policy.
+query II con2
+SELECT grp, total FROM setup_lake.mv
+----
+1	10

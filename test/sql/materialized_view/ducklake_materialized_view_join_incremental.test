@@ -41,3 +41,42 @@ query T
 SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'jv')
 ----
 full
+
+# An aggregate over a dimension-side value is outside the fact-only contract.
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'dim_agg',
+  query := 'SELECT d.g, sum(d.dim_id) AS s FROM fact f JOIN dim d ON f.dim_id = d.dim_id GROUP BY d.g')
+
+statement ok
+INSERT INTO ducklake.fact VALUES (101, 0, 5)
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'dim_agg')
+----
+full
+
+# The equality must connect both relations, not merely filter the fact side.
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'same_side_join',
+  query := 'SELECT d.g, sum(f.v) AS s FROM fact f JOIN dim d ON f.id = f.dim_id GROUP BY d.g')
+
+statement ok
+INSERT INTO ducklake.fact VALUES (102, 0, 5)
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'same_side_join')
+----
+full
+
+# Unqualified measures cannot be proven fact-only at parse-analysis time.
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'unqualified_measure',
+  query := 'SELECT d.g, sum(v) AS s FROM fact f JOIN dim d ON f.dim_id = d.dim_id GROUP BY d.g')
+
+statement ok
+INSERT INTO ducklake.fact VALUES (103, 0, 5)
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'unqualified_measure')
+----
+full

@@ -1,0 +1,33 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_aggregate_filter.test
+# description: filtered aggregates fall back to a refresh path that preserves their filter
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_aggregate_filter.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_aggregate_filter_files')
+
+statement ok
+CREATE TABLE ducklake.base(grp INTEGER, val INTEGER, included BOOLEAN)
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 10, true), (1, 20, false)
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv', query := 'SELECT grp, sum(val) FILTER (WHERE included) AS filtered_total, count(*) AS row_count FROM base GROUP BY grp')
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 7, false)
+
+# Aggregate FILTER is not algebraically represented by the current delta state.
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+----
+incremental
+
+query III
+SELECT grp, filtered_total, row_count FROM ducklake.mv
+----
+1	10	3

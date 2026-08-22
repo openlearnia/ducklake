@@ -1,0 +1,41 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_name_conflicts.test
+# description: materialized views share DuckLake's case-insensitive table/view namespace
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_name_conflicts.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_name_conflicts_files')
+
+statement ok
+CREATE TABLE ducklake.base(grp INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 10)
+
+# An MV must not shadow an existing table, including through identifier case folding.
+statement error
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'BASE', query := 'SELECT grp, sum(val) AS total FROM base GROUP BY grp')
+----
+already exists
+
+query II
+SELECT * FROM ducklake.base
+----
+1	10
+
+statement ok
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'mv', query := 'SELECT grp, sum(val) AS total FROM base GROUP BY grp')
+
+# MV names themselves are case-insensitive, just like tables and views.
+statement error
+SELECT * FROM ducklake_create_materialized_view('ducklake', view_name := 'MV', query := 'SELECT grp, sum(val) AS total FROM base GROUP BY grp')
+----
+already exists
+
+query II
+SELECT * FROM ducklake.mv
+----
+1	10
