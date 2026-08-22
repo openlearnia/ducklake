@@ -12,7 +12,7 @@ struct DefaultType {
 	LogicalTypeId id;
 };
 
-using ducklake_type_array = std::array<DefaultType, 33>;
+using ducklake_type_array = std::array<DefaultType, 32>;
 
 static constexpr const ducklake_type_array DUCKLAKE_TYPES {{{"boolean", LogicalTypeId::BOOLEAN},
                                                             {"int8", LogicalTypeId::TINYINT},
@@ -37,7 +37,6 @@ static constexpr const ducklake_type_array DUCKLAKE_TYPES {{{"boolean", LogicalT
                                                             {"timestamp_ns", LogicalTypeId::TIMESTAMP_NS},
                                                             {"timestamp_s", LogicalTypeId::TIMESTAMP_SEC},
                                                             {"timestamptz", LogicalTypeId::TIMESTAMP_TZ},
-                                                            {"timestamptz_ns", LogicalTypeId::TIMESTAMP_TZ_NS},
                                                             {"timetz", LogicalTypeId::TIME_TZ},
                                                             {"interval", LogicalTypeId::INTERVAL},
                                                             {"varchar", LogicalTypeId::VARCHAR},
@@ -126,9 +125,6 @@ string DuckLakeTypes::ToString(const LogicalType &type) {
 	}
 	switch (type.id()) {
 	case LogicalTypeId::STRUCT:
-		if (StructType::GetChildCount(type) == 0) {
-			throw InvalidInputException("Failed to convert DuckDB type to DuckLake - unsupported type %s", type);
-		}
 		return "struct";
 	case LogicalTypeId::VARIANT:
 		return "variant";

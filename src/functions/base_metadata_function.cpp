@@ -1,5 +1,4 @@
 #include "functions/ducklake_table_functions.hpp"
-#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
 
@@ -12,7 +11,7 @@ Catalog &DuckLakeBaseMetadataFunction::GetCatalog(ClientContext &context, const 
 	// look up the database to query
 	auto db_name = input.GetValue<string>();
 	auto &db_manager = DatabaseManager::Get(context);
-	auto db = db_manager.GetDatabase(context, Identifier(db_name));
+	auto db = db_manager.GetDatabase(context, db_name);
 	if (!db) {
 		throw BinderException("Failed to find attached database \"%s\"", db_name);
 	}
@@ -41,7 +40,6 @@ static void MetadataFunctionExecute(ClientContext &context, TableFunctionInput &
 	auto &state = data_p.global_state->Cast<MetadataFunctionData>();
 	if (state.offset >= data.rows.size()) {
 		// finished returning values
-		output.SetChildCardinality(0);
 		return;
 	}
 	// start returning values
@@ -54,14 +52,14 @@ static void MetadataFunctionExecute(ClientContext &context, TableFunctionInput &
 		}
 
 		for (idx_t c = 0; c < entry.size(); c++) {
-			output.data[c].Append(entry[c]);
+			output.SetValue(c, count, entry[c]);
 		}
 		count++;
 	}
-	output.SetChildCardinality(count);
+	output.SetCardinality(count);
 }
 
-DuckLakeBaseMetadataFunction::DuckLakeBaseMetadataFunction(Identifier name_p, table_function_bind_t bind)
+DuckLakeBaseMetadataFunction::DuckLakeBaseMetadataFunction(string name_p, table_function_bind_t bind)
     : TableFunction(std::move(name_p), {LogicalType::VARCHAR}, MetadataFunctionExecute, bind, MetadataFunctionInit) {
 }
 

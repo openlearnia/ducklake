@@ -1,5 +1,4 @@
 #include "functions/ducklake_table_functions.hpp"
-#include "duckdb/catalog/catalog.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
@@ -66,7 +65,7 @@ struct DuckLakeOptionsState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> DuckLakeOptionsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                    vector<LogicalType> &return_types, vector<string> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 
 	names.emplace_back("option_name");
@@ -126,7 +125,7 @@ unique_ptr<GlobalTableFunctionState> DuckLakeOptionsInit(ClientContext &context,
 		option_info.scope = "SCHEMA";
 		auto schema_entry = ducklake_catalog.GetEntryById(transaction, snapshot, schema_setting.schema_id);
 		if (schema_entry) {
-			option_info.scope_entry = schema_entry->name.GetIdentifierName();
+			option_info.scope_entry = schema_entry->name;
 		}
 		result->options.push_back(std::move(option_info));
 	}
@@ -155,21 +154,20 @@ void DuckLakeOptionsExecute(ClientContext &context, TableFunctionInput &data_p, 
 	auto &state = data_p.global_state->Cast<DuckLakeOptionsState>();
 
 	if (state.offset >= state.options.size()) {
-		output.SetChildCardinality(0);
 		return;
 	}
 
 	idx_t count = 0;
 	while (state.offset < state.options.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &option = state.options[state.offset++];
-		output.data[0].Append(Value(option.option_name));
-		output.data[1].Append(option.description);
-		output.data[2].Append(Value(option.value));
-		output.data[3].Append(Value(option.scope));
-		output.data[4].Append(option.scope_entry.empty() ? Value() : Value(option.scope_entry));
+		output.SetValue(0, count, Value(option.option_name));
+		output.SetValue(1, count, option.description);
+		output.SetValue(2, count, Value(option.value));
+		output.SetValue(3, count, Value(option.scope));
+		output.SetValue(4, count, option.scope_entry.empty() ? Value() : Value(option.scope_entry));
 		count++;
 	}
-	output.SetChildCardinality(count);
+	output.SetCardinality(count);
 }
 
 DuckLakeOptionsFunction::DuckLakeOptionsFunction()

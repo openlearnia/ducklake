@@ -47,7 +47,6 @@ struct DuckLakeDeleteFile {
 	idx_t delete_count;
 	idx_t file_size_bytes;
 	idx_t footer_size;
-	optional_idx row_group_count;
 	string encryption_key;
 	bool overwrites_existing_delete = false;
 	//! The old delete file being overwritten (for deletion from metadata and disk)
@@ -68,7 +67,6 @@ struct DuckLakeDataFile {
 	idx_t row_count;
 	idx_t file_size_bytes;
 	optional_idx footer_size;
-	optional_idx row_group_count;
 	optional_idx partition_id;
 	vector<DuckLakeDeleteFile> delete_files;
 	map<FieldIndex, DuckLakeColumnStats> column_stats;
