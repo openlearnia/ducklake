@@ -240,6 +240,27 @@ static unique_ptr<FunctionData> GrantBind(RbacAction action, ClientContext &cont
 		throw InvalidInputException("Grantee cannot be empty");
 	}
 	auto privileges = DuckLakeRbac::ParsePrivileges(StringValue::Get(input.inputs[2]));
+	if (!StringUtil::CIEquals(grantee, DUCKLAKE_PUBLIC_GRANTEE)) {
+		// hardening: grantees must be existing roles (or the reserved PUBLIC)
+		auto &transaction = DuckLakeTransaction::Get(context, catalog);
+		string role_query = StringUtil::Format(
+		    "SELECT 1 FROM {METADATA_CATALOG}.ducklake_role WHERE role_name = '%s' LIMIT 1",
+		    EscapeSingleQuote(grantee));
+		auto role_result = transaction.GetMetadataManager().Query(role_query);
+		if (role_result->HasError()) {
+			role_result->GetErrorObject().Throw("Failed to look up DuckLake role: ");
+		}
+		bool role_exists = false;
+		for (auto &row : *role_result) {
+			(void)row;
+			role_exists = true;
+			break;
+		}
+		if (!role_exists) {
+			throw InvalidInputException("Role \"%s\" does not exist - create it with ducklake_create_role first",
+			                            grantee);
+		}
+	}
 	optional_idx schema_id;
 	optional_idx table_id;
 	ResolveGrantScope(catalog, context, input, schema_id, table_id);

@@ -1,0 +1,127 @@
+# name: test/sql/rbac/rbac_hardening.test
+# description: RBAC hardening - file functions, LOAD/INSTALL, prepared statements
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/rbac_hardening_lake.db' AS ducklake (DATA_PATH '__TEST_DIR__/rbac_hardening_files');
+
+statement ok
+FROM ducklake_create_role('ducklake', 'reader');
+
+statement ok
+FROM ducklake_grant('ducklake', 'reader', 'SELECT');
+
+statement ok
+SET ducklake_enable_rbac = true;
+
+# admin writes a parquet file into the data path for the read_parquet test
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+COPY (SELECT 42 AS i) TO '__TEST_DIR__/rbac_secret.parquet';
+
+# ------------------------------------------------------------------------ #
+# File-reading table functions require admin while RBAC is active
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_role = 'reader';
+
+statement error
+SELECT * FROM read_parquet('__TEST_DIR__/rbac_secret.parquet');
+----
+Permission Error: Role "reader" does not have ADMIN privileges on DuckLake catalog "ducklake"
+
+statement error
+SELECT * FROM read_csv('__TEST_DIR__/rbac_secret.parquet');
+----
+Permission Error: Role "reader" does not have ADMIN privileges on DuckLake catalog "ducklake"
+
+statement error
+SELECT * FROM glob('__TEST_DIR__/rbac_hardening_files/*.parquet');
+----
+Permission Error: Role "reader" does not have ADMIN privileges on DuckLake catalog "ducklake"
+
+# admin may read files
+statement ok
+SET ducklake_role = 'admin';
+
+query I
+SELECT * FROM read_parquet('__TEST_DIR__/rbac_secret.parquet');
+----
+42
+
+# ------------------------------------------------------------------------ #
+# LOAD / INSTALL require admin while RBAC is active
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_role = 'reader';
+
+statement error
+LOAD parquet;
+----
+Permission Error: Role "reader" does not have ADMIN privileges on DuckLake catalog "ducklake"
+
+# ------------------------------------------------------------------------ #
+# Prepared statements are re-checked on every execution (forced rebind)
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1), (2);
+
+statement ok
+PREPARE p AS SELECT * FROM ducklake.t;
+
+query I
+EXECUTE p;
+----
+1
+2
+
+# revoke read access; the cached plan must not bypass the check
+statement ok
+SET ducklake_role = 'reader';
+
+query I
+EXECUTE p;
+----
+1
+2
+
+# revoke the reader's SELECT: the cached plan must be re-checked and denied
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+FROM ducklake_revoke('ducklake', 'reader', 'SELECT');
+
+statement ok
+SET ducklake_role = 'reader';
+
+statement error
+EXECUTE p;
+----
+Permission Error: Role "reader" does not have SELECT privilege on table "main.t" of DuckLake catalog "ducklake"
+
+statement error
+PREPARE q AS INSERT INTO ducklake.t VALUES (3);
+----
+Permission Error: Role "reader" does not have INSERT privilege on table "main.t" of DuckLake catalog "ducklake"
+
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+DETACH ducklake;

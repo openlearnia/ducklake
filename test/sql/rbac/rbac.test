@@ -63,6 +63,12 @@ FROM ducklake_grant('ducklake', 'reader', 'SELECT');
 statement ok
 FROM ducklake_grant('ducklake', 'writer', 'INSERT,UPDATE,DELETE', table_name := 't');
 
+# hardening: grants to non-existent roles are rejected
+statement error
+FROM ducklake_grant('ducklake', 'ghost', 'SELECT');
+----
+Invalid Input Error: Role "ghost" does not exist - create it with ducklake_create_role first
+
 query TT
 SELECT grantee, privileges FROM ducklake_grants('ducklake') ORDER BY grantee;
 ----

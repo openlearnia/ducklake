@@ -144,8 +144,24 @@ public:
 		if (!rbac) {
 			return;
 		}
-		// ATTACH/DETACH while RBAC is active requires admin - this also
-		// prevents detaching an RBAC-enabled catalog to disable enforcement
+		// ATTACH/DETACH/LOAD/INSTALL while RBAC is active require admin -
+		// this also prevents detaching an RBAC-enabled catalog to disable
+		// enforcement, and loading arbitrary extension code
+		rbac->CheckAdmin(context);
+	}
+
+	bool RequireStatementRebind(ClientContext &context) override {
+		// only force re-binding while RBAC enforcement is actually active
+		return DuckLakeRbac::FindActiveRbac(context) != nullptr;
+	}
+
+	void CheckReadFile(ClientContext &context, const string &function_name) override {
+		auto rbac = DuckLakeRbac::FindActiveRbac(context);
+		if (!rbac) {
+			return;
+		}
+		// direct file reads bypass catalog-level privileges (e.g. reading
+		// the lake's raw data files) - require admin while RBAC is active
 		rbac->CheckAdmin(context);
 	}
 };

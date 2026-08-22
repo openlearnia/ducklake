@@ -23,6 +23,9 @@ statement ok
 FROM ducklake_grant('ducklake', 'reader', 'SELECT');
 
 statement ok
+FROM ducklake_create_role('ducklake', 'writer');
+
+statement ok
 FROM ducklake_grant('ducklake', 'writer', 'ALL');
 
 # ------------------------------------------------------------------------ #

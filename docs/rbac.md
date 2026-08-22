@@ -32,8 +32,34 @@ admin bootstrap role):
   connection (and role) per user.
 - `system`, `temp`, and hidden `__ducklake_metadata_*` catalogs are exempt,
   so internal machinery and DuckLake metadata queries never route through
-  the provider. Table *functions* (`read_csv`, `duckdb_tables()`, ...) and
-  direct file access are not gated - see the threat model below.
+  the provider.
+
+## Hardening measures
+
+While RBAC enforcement is active (an enabled lake attached):
+
+- **File-reading table functions are admin-only**: `read_csv`,
+  `read_parquet`, `read_json`, `read_text`, `glob` and their aliases
+  require the admin role - otherwise a `SELECT` could bypass catalog
+  privileges by reading the lake's raw data files directly.
+- **`LOAD` / `INSTALL` are admin-only**: loading extension code is engine
+  management.
+- **`ATTACH` / `DETACH` are admin-only** (see above).
+- **Prepared statements are re-bound before every execution**, so privilege
+  checks re-run after grant revocations or role changes instead of reusing
+  a cached plan. This applies only while enforcement is active; with RBAC
+  off, plan caching behaves as usual.
+- **Grants require an existing grantee**: `ducklake_grant` only accepts
+  roles created via `ducklake_create_role` (or the reserved `PUBLIC`).
+- **`CREATE VIEW` is gated** like other DDL (CREATE privilege on the
+  schema), in both DuckLake and DuckDB-native catalogs.
+
+Remaining known gaps (inherent to in-process enforcement): `COPY TO/FROM`
+paths that do not bind table functions, `PRAGMA`s, and direct
+metadata-database access by an admin-level session. The process boundary
+remains the real security boundary - combine with
+`enable_external_access=false`, `allowed_directories`, `lock_configuration`
+and sandboxing per the DuckDB security documentation.
 
 ## Threat model
 

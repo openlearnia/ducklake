@@ -146,6 +146,8 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateIndex(CatalogTransaction t
 }
 
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(transaction.GetContext(), DUCKLAKE_PRIVILEGE_CREATE,
+	                                                             *this);
 	// check if we have an existing entry with this name
 	if (!HandleCreateConflict(transaction, CatalogType::VIEW_ENTRY, info.view_name, info.on_conflict)) {
 		return nullptr;
