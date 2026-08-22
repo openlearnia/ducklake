@@ -325,6 +325,10 @@ public:
 	//! Look up a persisted materialized view by schema + name.
 	const DuckLakeMaterializedViewInfo *GetMaterializedViewByName(DuckLakeTransaction &transaction,
 	                                                              const string &schema_name, const string &view_name);
+	//! Resolve a user-facing MV name in schema to its internal backing table entry (nullptr if not an MV).
+	optional_ptr<CatalogEntry> TryResolveMaterializedViewBackingTable(DuckLakeTransaction &transaction,
+	                                                                const DuckLakeSchemaEntry &schema,
+	                                                                const string &view_name);
 	//! Whether the given table id is the backing table of a materialized view (persisted or created this
 	//! transaction) - used to reject direct writes and to hook DROP TABLE cleanup.
 	bool IsMaterializedViewBackingTable(DuckLakeTransaction &transaction, TableIndex table_id);

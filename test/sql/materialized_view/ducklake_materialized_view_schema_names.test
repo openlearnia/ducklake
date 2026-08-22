@@ -1,0 +1,60 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_schema_names.test
+# description: MV view_name is scoped by schema (NYC mart dims reuse master dim names)
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/mv_schema_names.db' AS ducklake (DATA_PATH '__TEST_DIR__/mv_schema_names_files', AUTOMATIC_MIGRATION true);
+
+statement ok
+CREATE SCHEMA ducklake.master;
+
+statement ok
+CREATE SCHEMA ducklake.daily_zone_performance;
+
+statement ok
+CREATE TABLE ducklake.master.base AS SELECT i AS day_id FROM range(3) t(i);
+
+statement ok
+CREATE TABLE ducklake.master.DIM_DATE_DAY_ID AS SELECT day_id FROM ducklake.master.base;
+
+# same view_name in a different schema must not collide with the master table
+query TTTI
+SELECT * FROM ducklake_create_materialized_view('ducklake', schema_name := 'daily_zone_performance', view_name := 'DIM_DATE_DAY_ID', query := 'SELECT day_id FROM ducklake.master.DIM_DATE_DAY_ID')
+----
+daily_zone_performance	DIM_DATE_DAY_ID	full	3
+
+query I
+SELECT day_id FROM ducklake.daily_zone_performance.DIM_DATE_DAY_ID ORDER BY day_id
+----
+0
+1
+2
+
+query I
+SELECT day_id FROM ducklake.master.DIM_DATE_DAY_ID ORDER BY day_id
+----
+0
+1
+2
+
+# second mart schema, same dim name again
+statement ok
+CREATE SCHEMA ducklake.fare_composition;
+
+query TTTI
+SELECT * FROM ducklake_create_materialized_view('ducklake', schema_name := 'fare_composition', view_name := 'DIM_DATE_DAY_ID', query := 'SELECT day_id FROM ducklake.master.DIM_DATE_DAY_ID')
+----
+fare_composition	DIM_DATE_DAY_ID	full	3
+
+query II
+SELECT schema_name, view_name FROM ducklake_materialized_views('ducklake') WHERE view_name = 'DIM_DATE_DAY_ID' ORDER BY schema_name
+----
+daily_zone_performance	DIM_DATE_DAY_ID
+fare_composition	DIM_DATE_DAY_ID
+
+statement ok
+DETACH ducklake;

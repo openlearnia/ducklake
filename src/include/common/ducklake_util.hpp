@@ -72,6 +72,9 @@ public:
 	//! Copy extension-registered settings from one context onto another. Core engine settings
 	//! are not copied.
 	static void CopyExtensionSettings(ClientContext &from, ClientContext &to);
+
+	//! Internal managed-table name for a materialized view's storage (user-facing name lives in MV metadata).
+	static string MaterializedViewBackingTableName(const string &view_uuid);
 };
 
 } // namespace duckdb

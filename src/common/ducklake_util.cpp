@@ -475,6 +475,11 @@ string DuckLakeUtil::ChunkRowToSQL(DuckLakeMetadataManager &metadata_manager, Cl
 	return result;
 }
 
+string DuckLakeUtil::MaterializedViewBackingTableName(const string &view_uuid) {
+	// Hidden from typical mart/master name collisions; path-safe (no hyphens).
+	return "__ducklake_mv_" + StringUtil::Replace(view_uuid, "-", "_");
+}
+
 void DuckLakeUtil::CopyExtensionSettings(ClientContext &from, ClientContext &to) {
 	auto &db_config = DBConfig::GetConfig(from);
 	for (auto &entry : db_config.GetExtensionSettings()) {

@@ -1198,6 +1198,18 @@ const DuckLakeMaterializedViewInfo *DuckLakeCatalog::GetMaterializedViewByBackin
 	return nullptr;
 }
 
+optional_ptr<CatalogEntry> DuckLakeCatalog::TryResolveMaterializedViewBackingTable(
+    DuckLakeTransaction &transaction, const DuckLakeSchemaEntry &schema, const string &view_name) {
+	auto *mv = GetMaterializedViewByName(transaction, schema.name, view_name);
+	if (!mv) {
+		return nullptr;
+	}
+	if (mv->backing_table_id.IsTransactionLocal()) {
+		return transaction.GetLocalEntryById(mv->backing_table_id);
+	}
+	return GetEntryById(transaction, transaction.GetSnapshot(), mv->backing_table_id);
+}
+
 const DuckLakeMaterializedViewInfo *DuckLakeCatalog::GetMaterializedViewByName(DuckLakeTransaction &transaction,
                                                                                const string &schema_name,
                                                                                const string &view_name) {
