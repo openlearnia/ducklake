@@ -96,6 +96,12 @@ public:
 	//! Drop the cached grants - called after any grant/revoke/role mutation
 	void InvalidateCache();
 
+	//! Check a privilege on a DuckDB-native object (memory catalog,
+	//! attached DuckDB databases). Only wildcard grants (and the admin
+	//! bootstrap role) apply - DuckLake-scoped grants do not carry over to
+	//! objects outside the lake. Returns true when allowed.
+	bool CheckDuckDBObject(ClientContext &context, DuckLakePrivilege privilege, const string &object_desc);
+
 private:
 	struct GrantRow {
 		string grantee;
@@ -113,9 +119,20 @@ private:
 	vector<GrantRow> grants;
 
 	void LoadGrants(ClientContext &context);
+
+public:
+	//! Find an attached DuckLake catalog with RBAC enabled, if any. The
+	//! first enabled catalog provides the shared role/grant store for
+	//! DuckDB-native object checks.
+	static DuckLakeRbac *FindActiveRbac(ClientContext &context);
 	uint64_t GetPrivileges(ClientContext &context, const string &grantee, optional_idx schema_id,
 	                       optional_idx table_id);
 	bool HasAdminInternal(ClientContext &context);
 };
+
+//! Install the DuckLake-backed AuthorizationProvider on the database - the
+//! same roles/grants then also govern DuckDB-native objects while RBAC is
+//! enabled on an attached DuckLake catalog.
+void DuckLakeInstallAuthorizationProvider(class DatabaseInstance &instance);
 
 } // namespace duckdb

@@ -33,6 +33,7 @@ add_library(
   ducklake_update.cpp
   ducklake_scan.cpp
   ducklake_rbac.cpp
+  ducklake_authorization.cpp
   ducklake_transaction.cpp
   ducklake_transaction_state.cpp
   ducklake_view_entry.cpp

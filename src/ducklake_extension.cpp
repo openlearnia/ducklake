@@ -5,6 +5,7 @@
 #include "storage/ducklake_storage.hpp"
 #include "storage/ducklake_scan.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "storage/ducklake_rbac.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "storage/ducklake_secret.hpp"
 #include "duckdb/logging/log_manager.hpp"
@@ -25,6 +26,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto &config = DBConfig::GetConfig(instance);
 	StorageExtension::Register(config, "ducklake", make_shared_ptr<DuckLakeStorageExtension>());
+
+	// RBAC: install the authorization provider so the DuckLake role/grant
+	// store also governs DuckDB-native objects while RBAC is enabled
+	DuckLakeInstallAuthorizationProvider(instance);
 
 	// CREATE / REFRESH / DROP MATERIALIZED VIEW sugar (needs allow_parser_override_extension='FALLBACK')
 	DuckLakeRegisterMaterializedViewParser(config);

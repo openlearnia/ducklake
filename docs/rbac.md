@@ -1,9 +1,39 @@
 # DuckLake Role-Based Access Control (RBAC)
 
-DuckLake RBAC adds table-level, role-based privileges to attached DuckLake
-catalogs. It targets **embedding applications** (for example a Go HTTP query
-server) that authenticate users themselves and then run queries on a shared
-DuckLake catalog on the user's behalf.
+DuckLake RBAC adds table-level, role-based privileges that govern **both
+DuckLake catalogs and DuckDB-native objects** (the `memory` database and
+attached DuckDB files) from a single role/grant store. It targets
+**embedding applications** (for example a Go HTTP query server) that
+authenticate users themselves and then run queries on the user's behalf.
+
+## How DuckDB-wide enforcement works
+
+DuckDB's open-source core has no privilege system, so this feature ships a
+small companion patch to DuckDB core (branch `rbac` of the
+`openlearnia/duckdb` fork): a pluggable `AuthorizationProvider` interface on
+`DBConfig` that is consulted from binder choke points (table/view reads,
+INSERT/UPDATE/DELETE/MERGE, CREATE/DROP/ALTER, ATTACH/DETACH). With no
+provider installed the hooks are no-ops - stock behavior.
+
+The ducklake extension installs a provider backed by the role/grant store.
+While at least one attached DuckLake catalog has RBAC enabled, the provider
+enforces on DuckDB-native objects too, using **wildcard grants** (and the
+admin bootstrap role):
+
+- A wildcard grant (`SELECT`, `INSERT`, ... with no schema/table scope)
+  applies to DuckDB-native objects as well as the lake.
+- Schema- or table-scoped grants apply **only within the DuckLake catalog**
+  - they do not name DuckDB-native objects.
+- `ATTACH` / `DETACH` require admin while enforcement is active - this also
+  closes the "detach and re-attach without RBAC" escape hatch. Detaching the
+  last RBAC-enabled catalog disables DuckDB-wide enforcement again.
+- Prepared-statement plans are checked at bind time; long-lived cached plans
+  are not re-checked if the role setting changes mid-session - prefer one
+  connection (and role) per user.
+- `system`, `temp`, and hidden `__ducklake_metadata_*` catalogs are exempt,
+  so internal machinery and DuckLake metadata queries never route through
+  the provider. Table *functions* (`read_csv`, `duckdb_tables()`, ...) and
+  direct file access are not gated - see the threat model below.
 
 ## Threat model
 

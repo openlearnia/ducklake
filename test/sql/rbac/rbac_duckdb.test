@@ -1,0 +1,157 @@
+# name: test/sql/rbac/rbac_duckdb.test
+# description: DuckLake RBAC also governs DuckDB-native objects (same role store)
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+CREATE TABLE plain_duckdb_t(i INTEGER);
+
+statement ok
+INSERT INTO plain_duckdb_t VALUES (7);
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/rbac_duckdb_lake.db' AS ducklake (DATA_PATH '__TEST_DIR__/rbac_duckdb_files');
+
+# set up roles and wildcard grants before enabling enforcement
+statement ok
+FROM ducklake_create_role('ducklake', 'reader');
+
+statement ok
+FROM ducklake_grant('ducklake', 'reader', 'SELECT');
+
+statement ok
+FROM ducklake_grant('ducklake', 'writer', 'ALL');
+
+# ------------------------------------------------------------------------ #
+# Enable: DuckDB-native objects are now governed by the same roles
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_enable_rbac = true;
+
+statement ok
+SET ducklake_role = 'reader';
+
+# wildcard SELECT covers DuckDB-native reads
+query I
+SELECT * FROM plain_duckdb_t;
+----
+7
+
+# create the lake table as admin, then verify reader can read both stores
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (42);
+
+statement ok
+SET ducklake_role = 'reader';
+
+query I
+SELECT * FROM ducklake.t;
+----
+42
+
+# but reader cannot write DuckDB-native tables
+statement error
+INSERT INTO plain_duckdb_t VALUES (8);
+----
+Permission Error: Role "reader" does not have INSERT privilege on "main.plain_duckdb_t" (DuckDB catalog "memory")
+
+# or create DuckDB-native objects
+statement error
+CREATE TABLE plain_duckdb_t2(i INTEGER);
+----
+Permission Error: Role "reader" does not have CREATE privilege on schema "main" (DuckDB catalog "memory")
+
+# or alter / drop them
+statement error
+ALTER TABLE plain_duckdb_t RENAME TO plain_duckdb_renamed;
+----
+Permission Error: Role "reader" does not have ALTER privilege on "main.plain_duckdb_t" (DuckDB catalog "memory")
+
+statement error
+DROP TABLE plain_duckdb_t;
+----
+Permission Error: Role "reader" does not have DROP privilege on "main.plain_duckdb_t" (DuckDB catalog "memory")
+
+# ------------------------------------------------------------------------ #
+# ATTACH / DETACH require admin while RBAC is active (closes the detach hole)
+# ------------------------------------------------------------------------ #
+
+statement error
+DETACH ducklake;
+----
+Permission Error: Role "reader" does not have ADMIN privileges on DuckLake catalog "ducklake"
+
+statement error
+ATTACH 'ducklake:__TEST_DIR__/rbac_duckdb_lake.db' AS ducklake2 (DATA_PATH '__TEST_DIR__/rbac_duckdb_files2');
+----
+Permission Error: Role "reader" does not have ADMIN privileges on DuckLake catalog "ducklake"
+
+# ------------------------------------------------------------------------ #
+# writer (wildcard ALL) can do everything on DuckDB-native objects
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_role = 'writer';
+
+statement ok
+INSERT INTO plain_duckdb_t VALUES (8);
+
+statement ok
+CREATE TABLE plain_duckdb_t2(i INTEGER);
+
+statement ok
+DROP TABLE plain_duckdb_t2;
+
+query I
+SELECT * FROM plain_duckdb_t ORDER BY i;
+----
+7
+8
+
+# admin can detach
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+DETACH ducklake;
+
+# with no RBAC-enabled catalog attached, DuckDB-native objects are open again
+query I
+SELECT * FROM plain_duckdb_t ORDER BY i;
+----
+7
+8
+
+# re-attach restores enforcement
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/rbac_duckdb_lake.db' AS ducklake (DATA_PATH '__TEST_DIR__/rbac_duckdb_files', ENABLE_RBAC true);
+
+statement ok
+SET ducklake_role = 'reader';
+
+query I
+SELECT * FROM plain_duckdb_t ORDER BY i;
+----
+7
+8
+
+statement error
+INSERT INTO plain_duckdb_t VALUES (9);
+----
+Permission Error: Role "reader" does not have INSERT privilege on "main.plain_duckdb_t" (DuckDB catalog "memory")
+
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+DETACH ducklake;
