@@ -1,0 +1,94 @@
+# name: test/sql/procedures/test_simple_procedure.test
+# description: persisted JavaScript stored procedures with DuckLake
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/test_simple_procedure');
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE PROCEDURE add_one(value INTEGER)
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+return value + 1;
+$$;
+
+query I
+CALL add_one(41);
+----
+42
+
+query II
+SELECT language, return_type FROM __ducklake_metadata_ducklake.ducklake_procedure;
+----
+javascript	int32
+
+query IIII
+FROM __ducklake_metadata_ducklake.ducklake_procedure_parameters;
+----
+1	0	value	int32
+
+query I
+SELECT max(snapshot_id) FROM snapshots();
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/test_simple_procedure');
+
+statement ok
+USE ducklake
+
+query I
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_procedure;
+----
+1
+
+query I
+CALL add_one(41);
+----
+42
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE PROCEDURE rolled_back()
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+return 99;
+$$;
+
+statement ok
+ROLLBACK;
+
+statement error
+CALL rolled_back();
+----
+Table Function with name rolled_back does not exist
+
+statement ok
+DROP PROCEDURE add_one;
+
+statement error
+CALL add_one(41);
+----
+Table Function with name add_one does not exist

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "ducklake_macro_entry.hpp"
+#include "ducklake_procedure_entry.hpp"
 #include "common/ducklake_data_file.hpp"
 #include "common/ducklake_snapshot.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
@@ -21,6 +22,7 @@
 
 namespace duckdb {
 struct NewMacroInfo;
+struct NewProcedureInfo;
 class DuckLakeCatalog;
 class DuckLakeCatalogSet;
 class DuckLakeMetadataManager;
@@ -252,6 +254,7 @@ public:
 	const vector<DuckLakeMaterializedViewInfo> &GetNewMaterializedViews() const;
 	void DropScalarMacro(DuckLakeScalarMacroEntry &macro);
 	void DropTableMacro(DuckLakeTableMacroEntry &macro);
+	void DropProcedure(DuckLakeProcedureEntry &procedure);
 	void DropFile(TableIndex table_id, DataFileIndex data_file_id, string path);
 
 	void DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
@@ -299,6 +302,7 @@ public:
 	const set<TableIndex> &GetDroppedViews();
 	const set<MacroIndex> &GetDroppedScalarMacros();
 	const set<MacroIndex> &GetDroppedTableMacros();
+	const set<ProcedureIndex> &GetDroppedProcedures();
 	const set<TableIndex> &GetRenamedTables();
 	const case_insensitive_map_t<unique_ptr<DuckLakeCatalogSet>> &GetNewTables();
 	//! Returns the current version of the catalog:

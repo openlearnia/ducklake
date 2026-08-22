@@ -78,6 +78,7 @@ private:
 	DuckLakeCatalogSet tables;
 	DuckLakeCatalogSet scalar_macros;
 	DuckLakeCatalogSet table_macros;
+	DuckLakeCatalogSet procedures;
 	mutex default_function_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> default_function_map;
 };

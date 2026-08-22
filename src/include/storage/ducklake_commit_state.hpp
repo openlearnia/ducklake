@@ -34,6 +34,10 @@ struct NewMacroInfo {
 	vector<DuckLakeMacroInfo> new_macros;
 };
 
+struct NewProcedureInfo {
+	vector<DuckLakeProcedureInfo> new_procedures;
+};
+
 struct NewNameMapInfo {
 	vector<DuckLakeColumnMappingInfo> new_column_mappings;
 };
