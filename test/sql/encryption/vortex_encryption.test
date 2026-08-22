@@ -1,0 +1,43 @@
+# name: test/sql/encryption/vortex_encryption.test
+# description: Vortex managed files honor DuckLake ENCRYPTED catalogs
+# group: [encryption]
+
+require ducklake
+
+require vortex
+
+statement ok
+SET ducklake_default_data_file_format='vortex'
+
+statement ok
+SET ducklake_default_data_inlining_row_limit=0
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/ducklake_vortex_encryption.db' AS ducklake (DATA_PATH '__TEST_DIR__/ducklake_vortex_encryption_files', ENCRYPTED)
+
+statement ok
+CREATE TABLE ducklake.test AS SELECT i id FROM range(100) t(i);
+
+query II
+SELECT COUNT(*), SUM(id) FROM ducklake.test
+----
+100	4950
+
+statement ok
+DELETE FROM ducklake.test WHERE id%2=0
+
+query II
+SELECT COUNT(*), SUM(id) FROM ducklake.test
+----
+50	2500
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/ducklake_vortex_encryption.db' AS ducklake
+
+query II
+SELECT COUNT(*), SUM(id) FROM ducklake.test
+----
+50	2500

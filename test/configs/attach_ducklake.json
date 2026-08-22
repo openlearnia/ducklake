@@ -196,7 +196,7 @@
       ]
     },
     {
-      "reason": "FIXME: flaky in CI — concurrent ALTER ADD COLUMN with reads sometimes aborts the writer's transaction or segfaults under DuckLake",
+      "reason": "FIXME: flaky in CI \u2014 concurrent ALTER ADD COLUMN with reads sometimes aborts the writer's transaction or segfaults under DuckLake",
       "paths": [
         "test/sql/parallelism/interquery/concurrent_reads_while_altering.test"
       ]
@@ -670,11 +670,12 @@
     {
       "reason": "Unsupported variant type in Parquet",
       "paths": [
+        "test/sql/alter/add_col/test_add_col_if_not_exists_default.test",
         "test/sql/function/variant/variant_typeof.test",
-        "test/sql/storage/types/variant/test_all_types_single_object.test",
         "test/sql/storage/types/variant/struct_of_variant.test",
-        "test/sql/storage/types/variant/test_all_types_single_table.test",
         "test/sql/storage/types/variant/test_all_types.test",
+        "test/sql/storage/types/variant/test_all_types_single_object.test",
+        "test/sql/storage/types/variant/test_all_types_single_table.test",
         "test/sql/storage/types/variant/test_all_types_variant.test"
       ]
     },
@@ -892,6 +893,37 @@
         "test/sql/catalog/nested_schema/nested_table_dml.test",
         "test/sql/catalog/nested_schema/nested_table_dml_persist.test",
         "test/sql/catalog/nested_schema/nested_wal_replay.test"
+      ]
+    },
+    {
+      "reason": "Assumes ordering of rowids that is not guaranteed in DuckLake",
+      "paths": [
+        "test/sql/projection/test_row_id_expression.test"
+      ]
+    },
+    {
+      "reason": "FIXME? Variant issues",
+      "paths": [
+        "test/sql/storage/types/variant/variant_shredding_omit_untyped.test"
+      ]
+    },
+    {
+      "reason": "FIXME?: DuckLake wraps the drop conflict with different wording than DuckDB",
+      "paths": [
+        "test/sql/transactions/rollback_drop_table.test"
+      ]
+    },
+    {
+      "reason": "FIXME?: does DuckLake intend to propagate invalidation to CHECKPOINT / surface autocheckpoint failure as FATAL?",
+      "paths": [
+        "test/sql/storage/attach/attach_invalidation_default_db.test",
+        "test/sql/storage/checkpoint/initial_database_autocheckpoint_failure.test"
+      ]
+    },
+    {
+      "reason": "FIXME: ADD COLUMN ... DEFAULT false is rejected as a non-literal default",
+      "paths": [
+        "test/sql/alter/add_col/test_add_col_if_not_exists_default.test"
       ]
     }
   ]

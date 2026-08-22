@@ -5,6 +5,13 @@ duckdb_extension_load(ducklake
         SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
 )
 
+if(DEFINED ENV{DUCKLAKE_VORTEX_EXTENSION_DIR})
+    duckdb_extension_load(vortex
+            SOURCE_DIR $ENV{DUCKLAKE_VORTEX_EXTENSION_DIR}
+            LOAD_TESTS
+    )
+endif()
+
 if(NOT DEFINED ENV{DISABLE_EXTENSIONS_FOR_TEST})
     duckdb_extension_load(icu)
     duckdb_extension_load(json)

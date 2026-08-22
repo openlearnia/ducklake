@@ -12,7 +12,7 @@ struct DuckLakeCommitBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> DuckLakeCommitBind(ClientContext &, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                   vector<LogicalType> &return_types, vector<string> &names) {
 	for (idx_t i = 0; i < 2; i++) {
 		if (input.inputs[i].IsNull()) {
 			throw BinderException("ducklake_commit arguments cannot be NULL");
@@ -32,8 +32,7 @@ static unique_ptr<FunctionData> DuckLakeCommitBind(ClientContext &, TableFunctio
 		} else if (entry.first == "retry_backoff") {
 			result->retry_config.retry_backoff = entry.second.GetValue<double>();
 		} else {
-			throw BinderException("Unknown named parameter \"%s\" for ducklake_commit",
-			                      entry.first.GetIdentifierName());
+			throw BinderException("Unknown named parameter \"%s\" for ducklake_commit", entry.first);
 		}
 	}
 	names.emplace_back("committed_snapshot_id");
@@ -52,7 +51,7 @@ static unique_ptr<GlobalTableFunctionState> DuckLakeCommitInit(ClientContext &, 
 static void DuckLakeCommitExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->CastNoConst<DuckLakeCommitBindData>();
 	if (data.emitted) {
-		output.SetChildCardinality(0);
+		output.SetCardinality(0);
 		return;
 	}
 	data.emitted = true;
@@ -61,10 +60,10 @@ static void DuckLakeCommitExecute(ClientContext &context, TableFunctionInput &da
 	commit.SetRetryConfigOverride(data.retry_config);
 	auto result = commit.Run();
 
-	output.data[0].Append(Value::BIGINT(result.committed_snapshot_id));
-	output.data[1].Append(Value::BIGINT(result.committed_schema_version));
-	output.data[2].Append(Value::BOOLEAN(result.had_flushes));
-	output.SetChildCardinality(1);
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value::BIGINT(result.committed_snapshot_id));
+	output.SetValue(1, 0, Value::BIGINT(result.committed_schema_version));
+	output.SetValue(2, 0, Value::BOOLEAN(result.had_flushes));
 }
 
 DuckLakeCommitFunction::DuckLakeCommitFunction()

@@ -1,0 +1,85 @@
+# name: test/sql/add_files/vortex_add_files_type_check_string_blob.test
+# description: Vortex twin of add_files_type_check_string_blob
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+require json
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_string_blob')
+
+statement ok
+COPY (SELECT 'hello world' AS col1) TO '${DATA_PATH}/string.vortex' (FORMAT vortex);
+
+statement ok
+COPY (SELECT '\x80'::BLOB AS col1) TO '${DATA_PATH}/blob.vortex' (FORMAT vortex);
+
+statement ok
+COPY (SELECT '{"hello": "world"}'::JSON AS col1) TO '${DATA_PATH}/json.vortex' (FORMAT vortex);
+
+##########
+# string #
+##########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 VARCHAR);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/blob.vortex')
+----
+BLOB
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/string.vortex')
+
+query I
+FROM ducklake.test
+----
+hello world
+
+########
+# blob #
+########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 BLOB);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/string.vortex')
+----
+VARCHAR
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/blob.vortex')
+
+query I
+FROM ducklake.test
+----
+\x80
+
+########
+# json #
+# Vortex COPY materializes JSON as VARCHAR in the file footer schema, so same-format
+# external add into a JSON table column is rejected (unlike Parquet JSON physical type).
+########
+statement ok
+CREATE OR REPLACE TABLE ducklake.test(col1 JSON);
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/string.vortex')
+----
+VARCHAR
+
+statement error
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/json.vortex')
+----
+VARCHAR

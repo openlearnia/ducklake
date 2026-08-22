@@ -9,7 +9,6 @@
 #pragma once
 
 #include "storage/ducklake_catalog.hpp"
-#include "common/ducklake_version.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/main/connection.hpp"
 
@@ -29,8 +28,6 @@ private:
 	void InitializeDataPath();
 	string GetAttachOptions();
 	void CheckAndAutoloadedRequiredExtension(const string &pattern);
-	void SetVersionedMetadataManager(DuckLakeTransaction &transaction, DuckLakeVersion version);
-	DuckLakeVersion ResolveTargetVersion(DuckLakeVersion catalog_version, const string &catalog_version_str);
 
 private:
 	ClientContext &context;

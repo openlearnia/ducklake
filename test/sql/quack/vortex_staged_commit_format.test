@@ -1,0 +1,60 @@
+# name: test/sql/quack/vortex_staged_commit_format.test
+# description: Server-side staged commits preserve Vortex file_format metadata
+# group: [quack]
+
+require ducklake
+
+require parquet
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/vortex_staged_commit_format.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/vortex_staged_commit_format');
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 0);
+
+statement ok
+CALL ducklake.set_option('data_file_format', 'vortex');
+
+statement ok
+CREATE TABLE ducklake.test(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.test VALUES (1), (2), (3);
+
+query II
+SELECT file_format, suffix(path, '.vortex')
+FROM __ducklake_metadata_ducklake.ducklake_data_file
+WHERE end_snapshot IS NULL;
+----
+vortex	true
+
+query I
+SELECT * FROM ducklake.test ORDER BY i;
+----
+1
+2
+3
+
+statement ok
+DETACH ducklake;
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/vortex_staged_commit_format');
+
+query II
+SELECT file_format, suffix(path, '.vortex')
+FROM __ducklake_metadata_ducklake.ducklake_data_file
+WHERE end_snapshot IS NULL;
+----
+vortex	true
+
+query I
+SELECT sum(i) FROM ducklake.test;
+----
+6

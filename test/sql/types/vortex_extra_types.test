@@ -1,0 +1,48 @@
+# name: test/sql/types/vortex_extra_types.test
+# description: Vortex managed round-trip for additional DuckLake-supported types
+# group: [types]
+
+require ducklake
+
+require vortex
+
+statement ok
+SET ducklake_default_data_file_format='vortex'
+
+statement ok
+SET ducklake_default_data_inlining_row_limit=0
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/ducklake_vortex_extra_types.db' AS ducklake (DATA_PATH '__TEST_DIR__/ducklake_vortex_extra_types_files')
+
+statement ok
+CREATE TABLE ducklake.t (
+	i INTERVAL,
+	u UUID,
+	h HUGEINT,
+	uh UHUGEINT
+);
+
+statement ok
+INSERT INTO ducklake.t VALUES (
+	INTERVAL 1 MONTH + INTERVAL 2 DAY + INTERVAL 3 SECOND,
+	'00112233-4455-6677-8899-aabbccddeeff'::UUID,
+	'-170141183460469231731687303715884105728'::HUGEINT,
+	'340282366920938463463374607431768211455'::UHUGEINT
+);
+
+query IIII
+SELECT i, u::VARCHAR, h::VARCHAR, uh::VARCHAR FROM ducklake.t
+----
+1 month 2 days 00:00:03	00112233-4455-6677-8899-aabbccddeeff	-170141183460469231731687303715884105728	340282366920938463463374607431768211455
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/ducklake_vortex_extra_types.db' AS ducklake
+
+query IIII
+SELECT i, u::VARCHAR, h::VARCHAR, uh::VARCHAR FROM ducklake.t
+----
+1 month 2 days 00:00:03	00112233-4455-6677-8899-aabbccddeeff	-170141183460469231731687303715884105728	340282366920938463463374607431768211455

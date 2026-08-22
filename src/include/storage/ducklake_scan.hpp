@@ -9,8 +9,6 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
-#include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
-#include "duckdb/main/database.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "common/ducklake_snapshot.hpp"
 #include "common/index.hpp"
@@ -25,11 +23,11 @@ class Deserializer;
 class DuckLakeFunctions {
 public:
 	//! Table Functions
-	static TableFunction GetDuckLakeScanFunction(DatabaseInstance &instance);
+	static TableFunction GetDuckLakeScanFunction(DatabaseInstance &instance, const string &file_format = "parquet");
 
 	static unique_ptr<FunctionData> BindDuckLakeScan(ClientContext &context, TableFunction &function);
 
-	static CopyFunctionCatalogEntry &GetCopyFunction(ClientContext &context, const Identifier &name);
+	static CopyFunctionCatalogEntry &GetCopyFunction(ClientContext &context, const string &name);
 };
 
 //! Serialize/Deserialize callbacks for DuckLakeScan (used by table macro Copy)
@@ -52,12 +50,12 @@ struct DuckLakeFunctionInfo : public TableFunctionInfo {
 	vector<LogicalType> column_types;
 	DuckLakeSnapshot snapshot;
 	TableIndex table_id;
+	string file_format = "parquet";
 	DuckLakeScanType scan_type = DuckLakeScanType::SCAN_TABLE;
 	//! Start snapshot - only set for DuckLakeScanType::SCAN_INSERTIONS and DuckLakeScanType::SCAN_DELETIONS
 	unique_ptr<DuckLakeSnapshot> start_snapshot;
 
 	shared_ptr<DuckLakeTransaction> GetTransaction();
-	bool CanUseGlobalStats();
 };
 
 } // namespace duckdb

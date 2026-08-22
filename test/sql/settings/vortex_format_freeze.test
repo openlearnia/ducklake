@@ -1,0 +1,95 @@
+# name: test/sql/settings/vortex_format_freeze.test
+# description: Existing tables stay readable after default/format changes; populated tables reject format flips
+# group: [settings]
+
+require ducklake
+
+require parquet
+
+require vortex
+
+statement ok
+SET ducklake_default_data_file_format = 'parquet';
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/vortex_format_freeze.db' AS ducklake (DATA_PATH '__TEST_DIR__/vortex_format_freeze_files');
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 0);
+
+# Write a Parquet-managed table under the default setting.
+statement ok
+CREATE TABLE ducklake.old_parquet AS SELECT 1 AS id, 'a' AS v;
+
+query II
+SELECT file_format, suffix(data.path, '.parquet')
+FROM __ducklake_metadata_ducklake.ducklake_data_file data
+JOIN __ducklake_metadata_ducklake.ducklake_table tbl USING (table_id)
+WHERE tbl.table_name = 'old_parquet' AND data.end_snapshot IS NULL;
+----
+parquet	true
+
+# Changing the session default must not strand existing tables.
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+query II
+SELECT id, v FROM ducklake.old_parquet;
+----
+1	a
+
+statement ok
+CALL ducklake.set_option('data_file_format', 'vortex');
+
+query II
+SELECT id, v FROM ducklake.old_parquet;
+----
+1	a
+
+# Further inserts into the frozen table keep the original format.
+statement ok
+INSERT INTO ducklake.old_parquet VALUES (2, 'b');
+
+query II
+SELECT DISTINCT file_format, bool_and(suffix(data.path, '.parquet'))
+FROM __ducklake_metadata_ducklake.ducklake_data_file data
+JOIN __ducklake_metadata_ducklake.ducklake_table tbl USING (table_id)
+WHERE tbl.table_name = 'old_parquet' AND data.end_snapshot IS NULL
+GROUP BY file_format;
+----
+parquet	true
+
+# New empty tables pick up the Vortex default/config.
+statement ok
+CREATE TABLE ducklake.new_vortex AS SELECT 3 AS id;
+
+query II
+SELECT file_format, suffix(data.path, '.vortex')
+FROM __ducklake_metadata_ducklake.ducklake_data_file data
+JOIN __ducklake_metadata_ducklake.ducklake_table tbl USING (table_id)
+WHERE tbl.table_name = 'new_vortex' AND data.end_snapshot IS NULL;
+----
+vortex	true
+
+# Explicit per-table flips are rejected once files exist.
+statement error
+CALL ducklake.set_option('data_file_format', 'parquet', table_name => 'new_vortex');
+----
+Cannot change data_file_format
+
+statement ok
+DETACH ducklake;
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/vortex_format_freeze.db' AS ducklake (DATA_PATH '__TEST_DIR__/vortex_format_freeze_files');
+
+query II
+SELECT id, v FROM ducklake.old_parquet ORDER BY id;
+----
+1	a
+2	b
+
+query I
+SELECT id FROM ducklake.new_vortex;
+----
+3

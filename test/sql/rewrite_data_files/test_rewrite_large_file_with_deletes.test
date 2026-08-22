@@ -24,11 +24,18 @@ CALL ducklake.set_option('target_file_size', '1KB');
 statement ok
 CREATE TABLE test (key INTEGER, value VARCHAR);
 
+# Keep the INSERT in one file while retaining the 1KB metadata rewrite target
+statement ok
+SET ducklake_target_file_size = '512MB'
+
 statement ok
 INSERT INTO test SELECT i, concat('thisisastring_', i) FROM range(1000) t(i)
 
 statement ok
 CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+RESET ducklake_target_file_size
 
 # Verify we have 1 data file, no delete files
 query I

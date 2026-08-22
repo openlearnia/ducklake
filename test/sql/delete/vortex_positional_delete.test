@@ -1,0 +1,90 @@
+# name: test/sql/delete/vortex_positional_delete.test
+# description: Vortex-managed tables write and read Vortex positional delete files
+# group: [delete]
+
+require ducklake
+
+require parquet
+
+require vortex
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/vortex_positional_delete.db' AS ducklake (DATA_PATH '__TEST_DIR__/vortex_positional_delete_files');
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 0);
+
+statement ok
+CALL ducklake.set_option('data_file_format', 'vortex');
+
+# Even with deletion vectors enabled, Vortex tables must write positional Vortex deletes.
+statement ok
+CALL ducklake.set_option('write_deletion_vectors', true);
+
+statement ok
+CREATE TABLE ducklake.t AS
+SELECT i AS id FROM range(100) t(i);
+
+statement ok
+SET VARIABLE before_delete = (FROM ducklake_current_snapshot('ducklake'));
+
+statement ok
+DELETE FROM ducklake.t WHERE id % 10 = 0;
+
+query I
+SELECT count(*) FROM ducklake.t;
+----
+90
+
+query II
+SELECT format, suffix(path, '.vortex')
+FROM __ducklake_metadata_ducklake.ducklake_delete_file
+WHERE end_snapshot IS NULL;
+----
+vortex	true
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/vortex_positional_delete_files/**/*-delete.vortex');
+----
+1
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/vortex_positional_delete_files/**/*-delete.parquet');
+----
+0
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/vortex_positional_delete_files/**/*-delete.puffin');
+----
+0
+
+# Time travel still sees pre-delete rows.
+query I
+SELECT count(*) FROM ducklake.t AT (VERSION => getvariable('before_delete'));
+----
+100
+
+# Multiple deletes accumulate correctly.
+statement ok
+DELETE FROM ducklake.t WHERE id % 10 = 1;
+
+query I
+SELECT count(*) FROM ducklake.t;
+----
+80
+
+statement ok
+DETACH ducklake;
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/vortex_positional_delete.db' AS ducklake (DATA_PATH '__TEST_DIR__/vortex_positional_delete_files');
+
+query I
+SELECT count(*) FROM ducklake.t;
+----
+80
+
+query I
+SELECT count(*) FROM ducklake.t AT (VERSION => getvariable('before_delete'));
+----
+100

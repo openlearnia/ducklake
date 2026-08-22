@@ -7,7 +7,6 @@
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_delete_filter.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
-#include "duckdb/common/sql_identifier.hpp"
 
 namespace duckdb {
 
@@ -64,12 +63,12 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 					break;
 				}
 				if (!virtual_column.empty()) {
-					columns_to_read.push_back(SQLIdentifier::ToString(virtual_column));
+					columns_to_read.push_back(KeywordHelper::WriteOptionallyQuoted(virtual_column));
 					expected_types.push_back(LogicalType::BIGINT);
 					continue;
 				}
 			}
-			string projected_column = SQLIdentifier::ToString(columns[index].name.GetIdentifierName());
+			string projected_column = KeywordHelper::WriteOptionallyQuoted(columns[index].name);
 			auto &metadata_type = ducklake_catalog.MetadataType();
 			bool needs_cast = !metadata_type.empty() && metadata_type != "duckdb" && metadata_type != "quack" &&
 			                  metadata_type != "quack_scanner";
@@ -90,13 +89,13 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 				scan_column_ids.push_back(i);
 				virtual_columns.push_back(InlinedVirtualColumn::NONE);
 			}
-			columns_to_read.push_back(SQLIdentifier::ToString("row_id"));
+			columns_to_read.push_back(KeywordHelper::WriteOptionallyQuoted("row_id"));
 			expected_types.push_back(LogicalType::BIGINT);
 			virtual_columns.emplace_back(InlinedVirtualColumn::COLUMN_EMPTY);
 		}
 		if (columns_to_read.empty()) {
 			// COUNT(*) - read row_id but don't emit
-			columns_to_read.push_back(SQLIdentifier::ToString("row_id"));
+			columns_to_read.push_back(KeywordHelper::WriteOptionallyQuoted("row_id"));
 			expected_types.push_back(LogicalType::BIGINT);
 			virtual_columns.emplace_back(InlinedVirtualColumn::COLUMN_EMPTY);
 		}
@@ -178,11 +177,7 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 		data->data->InitializeScan(state, scan_column_ids);
 	}
 	for (auto &entry : expression_map) {
-		auto &column_index = column_indexes[entry.first];
-		auto column_id = column_index.GetPrimaryIndex();
-		auto &expression_data = entry.second;
-		auto &expression = *expression_data.expression;
-		expression_executors[column_id] = make_uniq<ExpressionExecutor>(context, expression);
+		expression_executors[entry.first] = make_uniq<ExpressionExecutor>(context, *entry.second);
 	}
 	return true;
 }
@@ -202,7 +197,7 @@ bool DuckLakeInlinedDataReader::TryEvaluateExpression(ClientContext &context, id
 	expr_input.Initialize(Allocator::Get(context), {input_type});
 	expr_input.Reset();
 	expr_input.data[0].Reference(input_vector);
-	expr_input.SetChildCardinality(scan_chunk.size());
+	expr_input.SetCardinality(scan_chunk.size());
 	expr_it->second->ExecuteExpression(expr_input, output_vector);
 	return true;
 }
@@ -231,7 +226,7 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 			}
 			case InlinedVirtualColumn::COLUMN_ROW_ID: {
 				Vector ordinal_vector(LogicalType::BIGINT);
-				auto ordinal_data = FlatVector::GetDataMutable<int64_t>(ordinal_vector);
+				auto ordinal_data = FlatVector::GetData<int64_t>(ordinal_vector);
 				if (data->HasPreservedRowIds()) {
 					// use preserved row_ids from update inlining
 					for (idx_t r = 0; r < scan_chunk.size(); r++) {
@@ -243,11 +238,10 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 						ordinal_data[r] = NumericCast<int64_t>(file_row_number + r);
 					}
 				}
-				FlatVector::SetSize(ordinal_vector, scan_chunk.size());
 				if (TryEvaluateExpression(context, c, ordinal_vector, LogicalType::BIGINT, chunk.data[c])) {
 					continue;
 				}
-				auto row_id_data = FlatVector::GetDataMutable<int64_t>(chunk.data[c]);
+				auto row_id_data = FlatVector::GetData<int64_t>(chunk.data[c]);
 				for (idx_t r = 0; r < scan_chunk.size(); r++) {
 					row_id_data[r] = ordinal_data[r];
 				}
@@ -257,7 +251,7 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 				break;
 			}
 		}
-		chunk.SetChildCardinality(scan_chunk.size());
+		chunk.SetCardinality(scan_chunk.size());
 	} else {
 		data->data->Scan(state, chunk);
 	}
@@ -272,17 +266,17 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 			approved_tuple_count = deletion_filter->Filter(file_row_number, approved_tuple_count, sel);
 		}
 		if (filters) {
-			for (auto &entry : *filters) {
-				auto &filter = entry.Filter();
-				if (ExpressionFilter::IsRootOptionalFilter(filter)) {
+			for (auto &entry : filters->filters) {
+				if (entry.second->filter_type == TableFilterType::OPTIONAL_FILTER) {
 					continue;
 				}
-				auto column_id = entry.GetIndex().GetIndex();
+				auto column_id = entry.first;
 				auto &vec = chunk.data[column_id];
 
 				UnifiedVectorFormat vdata;
-				vec.ToUnifiedFormat(vdata);
+				vec.ToUnifiedFormat(chunk.size(), vdata);
 
+				auto &filter = *entry.second;
 				auto filter_state = TableFilterState::Initialize(context, filter);
 
 				approved_tuple_count = ColumnSegment::FilterSelection(sel, vec, vdata, filter, *filter_state,

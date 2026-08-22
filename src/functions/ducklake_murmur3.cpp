@@ -11,16 +11,17 @@ static void Murmur3ScalarFunction(DataChunk &args, ExpressionState &state, Vecto
 	auto count = args.size();
 
 	UnifiedVectorFormat input_data;
-	input.ToUnifiedFormat(input_data);
+	input.ToUnifiedFormat(count, input_data);
 
-	auto result_data = FlatVector::GetDataMutable<int32_t>(result);
-	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetData<int32_t>(result);
+	auto &result_validity = FlatVector::Validity(result);
+	result.SetVectorType(args.AllConstant() ? VectorType::CONSTANT_VECTOR : VectorType::FLAT_VECTOR);
 
 	auto &type = input.GetType();
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = input_data.sel->get_index(i);
 		if (!input_data.validity.RowIsValid(idx)) {
-			FlatVector::SetNull(result, i, true);
+			result_validity.SetInvalid(i);
 			continue;
 		}
 
@@ -92,9 +93,6 @@ static void Murmur3ScalarFunction(DataChunk &args, ExpressionState &state, Vecto
 			break;
 		}
 		}
-	}
-	if (args.AllConstant()) {
-		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	}
 }
 

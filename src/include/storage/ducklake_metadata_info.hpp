@@ -157,10 +157,10 @@ struct DuckLakeFileInfo {
 	DataFileIndex id;
 	TableIndex table_id;
 	string file_name;
+	string file_format = "parquet";
 	idx_t row_count;
 	idx_t file_size_bytes;
 	optional_idx footer_size;
-	optional_idx row_group_count;
 	optional_idx row_id_start;
 	optional_idx partition_id;
 	optional_idx begin_snapshot;
@@ -199,7 +199,6 @@ struct DuckLakeDeleteFileInfo {
 	idx_t delete_count;
 	idx_t file_size_bytes;
 	idx_t footer_size;
-	optional_idx row_group_count;
 	string encryption_key;
 	optional_idx begin_snapshot;
 	//! Optional max_snapshot information for partial deletion files.
@@ -314,12 +313,6 @@ struct DuckLakeSnapshotInfo {
 	Value commit_extra_info;
 };
 
-struct DuckLakeViewColumnTag {
-	string column_name;
-	string key;
-	Value value;
-};
-
 struct DuckLakeViewInfo {
 	TableIndex id;
 	SchemaIndex schema_id;
@@ -329,14 +322,25 @@ struct DuckLakeViewInfo {
 	vector<string> column_aliases;
 	string sql;
 	vector<DuckLakeTag> tags;
-	vector<DuckLakeViewColumnTag> column_tags;
 };
 
-struct DuckLakeViewColumnTagInfo {
-	TableIndex view_id;
-	string column_name;
-	string key;
-	Value value;
+struct DuckLakeMaterializedViewInfo {
+	//! id of the materialized view (allocated from the same catalog-id space as tables/views)
+	TableIndex id;
+	SchemaIndex schema_id;
+	string uuid;
+	string name;
+	string dialect;
+	//! the definition SQL, with the {DUCKLAKE_CATALOG}. placeholder for the attached catalog name
+	string sql;
+	//! the managed table that stores the materialized result
+	TableIndex backing_table_id;
+	//! snapshot the backing table was last refreshed at (invalid if never refreshed)
+	optional_idx last_refreshed_snapshot;
+	//! table ids of the lake tables the definition references
+	vector<TableIndex> dependencies;
+	//! staging-only: write last_refreshed_snapshot as the commit snapshot ({SNAPSHOT_ID} placeholder)
+	bool pending_refresh_stamp = false;
 };
 
 struct DuckLakeTagInfo {
@@ -374,6 +378,7 @@ struct DuckLakeCatalogInfo {
 
 struct DuckLakeFileData {
 	string path;
+	string file_format = "parquet";
 	string encryption_key;
 	idx_t file_size_bytes = 0;
 	optional_idx footer_size;
@@ -472,14 +477,10 @@ struct DuckLakeCompactionFileEntry {
 	vector<DuckLakeCompactionDeleteFileData> delete_files;
 	optional_idx max_partial_file_snapshot;
 	idx_t schema_version;
-	//! Snapshot and schema version used to resolve the file's partition spec.
-	optional_idx partition_snapshot_id;
-	optional_idx partition_schema_version;
 	//! Inlined file deletions stored in the metadata database rather than delete files.
 	set<idx_t> inlined_file_deletions;
 	//! Whether this file has any inlined deletions (cheap flag; set for all compaction types).
 	bool has_inlined_deletions = false;
-	double delete_ratio = 0;
 };
 
 struct DuckLakeRewriteFileEntry {
@@ -491,7 +492,7 @@ struct DuckLakeRewriteFileEntry {
 
 struct DuckLakeCompactionEntry {
 	vector<DuckLakeCompactionFileEntry> source_files;
-	vector<DuckLakeDataFile> written_files;
+	DuckLakeDataFile written_file;
 	optional_idx row_id_start;
 	CompactionType type;
 };
@@ -511,6 +512,7 @@ struct DuckLakeCompactedFileInfo {
 };
 
 struct DuckLakeMergeAdjacentOptions {
+	uint64_t max_files;
 	optional_idx min_file_size;
 	optional_idx max_file_size;
 };

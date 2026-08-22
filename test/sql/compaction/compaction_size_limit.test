@@ -22,9 +22,9 @@ CALL dbgen(sf = 0.01);
 statement ok
 use ducklake
 
-# This should be enough to fit 3 files
+# Keep each INSERT in one file; the compaction target is derived below
 statement ok
-CALL ducklake.set_option('target_file_size', '5.4MB');
+CALL ducklake.set_option('target_file_size', '512MB');
 
 statement ok
 CREATE TABLE test AS (SELECT * FROM memory.main.lineitem WHERE 0=1);
@@ -43,6 +43,16 @@ SELECT COUNT(*) FROM GLOB('{DATA_PATH}/compaction_size_limit/main/test/*')
 ----
 5
 
+# Pick a format-relative target that fits three source files
+statement ok
+SET VARIABLE compact_target = (
+	SELECT max(file_size_bytes) * 3
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL
+)
+
+statement ok
+CALL ducklake.set_option('target_file_size', concat(getvariable('compact_target')::VARCHAR, 'B'));
 
 query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake') ORDER BY ALL

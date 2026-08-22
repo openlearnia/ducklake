@@ -1,0 +1,37 @@
+# name: test/sql/geo/vortex_ducklake_geometry_add_files.test
+# description: Vortex twin of ducklake_geometry_add_files happy path (GeoParquet v1 is Parquet-only)
+# group: [geo]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (
+	DATA_PATH '${DATA_PATH}/ducklake_files_vx',
+	METADATA_CATALOG 'ducklake_meta'
+)
+
+statement ok
+COPY (SELECT 'POINT(5 5)'::GEOMETRY AS g) TO '${DATA_PATH}/points.vortex' (FORMAT VORTEX);
+
+statement ok
+USE ducklake;
+
+statement ok
+CREATE TABLE t1 (g GEOMETRY);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 't1', '${DATA_PATH}/points.vortex');
+
+query I
+SELECT * FROM t1;
+----
+POINT (5 5)

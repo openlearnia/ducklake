@@ -1,0 +1,37 @@
+# name: test/sql/insert/vortex_column_stats.test
+# description: Vortex COPY exports column statistics into DuckLake metadata
+# group: [insert]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format='vortex'
+
+statement ok
+SET ducklake_default_data_inlining_row_limit=0
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/vortex_column_stats')
+
+statement ok
+CREATE TABLE ducklake.stats_t(id INTEGER NOT NULL, v DOUBLE);
+
+statement ok
+INSERT INTO ducklake.stats_t VALUES (1, 1.5), (2, 3.5), (3, NULL);
+
+# NOT NULL is enforced using persisted column stats / schema
+statement error
+INSERT INTO ducklake.stats_t VALUES (NULL, 9.0)
+----
+Constraint Error: NOT NULL constraint failed: stats_t.id
+
+query III
+SELECT COUNT(*), MIN(id), MAX(id) FROM ducklake.stats_t
+----
+3	1	3

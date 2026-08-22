@@ -1,10 +1,8 @@
 #include "ducklake_extension.hpp"
-#include "duckdb/main/config.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "storage/ducklake_storage.hpp"
-#include "common/ducklake_version.hpp"
 #include "storage/ducklake_scan.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "storage/ducklake_secret.hpp"
@@ -16,6 +14,7 @@
 namespace duckdb {
 
 ScalarFunction DuckLakeMurmur3Function();
+void DuckLakeRegisterMaterializedViewParser(DBConfig &config);
 
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("Adds support for DuckLake, SQL as a Lakehouse Format");
@@ -25,6 +24,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto &config = DBConfig::GetConfig(instance);
 	StorageExtension::Register(config, "ducklake", make_shared_ptr<DuckLakeStorageExtension>());
+
+	// CREATE / REFRESH / DROP MATERIALIZED VIEW sugar (needs allow_parser_override_extension='FALLBACK')
+	DuckLakeRegisterMaterializedViewParser(config);
 
 	config.AddExtensionOption("ducklake_max_retry_count",
 	                          "The maximum amount of retry attempts for a ducklake transaction", LogicalType::UBIGINT,
@@ -36,8 +38,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("ducklake_default_data_inlining_row_limit",
 	                          "Default row limit for data inlining (0 disables inlining)", LogicalType::UBIGINT,
 	                          Value::UBIGINT(10), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("ducklake_default_version", "Default DuckLake version for new catalogs",
-	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::GLOBAL);
+	auto set_default_data_file_format = [](ClientContext &, SetScope, Value &parameter) {
+		if (parameter.IsNull()) {
+			return;
+		}
+		auto format = StringUtil::Lower(parameter.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		if (format != "parquet" && format != "vortex") {
+			throw InvalidInputException(
+			    "Unsupported ducklake_default_data_file_format \"%s\"; supported options are parquet, vortex", format);
+		}
+		parameter = Value(format);
+	};
+	config.AddExtensionOption("ducklake_default_data_file_format",
+	                          "Default managed data-file format for new empty DuckLake tables (parquet or vortex)",
+	                          LogicalType::VARCHAR, Value("parquet"), set_default_data_file_format, SetScope::GLOBAL);
 	auto set_target_file_size = [](ClientContext &, SetScope, Value &parameter) {
 		if (!parameter.IsNull() && !parameter.ToString().empty()) {
 			DBConfig::ParseMemoryLimit(parameter.ToString());
@@ -49,6 +63,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "ducklake_write_deletion_vectors",
 	    "[EXPERIMENTAL] Write Iceberg V3 deletion vectors (puffin) instead of positional delete files (parquet)",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+	auto set_mv_stale_read = [](ClientContext &, SetScope, Value &parameter) {
+		if (parameter.IsNull()) {
+			return;
+		}
+		auto mode = StringUtil::Lower(parameter.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		if (mode != "allow" && mode != "warn" && mode != "error") {
+			throw InvalidInputException(
+			    "Unsupported ducklake_mv_stale_read \"%s\"; supported options are allow, warn, error", mode);
+		}
+		parameter = Value(mode);
+	};
+	config.AddExtensionOption("ducklake_mv_stale_read",
+	                          "Behavior when querying a stale DuckLake materialized view: allow, warn, or error",
+	                          LogicalType::VARCHAR, Value("allow"), set_mv_stale_read, SetScope::GLOBAL);
 
 	DuckLakeSnapshotsFunction snapshots;
 	loader.RegisterFunction(snapshots);
@@ -109,6 +137,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	DuckLakeCommitFunction commit;
 	loader.RegisterFunction(commit);
+
+	DuckLakeCreateMaterializedViewFunction create_materialized_view;
+	loader.RegisterFunction(create_materialized_view);
+
+	DuckLakeRefreshMaterializedViewFunction refresh_materialized_view;
+	loader.RegisterFunction(refresh_materialized_view);
+
+	DuckLakeDropMaterializedViewFunction drop_materialized_view;
+	loader.RegisterFunction(drop_materialized_view);
+
+	DuckLakeMaterializedViewsFunction materialized_views;
+	loader.RegisterFunction(materialized_views);
 
 	// Register ducklake_scan so it can be found during deserialization
 	auto ducklake_scan = DuckLakeFunctions::GetDuckLakeScanFunction(loader.GetDatabaseInstance());

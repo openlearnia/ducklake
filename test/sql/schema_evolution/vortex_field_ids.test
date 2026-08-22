@@ -1,0 +1,40 @@
+# name: test/sql/schema_evolution/vortex_field_ids.test
+# description: Vortex managed files persist DuckLake field ids across rename
+# group: [schema_evolution]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format='vortex'
+
+statement ok
+SET ducklake_default_data_inlining_row_limit=0
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/vortex_field_ids')
+
+statement ok
+CREATE TABLE ducklake.t(a INT, b VARCHAR);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1, 'x'), (2, 'y');
+
+statement ok
+ALTER TABLE ducklake.t RENAME COLUMN a TO a_renamed;
+
+query II
+SELECT a_renamed, b FROM ducklake.t ORDER BY a_renamed
+----
+1	x
+2	y
+
+query I
+SELECT COUNT(*) > 0 FROM glob('${DATA_PATH}/vortex_field_ids/main/t/*.vortex')
+----
+true

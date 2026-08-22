@@ -22,7 +22,8 @@ struct DuckLakeFilePartition {
 
 enum class DeleteFileFormat : uint8_t {
 	PARQUET, //! Positional delete file in Parquet format
-	PUFFIN   //! Deletion vector in Puffin format (Iceberg V3)
+	PUFFIN,  //! Deletion vector in Puffin format (Iceberg V3)
+	VORTEX   //! Positional delete file in Vortex format
 };
 
 string DeleteFileFormatToString(DeleteFileFormat format);
@@ -46,7 +47,6 @@ struct DuckLakeDeleteFile {
 	idx_t delete_count;
 	idx_t file_size_bytes;
 	idx_t footer_size;
-	optional_idx row_group_count;
 	string encryption_key;
 	bool overwrites_existing_delete = false;
 	//! The old delete file being overwritten (for deletion from metadata and disk)
@@ -63,10 +63,10 @@ struct DuckLakeDataFile {
 	DuckLakeDataFile &operator=(const DuckLakeDataFile &);
 
 	string file_name;
+	string file_format = "parquet";
 	idx_t row_count;
 	idx_t file_size_bytes;
 	optional_idx footer_size;
-	optional_idx row_group_count;
 	optional_idx partition_id;
 	vector<DuckLakeDeleteFile> delete_files;
 	map<FieldIndex, DuckLakeColumnStats> column_stats;

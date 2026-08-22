@@ -1,0 +1,41 @@
+# name: test/sql/add_files/vortex_add_files_rename.test
+# description: Vortex twin of add_files_rename — rename over external Vortex file
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_add_files_rename')
+
+statement ok
+CREATE TABLE ducklake.test(col1 INTEGER, col2 VARCHAR);
+
+# write a vortex file outside of DuckLake
+statement ok
+COPY (SELECT 100 col1, 'world' col2) TO '${DATA_PATH}/rename_file.vortex' (FORMAT vortex);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '${DATA_PATH}/rename_file.vortex')
+
+query II
+SELECT col1, col2 FROM ducklake.test
+----
+100	world
+
+statement ok
+ALTER TABLE ducklake.test RENAME col1 TO new_col
+
+query II
+SELECT new_col, col2 FROM ducklake.test
+----
+100	world

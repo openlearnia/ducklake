@@ -1,0 +1,154 @@
+# name: test/sql/settings/data_file_format.test
+# description: Test DuckLake managed data-file format setting
+# group: [settings]
+
+require ducklake
+
+require parquet
+
+require vortex
+
+# Attach-time DATA_FILE_FORMAT (from duckdb/ducklake#1193) seeds a new lake's
+# persisted global option. Mixed-format tables remain rejected by format freeze.
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/data_file_format_attach.db' AS ducklake_attach (
+	DATA_PATH '__TEST_DIR__/data_file_format_attach_files',
+	METADATA_CATALOG 'meta_attach',
+	DATA_INLINING_ROW_LIMIT 0,
+	DATA_FILE_FORMAT 'vortex'
+);
+
+query I
+SELECT value FROM meta_attach.ducklake_metadata WHERE key = 'data_file_format';
+----
+vortex
+
+statement ok
+CREATE TABLE ducklake_attach.t(i INTEGER, s VARCHAR);
+
+statement ok
+INSERT INTO ducklake_attach.t VALUES (1, 'one'), (2, 'two');
+
+query II
+SELECT file_format, COUNT(*) FROM meta_attach.ducklake_data_file GROUP BY ALL ORDER BY ALL;
+----
+vortex	1
+
+query II
+SELECT i, s FROM ducklake_attach.t ORDER BY i;
+----
+1	one
+2	two
+
+statement error
+ATTACH 'ducklake:__TEST_DIR__/data_file_format_bad.db' AS ducklake_bad (
+	DATA_PATH '__TEST_DIR__/data_file_format_bad_files',
+	DATA_FILE_FORMAT 'orc'
+);
+----
+Unsupported data file format
+
+statement ok
+DETACH ducklake_attach;
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/data_file_format.db' AS ducklake (DATA_PATH '__TEST_DIR__/data_file_format_files');
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 0);
+
+# Existing lakes default to Parquet.
+statement ok
+CREATE TABLE ducklake.default_format AS SELECT 42 AS id;
+
+query II
+SELECT file_format, suffix(path, '.parquet')
+FROM __ducklake_metadata_ducklake.ducklake_data_file
+WHERE end_snapshot IS NULL;
+----
+parquet	true
+
+# The setting is normalized and persisted.
+statement ok
+CALL ducklake.set_option('data_file_format', 'VoRtEx');
+
+query IIII
+SELECT option_name, value, scope, scope_entry
+FROM ducklake.options()
+WHERE option_name = 'data_file_format';
+----
+data_file_format	vortex	GLOBAL	NULL
+
+# New tables use the selected format for managed data files.
+statement ok
+CREATE TABLE ducklake.vortex_format AS
+SELECT *
+FROM (VALUES (1, 10), (2, 20), (3, 30)) values_table(id, value);
+
+query IIII
+SELECT file_format, suffix(data.path, '.vortex'), record_count, file_size_bytes > 0
+FROM __ducklake_metadata_ducklake.ducklake_data_file data
+JOIN __ducklake_metadata_ducklake.ducklake_table tbl USING (table_id)
+WHERE tbl.table_name = 'vortex_format' AND data.end_snapshot IS NULL;
+----
+vortex	true	3	true
+
+query II
+SELECT id, value FROM ducklake.vortex_format ORDER BY id;
+----
+1	10
+2	20
+3	30
+
+# Filters span multiple DuckDB vectors, and deletes use Vortex file-relative row numbers.
+statement ok
+CREATE TABLE ducklake.vortex_large AS
+SELECT i AS id, i % 17 AS bucket
+FROM range(5000) t(i);
+
+query III
+SELECT count(*), min(id), max(id)
+FROM ducklake.vortex_large
+WHERE bucket = 7;
+----
+294	7	4988
+
+statement ok
+SET VARIABLE before_delete = (FROM ducklake_current_snapshot('ducklake'));
+
+statement ok
+DELETE FROM ducklake.vortex_large WHERE id % 10 = 0;
+
+query III
+SELECT count(*), min(id), max(id) FROM ducklake.vortex_large;
+----
+4500	1	4999
+
+query III
+SELECT count(*), min(id), max(id)
+FROM ducklake.vortex_large AT (VERSION => getvariable('before_delete'));
+----
+5000	0	4999
+
+# Reopening preserves both current and historical scans.
+statement ok
+DETACH ducklake;
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/data_file_format.db' AS ducklake (DATA_PATH '__TEST_DIR__/data_file_format_files');
+
+query III
+SELECT count(*), min(id), max(id) FROM ducklake.vortex_large;
+----
+4500	1	4999
+
+query III
+SELECT count(*), min(id), max(id)
+FROM ducklake.vortex_large AT (VERSION => getvariable('before_delete'));
+----
+5000	0	4999
+
+statement error
+CALL ducklake.set_option('data_file_format', 'csv');
+----
+Unsupported data file format "csv"; supported options are parquet, vortex

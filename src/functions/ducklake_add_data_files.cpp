@@ -1,20 +1,16 @@
 #include "functions/ducklake_table_functions.hpp"
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "common/ducklake_util.hpp"
 #include "storage/ducklake_transaction_changes.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_insert.hpp"
 #include "storage/ducklake_catalog.hpp"
-#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/common/types/type_manager.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/common/types/vector.hpp"
-#include "duckdb/common/vector/list_vector.hpp"
-#include "duckdb/common/vector/struct_vector.hpp"
 #include "storage/ducklake_geo_stats.hpp"
 #include <unordered_set>
 
@@ -35,7 +31,7 @@ struct DuckLakeAddDataFilesData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                         vector<LogicalType> &return_types, vector<string> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	string schema_name;
 	if (input.inputs[1].IsNull()) {
@@ -46,9 +42,8 @@ static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context,
 	}
 	const auto table_name = StringValue::Get(input.inputs[1]);
 
-	auto entry = catalog.GetEntry<TableCatalogEntry>(
-	    context, QualifiedName(catalog.GetName(), Identifier(schema_name), Identifier(table_name)),
-	    OnEntryNotFound::THROW_EXCEPTION);
+	auto entry =
+	    catalog.GetEntry<TableCatalogEntry>(context, schema_name, table_name, OnEntryNotFound::THROW_EXCEPTION);
 	auto &table = entry->Cast<DuckLakeTableEntry>();
 
 	auto result = make_uniq<DuckLakeAddDataFilesData>(catalog, table);
@@ -67,7 +62,7 @@ static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context,
 		throw InvalidInputException("File list must be a string or a list of strings");
 	}
 	for (auto &entry : input.named_parameters) {
-		auto lower = StringUtil::Lower(entry.first.GetIdentifierName());
+		auto lower = StringUtil::Lower(entry.first);
 		if (lower == "allow_missing") {
 			result->allow_missing = BooleanValue::Get(entry.second);
 		} else if (lower == "ignore_extra_columns") {
@@ -106,6 +101,9 @@ struct ParquetColumn {
 	optional_idx precision;
 	optional_idx field_id;
 	string logical_type;
+	//! When set, type checking uses DuckDB types directly (Vortex externals).
+	bool has_duckdb_type = false;
+	LogicalType duckdb_logical_type;
 	vector<DuckLakeColumnStats> column_stats;
 
 	vector<unique_ptr<ParquetColumn>> child_columns;
@@ -115,33 +113,16 @@ struct HivePartition {
 	FieldIndex field_index;
 	LogicalType field_type;
 	Value hive_value;
-	DuckLakeTransform transform;
-	optional_idx partition_key_index;
+	DuckLakeTransformType transform_type;
 };
 
-static bool IsValidTransformedHivePartitionValue(const HivePartition &hive_partition,
-                                                 const DuckLakePartitionField &partition_field) {
-	if (partition_field.transform.type != DuckLakeTransformType::BUCKET) {
-		return true;
-	}
-	if (hive_partition.hive_value.IsNull()) {
-		return true;
-	}
-	auto bucket_value = hive_partition.hive_value.GetValue<int32_t>();
-	if (bucket_value < 0) {
-		return false;
-	}
-	return NumericCast<idx_t>(bucket_value) < partition_field.transform.bucket_count;
-}
-
 struct ParquetFileMetadata {
-	string filepath;
+	string filename;
 	vector<unique_ptr<ParquetColumn>> columns;
 	unordered_map<idx_t, reference<ParquetColumn>> column_id_map;
 	optional_idx row_count;
 	optional_idx file_size_bytes;
 	optional_idx footer_size;
-	optional_idx row_group_count;
 
 	// Store the column mapping entries once they are computed
 	vector<unique_ptr<DuckLakeNameMapEntry>> map_entries;
@@ -154,15 +135,17 @@ struct ParquetFileMetadata {
 struct DuckLakeFileProcessor {
 public:
 	DuckLakeFileProcessor(DuckLakeTransaction &transaction, ClientContext &context,
-	                      const DuckLakeAddDataFilesData &bind_data)
+	                      const DuckLakeAddDataFilesData &bind_data, string target_format_p)
 	    : transaction(transaction), context(context), table(bind_data.table), allow_missing(bind_data.allow_missing),
-	      ignore_extra_columns(bind_data.ignore_extra_columns), hive_partitioning(bind_data.hive_partitioning) {
+	      ignore_extra_columns(bind_data.ignore_extra_columns), hive_partitioning(bind_data.hive_partitioning),
+	      target_format(std::move(target_format_p)) {
 	}
 
 	vector<DuckLakeDataFile> AddFiles(const vector<string> &globs);
 
 private:
 	void ReadParquetFullMetadata(const string &glob, vector<DuckLakeDataFile> &result);
+	void ReadVortexFullMetadata(const string &glob, vector<DuckLakeDataFile> &result);
 	DuckLakeDataFile AddFileToTable(ParquetFileMetadata &file);
 	unique_ptr<DuckLakeNameMapEntry> MapColumn(ParquetFileMetadata &file_metadata, ParquetColumn &column,
 	                                           const DuckLakeFieldId &field_id, string prefix);
@@ -170,9 +153,6 @@ private:
 	                                                    vector<unique_ptr<ParquetColumn>> &parquet_columns,
 	                                                    const vector<unique_ptr<DuckLakeFieldId>> &field_ids,
 	                                                    const string &prefix = string());
-	void CollectLiveFieldIds(const vector<unique_ptr<DuckLakeFieldId>> &field_ids, unordered_set<idx_t> &result);
-	void ValidateParquetFieldIds(const ParquetFileMetadata &file, const vector<unique_ptr<ParquetColumn>> &columns,
-	                             const unordered_set<idx_t> &live_field_ids, const string &prefix = string());
 	void MapColumnStats(ParquetFileMetadata &file_metadata, DuckLakeDataFile &result);
 	unique_ptr<DuckLakeNameMapEntry> MapHiveColumn(ParquetFileMetadata &file_metadata, const DuckLakeFieldId &field_id,
 	                                               const Value &hive_value);
@@ -190,7 +170,35 @@ private:
 	map<string, string> hive_partitions;
 	HivePartitioningType hive_partitioning;
 	unordered_set<string> processed_files;
+	string target_format;
 };
+
+static string InferExternalFileFormat(const string &path) {
+	auto lower = StringUtil::Lower(path);
+	if (StringUtil::EndsWith(lower, ".vortex")) {
+		return "vortex";
+	}
+	return "parquet";
+}
+
+static bool PathLooksLikeGlob(const string &path) {
+	return path.find('*') != string::npos || path.find('?') != string::npos || path.find('[') != string::npos;
+}
+
+// When a glob ends in a concrete extension (e.g. *.vortex / file?.parquet), reject
+// format mismatches before MultiFile opens anything.
+static bool TryInferGlobFormatHint(const string &path, string &out_format) {
+	auto lower = StringUtil::Lower(path);
+	if (StringUtil::EndsWith(lower, ".vortex")) {
+		out_format = "vortex";
+		return true;
+	}
+	if (StringUtil::EndsWith(lower, ".parquet")) {
+		out_format = "parquet";
+		return true;
+	}
+	return false;
+}
 
 void DuckLakeFileProcessor::ReadParquetFullMetadata(const string &glob, vector<DuckLakeDataFile> &written_files) {
 	auto result = transaction.ExecuteRaw(StringUtil::Format(R"(
@@ -199,8 +207,7 @@ SELECT
         file_name := x.file_name,
         num_rows := x.num_rows,
         file_size_bytes := x.file_size_bytes,
-        footer_size := x.footer_size,
-        num_row_groups := x.num_row_groups
+        footer_size := x.footer_size
     )) AS parquet_file_metadata,
     list_transform(parquet_metadata, lambda x: struct_pack(
         column_id := x.column_id,
@@ -238,12 +245,12 @@ FROM parquet_full_metadata(%s)
 		auto &parquet_schema_vec = chunk.data[2];
 
 		// Access the underlying list data directly
-		auto &file_metadata_list_entries = ListVector::GetChildMutable(file_metadata_vec);
-		auto &parquet_metadata_list_entries = ListVector::GetChildMutable(parquet_metadata_vec);
-		auto &parquet_schema_list_entries = ListVector::GetChildMutable(parquet_schema_vec);
-		auto file_metadata_list_data = FlatVector::GetData<list_entry_t>(file_metadata_vec);
-		auto parquet_metadata_list_data = FlatVector::GetData<list_entry_t>(parquet_metadata_vec);
-		auto parquet_schema_list_data = FlatVector::GetData<list_entry_t>(parquet_schema_vec);
+		auto &file_metadata_list_entries = ListVector::GetEntry(file_metadata_vec);
+		auto &parquet_metadata_list_entries = ListVector::GetEntry(parquet_metadata_vec);
+		auto &parquet_schema_list_entries = ListVector::GetEntry(parquet_schema_vec);
+		auto file_metadata_list_data = ListVector::GetData(file_metadata_vec);
+		auto parquet_metadata_list_data = ListVector::GetData(parquet_metadata_vec);
+		auto parquet_schema_list_data = ListVector::GetData(parquet_schema_vec);
 
 		auto &file_metadata_entry = file_metadata_list_data[row_idx];
 		auto file_metadata_offset = file_metadata_entry.offset;
@@ -256,49 +263,30 @@ FROM parquet_full_metadata(%s)
 		auto parquet_schema_offset = parquet_schema_entry.offset;
 		auto parquet_schema_length = parquet_schema_entry.length;
 
-		// Extract the file path from the file metadata struct
+		// Extract filename from the file metadata struct
 		auto &struct_children = StructVector::GetEntries(file_metadata_list_entries);
 		idx_t struct_idx = file_metadata_offset;
 
-		auto filepath =
-		    FlatVector::GetData<string_t>(struct_children[0])[struct_idx].GetString(); // struct field: file_name
+		auto filename =
+		    FlatVector::GetData<string_t>(*struct_children[0])[struct_idx].GetString(); // struct field: file_name
 
-		// Use canonicalize path to detect duplicate files
-		auto &fs = FileSystem::GetFileSystem(context);
-		auto canonical_filepath = fs.CanonicalizePath(filepath);
+		// Normalize path separators for consistent deduplication across platforms (Windows uses backslashes)
+		auto normalized_filename = StringUtil::Replace(filename, "\\", "/");
 
 		// Check if we've already processed this file (can happen with overlapping globs)
-		if (processed_files.count(canonical_filepath)) {
+		if (processed_files.count(normalized_filename)) {
 			// File already processed in a previous glob, skip
 			continue;
 		}
-		processed_files.insert(canonical_filepath);
-
-		// Keep paths inside the DuckLake data directory in the configured path namespace. Canonicalization can rewrite
-		// a symlinked prefix (for example /tmp to /private/tmp), while orphan cleanup scans the configured data path.
-		// The canonical path remains the deduplication key, but the rebased path is persisted.
-		auto persisted_filepath = canonical_filepath;
-		auto &data_path = transaction.GetCatalog().DataPath();
-		if (!data_path.empty()) {
-			auto canonical_data_path = fs.CanonicalizePath(data_path);
-			auto path_separator = fs.PathSeparator(data_path);
-			if (!StringUtil::EndsWith(canonical_data_path, path_separator)) {
-				canonical_data_path += path_separator;
-			}
-			if (StringUtil::StartsWith(canonical_filepath, canonical_data_path)) {
-				persisted_filepath = data_path + canonical_filepath.substr(canonical_data_path.size());
-			}
-		}
+		processed_files.insert(normalized_filename);
 
 		ParquetFileMetadata file;
-		file.filepath = std::move(persisted_filepath);
+		file.filename = std::move(filename);
 
-		file.row_count = FlatVector::GetData<int64_t>(struct_children[1])[struct_idx]; // struct field: num_rows
+		file.row_count = FlatVector::GetData<int64_t>(*struct_children[1])[struct_idx]; // struct field: num_rows
 		file.file_size_bytes =
-		    FlatVector::GetData<uint64_t>(struct_children[2])[struct_idx]; // struct field: file_size_bytes
-		file.footer_size = FlatVector::GetData<uint64_t>(struct_children[3])[struct_idx]; // struct field: footer_size
-		file.row_group_count =
-		    NumericCast<idx_t>(FlatVector::GetData<int64_t>(struct_children[4])[struct_idx]); // num_row_groups
+		    FlatVector::GetData<uint64_t>(*struct_children[2])[struct_idx]; // struct field: file_size_bytes
+		file.footer_size = FlatVector::GetData<uint64_t>(*struct_children[3])[struct_idx]; // struct field: footer_size
 
 		bool saw_root = false;
 		vector<idx_t> child_counts;
@@ -309,14 +297,14 @@ FROM parquet_full_metadata(%s)
 		auto &schema_struct_children = StructVector::GetEntries(parquet_schema_list_entries);
 
 		// Extract child vectors
-		auto &name_vec = schema_struct_children[0];
-		auto &type_vec = schema_struct_children[1];
-		auto &num_children_vec = schema_struct_children[2];
-		auto &converted_type_vec = schema_struct_children[3];
-		auto &scale_vec = schema_struct_children[4];
-		auto &precision_vec = schema_struct_children[5];
-		auto &field_id_vec = schema_struct_children[6];
-		auto &logical_type_vec = schema_struct_children[7];
+		auto &name_vec = *schema_struct_children[0];
+		auto &type_vec = *schema_struct_children[1];
+		auto &num_children_vec = *schema_struct_children[2];
+		auto &converted_type_vec = *schema_struct_children[3];
+		auto &scale_vec = *schema_struct_children[4];
+		auto &precision_vec = *schema_struct_children[5];
+		auto &field_id_vec = *schema_struct_children[6];
+		auto &logical_type_vec = *schema_struct_children[7];
 
 		// Get data pointers
 		auto name_data = FlatVector::GetData<string_t>(name_vec);
@@ -410,14 +398,14 @@ FROM parquet_full_metadata(%s)
 		DetermineMapping(file);
 
 		auto &metadata_struct_children = StructVector::GetEntries(parquet_metadata_list_entries);
-		auto &column_id_vec = metadata_struct_children[0];
-		auto &stats_min_vec = metadata_struct_children[1];
-		auto &stats_max_vec = metadata_struct_children[2];
-		auto &stats_null_count_vec = metadata_struct_children[3];
-		auto &stats_num_values_vec = metadata_struct_children[4];
-		auto &total_compressed_size_vec = metadata_struct_children[5];
-		auto &geo_bbox_vec = metadata_struct_children[6];
-		auto &geo_types_vec = metadata_struct_children[7];
+		auto &column_id_vec = *metadata_struct_children[0];
+		auto &stats_min_vec = *metadata_struct_children[1];
+		auto &stats_max_vec = *metadata_struct_children[2];
+		auto &stats_null_count_vec = *metadata_struct_children[3];
+		auto &stats_num_values_vec = *metadata_struct_children[4];
+		auto &total_compressed_size_vec = *metadata_struct_children[5];
+		auto &geo_bbox_vec = *metadata_struct_children[6];
+		auto &geo_types_vec = *metadata_struct_children[7];
 
 		auto column_id_data = FlatVector::GetData<int64_t>(column_id_vec);
 		auto stats_min_data = FlatVector::GetData<string_t>(stats_min_vec);
@@ -489,23 +477,23 @@ FROM parquet_full_metadata(%s)
 			if (geo_bbox_validity.RowIsValid(metadata_idx) && stats.extra_stats) {
 				// Access geo_bbox struct fields directly
 				auto &bbox_struct_children = StructVector::GetEntries(geo_bbox_vec);
-				auto bbox_xmin_data = FlatVector::GetData<double>(bbox_struct_children[0]);
-				auto bbox_xmax_data = FlatVector::GetData<double>(bbox_struct_children[1]);
-				auto bbox_ymin_data = FlatVector::GetData<double>(bbox_struct_children[2]);
-				auto bbox_ymax_data = FlatVector::GetData<double>(bbox_struct_children[3]);
-				auto bbox_zmin_data = FlatVector::GetData<double>(bbox_struct_children[4]);
-				auto bbox_zmax_data = FlatVector::GetData<double>(bbox_struct_children[5]);
-				auto bbox_mmin_data = FlatVector::GetData<double>(bbox_struct_children[6]);
-				auto bbox_mmax_data = FlatVector::GetData<double>(bbox_struct_children[7]);
+				auto bbox_xmin_data = FlatVector::GetData<double>(*bbox_struct_children[0]);
+				auto bbox_xmax_data = FlatVector::GetData<double>(*bbox_struct_children[1]);
+				auto bbox_ymin_data = FlatVector::GetData<double>(*bbox_struct_children[2]);
+				auto bbox_ymax_data = FlatVector::GetData<double>(*bbox_struct_children[3]);
+				auto bbox_zmin_data = FlatVector::GetData<double>(*bbox_struct_children[4]);
+				auto bbox_zmax_data = FlatVector::GetData<double>(*bbox_struct_children[5]);
+				auto bbox_mmin_data = FlatVector::GetData<double>(*bbox_struct_children[6]);
+				auto bbox_mmax_data = FlatVector::GetData<double>(*bbox_struct_children[7]);
 
-				auto &bbox_xmin_validity = FlatVector::Validity(bbox_struct_children[0]);
-				auto &bbox_xmax_validity = FlatVector::Validity(bbox_struct_children[1]);
-				auto &bbox_ymin_validity = FlatVector::Validity(bbox_struct_children[2]);
-				auto &bbox_ymax_validity = FlatVector::Validity(bbox_struct_children[3]);
-				auto &bbox_zmin_validity = FlatVector::Validity(bbox_struct_children[4]);
-				auto &bbox_zmax_validity = FlatVector::Validity(bbox_struct_children[5]);
-				auto &bbox_mmin_validity = FlatVector::Validity(bbox_struct_children[6]);
-				auto &bbox_mmax_validity = FlatVector::Validity(bbox_struct_children[7]);
+				auto &bbox_xmin_validity = FlatVector::Validity(*bbox_struct_children[0]);
+				auto &bbox_xmax_validity = FlatVector::Validity(*bbox_struct_children[1]);
+				auto &bbox_ymin_validity = FlatVector::Validity(*bbox_struct_children[2]);
+				auto &bbox_ymax_validity = FlatVector::Validity(*bbox_struct_children[3]);
+				auto &bbox_zmin_validity = FlatVector::Validity(*bbox_struct_children[4]);
+				auto &bbox_zmax_validity = FlatVector::Validity(*bbox_struct_children[5]);
+				auto &bbox_mmin_validity = FlatVector::Validity(*bbox_struct_children[6]);
+				auto &bbox_mmax_validity = FlatVector::Validity(*bbox_struct_children[7]);
 				auto &geo_stats = stats.extra_stats->Cast<DuckLakeColumnGeoStats>();
 				if (bbox_xmin_validity.RowIsValid(metadata_idx))
 					geo_stats.xmin = bbox_xmin_data[metadata_idx];
@@ -535,6 +523,259 @@ FROM parquet_full_metadata(%s)
 			}
 
 			column.column_stats.push_back(std::move(stats));
+		}
+		auto inferred = InferExternalFileFormat(file.filename);
+		if (inferred != target_format) {
+			throw InvalidInputException(
+			    "Cannot add %s file \"%s\" to a DuckLake table configured for %s; formats must match", inferred,
+			    file.filename, target_format);
+		}
+		auto data_file = AddFileToTable(file);
+		data_file.created_by_ducklake = false;
+		if (data_file.row_count > 0) {
+			written_files.push_back(std::move(data_file));
+		}
+	}
+}
+
+void DuckLakeFileProcessor::ReadVortexFullMetadata(const string &glob, vector<DuckLakeDataFile> &written_files) {
+	auto result = transaction.ExecuteRaw(StringUtil::Format(R"(
+SELECT
+    list_transform(vortex_file_metadata, lambda x: struct_pack(
+        file_name := x.file_name,
+        num_rows := x.num_rows,
+        file_size_bytes := x.file_size_bytes,
+        footer_size := x.footer_size
+    )) AS vortex_file_metadata,
+    list_transform(vortex_column_stats, lambda x: struct_pack(
+        column_id := x.column_id,
+        stats_min := x.stats_min,
+        stats_max := x.stats_max,
+        stats_null_count := x.stats_null_count,
+        stats_num_values := x.stats_num_values,
+        total_compressed_size := x.total_compressed_size,
+        contains_nan := x.contains_nan
+    )) AS vortex_column_stats,
+    list_transform(vortex_schema, lambda x: struct_pack(
+        "name" := x."name",
+        duckdb_type := x.duckdb_type,
+        num_children := x.num_children,
+        field_id := x.field_id
+    )) AS vortex_schema
+FROM vortex_full_metadata(%s)
+)",
+	                                                        SQLString(glob)));
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to add data files to DuckLake: ");
+	}
+
+	auto &type_manager = TypeManager::Get(context);
+
+	for (auto &row : *result) {
+		auto &chunk = row.GetChunk();
+		idx_t row_idx = row.GetRowInChunk();
+
+		auto &file_metadata_vec = chunk.data[0];
+		auto &vortex_stats_vec = chunk.data[1];
+		auto &vortex_schema_vec = chunk.data[2];
+
+		auto &file_metadata_list_entries = ListVector::GetEntry(file_metadata_vec);
+		auto &vortex_stats_list_entries = ListVector::GetEntry(vortex_stats_vec);
+		auto &vortex_schema_list_entries = ListVector::GetEntry(vortex_schema_vec);
+		auto file_metadata_list_data = ListVector::GetData(file_metadata_vec);
+		auto vortex_stats_list_data = ListVector::GetData(vortex_stats_vec);
+		auto vortex_schema_list_data = ListVector::GetData(vortex_schema_vec);
+
+		auto &file_metadata_entry = file_metadata_list_data[row_idx];
+		auto file_metadata_offset = file_metadata_entry.offset;
+
+		auto &vortex_stats_entry = vortex_stats_list_data[row_idx];
+		auto vortex_stats_offset = vortex_stats_entry.offset;
+		auto vortex_stats_length = vortex_stats_entry.length;
+
+		auto &vortex_schema_entry = vortex_schema_list_data[row_idx];
+		auto vortex_schema_offset = vortex_schema_entry.offset;
+		auto vortex_schema_length = vortex_schema_entry.length;
+
+		auto &struct_children = StructVector::GetEntries(file_metadata_list_entries);
+		idx_t struct_idx = file_metadata_offset;
+
+		auto filename = FlatVector::GetData<string_t>(*struct_children[0])[struct_idx].GetString();
+		auto normalized_filename = StringUtil::Replace(filename, "\\", "/");
+		if (processed_files.count(normalized_filename)) {
+			continue;
+		}
+		processed_files.insert(normalized_filename);
+
+		ParquetFileMetadata file;
+		file.filename = std::move(filename);
+		file.row_count = FlatVector::GetData<int64_t>(*struct_children[1])[struct_idx];
+		file.file_size_bytes = FlatVector::GetData<uint64_t>(*struct_children[2])[struct_idx];
+		file.footer_size = FlatVector::GetData<uint64_t>(*struct_children[3])[struct_idx];
+
+		bool saw_root = false;
+		vector<idx_t> child_counts;
+		idx_t next_column_id = 0;
+		vector<ParquetColumn *> column_stack;
+
+		auto &schema_struct_children = StructVector::GetEntries(vortex_schema_list_entries);
+		auto &name_vec = *schema_struct_children[0];
+		auto &duckdb_type_vec = *schema_struct_children[1];
+		auto &num_children_vec = *schema_struct_children[2];
+		auto &field_id_vec = *schema_struct_children[3];
+
+		auto name_data = FlatVector::GetData<string_t>(name_vec);
+		auto duckdb_type_data = FlatVector::GetData<string_t>(duckdb_type_vec);
+		auto num_children_data = FlatVector::GetData<int64_t>(num_children_vec);
+		auto field_id_data = FlatVector::GetData<int64_t>(field_id_vec);
+
+		auto &num_children_validity = FlatVector::Validity(num_children_vec);
+		auto &duckdb_type_validity = FlatVector::Validity(duckdb_type_vec);
+		auto &field_id_validity = FlatVector::Validity(field_id_vec);
+
+		for (idx_t schema_idx = vortex_schema_offset; schema_idx < vortex_schema_offset + vortex_schema_length;
+		     schema_idx++) {
+			idx_t child_count = 0;
+			if (num_children_validity.RowIsValid(schema_idx)) {
+				child_count = num_children_data[schema_idx];
+			}
+
+			if (!saw_root) {
+				saw_root = true;
+				child_counts.push_back(child_count);
+				continue;
+			}
+			if (child_counts.empty()) {
+				throw InvalidInputException("child_counts provided by vortex_schema are unaligned");
+			}
+
+			auto column = make_uniq<ParquetColumn>();
+			column->name = name_data[schema_idx].GetString();
+			if (duckdb_type_validity.RowIsValid(schema_idx) && duckdb_type_data[schema_idx].GetSize() > 0) {
+				auto type_str = duckdb_type_data[schema_idx].GetString();
+				column->duckdb_logical_type = type_manager.ParseLogicalType(type_str, context);
+				column->has_duckdb_type = true;
+			}
+			if (field_id_validity.RowIsValid(schema_idx)) {
+				column->field_id = field_id_data[schema_idx];
+			}
+
+			if (child_count == 0) {
+				column->column_id = next_column_id++;
+			} else {
+				column->column_id = DConstants::INVALID_INDEX;
+			}
+
+			ParquetColumn *column_ptr = nullptr;
+			if (column_stack.empty()) {
+				file.columns.push_back(std::move(column));
+				column_ptr = file.columns.back().get();
+			} else {
+				column_stack.back()->child_columns.push_back(std::move(column));
+				column_ptr = column_stack.back()->child_columns.back().get();
+			}
+
+			if (column_ptr->column_id != DConstants::INVALID_INDEX) {
+				file.column_id_map.emplace(column_ptr->column_id, reference<ParquetColumn>(*column_ptr));
+			}
+
+			child_counts.back()--;
+			if (child_counts.back() == 0) {
+				if (!column_stack.empty()) {
+					column_stack.pop_back();
+				}
+				child_counts.pop_back();
+			}
+			if (child_count > 0) {
+				column_stack.push_back(column_ptr);
+				child_counts.push_back(child_count);
+			}
+		}
+
+		DetermineMapping(file);
+
+		auto &stats_struct_children = StructVector::GetEntries(vortex_stats_list_entries);
+		auto &column_id_vec = *stats_struct_children[0];
+		auto &stats_min_vec = *stats_struct_children[1];
+		auto &stats_max_vec = *stats_struct_children[2];
+		auto &stats_null_count_vec = *stats_struct_children[3];
+		auto &stats_num_values_vec = *stats_struct_children[4];
+		auto &total_compressed_size_vec = *stats_struct_children[5];
+		auto &contains_nan_vec = *stats_struct_children[6];
+
+		auto column_id_data = FlatVector::GetData<int64_t>(column_id_vec);
+		auto stats_min_data = FlatVector::GetData<string_t>(stats_min_vec);
+		auto stats_max_data = FlatVector::GetData<string_t>(stats_max_vec);
+		auto stats_null_count_data = FlatVector::GetData<int64_t>(stats_null_count_vec);
+		auto stats_num_values_data = FlatVector::GetData<int64_t>(stats_num_values_vec);
+		auto total_compressed_size_data = FlatVector::GetData<int64_t>(total_compressed_size_vec);
+		auto contains_nan_data = FlatVector::GetData<bool>(contains_nan_vec);
+
+		auto &column_id_validity = FlatVector::Validity(column_id_vec);
+		auto &stats_min_validity = FlatVector::Validity(stats_min_vec);
+		auto &stats_max_validity = FlatVector::Validity(stats_max_vec);
+		auto &stats_null_count_validity = FlatVector::Validity(stats_null_count_vec);
+		auto &stats_num_values_validity = FlatVector::Validity(stats_num_values_vec);
+		auto &total_compressed_size_validity = FlatVector::Validity(total_compressed_size_vec);
+		auto &contains_nan_validity = FlatVector::Validity(contains_nan_vec);
+
+		for (idx_t metadata_idx = vortex_stats_offset; metadata_idx < vortex_stats_offset + vortex_stats_length;
+		     metadata_idx++) {
+			if (!column_id_validity.RowIsValid(metadata_idx)) {
+				continue;
+			}
+			auto column_id = column_id_data[metadata_idx];
+			auto column_entry = file.column_id_map.find(column_id);
+			if (column_entry == file.column_id_map.end()) {
+				throw InvalidInputException("Column id not found in Vortex map?");
+			}
+			const auto &column_field_entry = file.column_id_to_field_map.find(column_id);
+			if (column_field_entry == file.column_id_to_field_map.end()) {
+				continue;
+			}
+
+			auto &column = column_entry->second.get();
+			auto &column_field = column_field_entry->second;
+			DuckLakeColumnStats stats(column_field.second);
+
+			if (stats_min_validity.RowIsValid(metadata_idx)) {
+				stats.has_min = true;
+				stats.min = stats_min_data[metadata_idx].GetString();
+			}
+			if (stats_max_validity.RowIsValid(metadata_idx)) {
+				stats.has_max = true;
+				stats.max = stats_max_data[metadata_idx].GetString();
+			}
+			if (stats_null_count_validity.RowIsValid(metadata_idx)) {
+				auto null_count = stats_null_count_data[metadata_idx];
+				if (null_count >= 0) {
+					stats.has_null_count = true;
+					stats.null_count = static_cast<idx_t>(null_count);
+				}
+			}
+			if (stats_num_values_validity.RowIsValid(metadata_idx)) {
+				auto num_values = stats_num_values_data[metadata_idx];
+				if (num_values >= 0) {
+					stats.has_num_values = true;
+					stats.num_values = static_cast<idx_t>(num_values);
+				}
+			}
+			if (total_compressed_size_validity.RowIsValid(metadata_idx)) {
+				stats.column_size_bytes = total_compressed_size_data[metadata_idx];
+			}
+			if (contains_nan_validity.RowIsValid(metadata_idx)) {
+				stats.has_contains_nan = true;
+				stats.contains_nan = contains_nan_data[metadata_idx];
+			}
+
+			column.column_stats.push_back(std::move(stats));
+		}
+
+		auto inferred = InferExternalFileFormat(file.filename);
+		if (inferred != target_format) {
+			throw InvalidInputException(
+			    "Cannot add %s file \"%s\" to a DuckLake table configured for %s; formats must match", inferred,
+			    file.filename, target_format);
 		}
 		auto data_file = AddFileToTable(file);
 		data_file.created_by_ducklake = false;
@@ -584,6 +825,10 @@ private:
 };
 
 LogicalType DuckLakeParquetTypeChecker::DeriveLogicalType(const ParquetColumn &s_ele) {
+	// Vortex (and other DuckDB-native) externals expose duckdb_type directly.
+	if (s_ele.has_duckdb_type) {
+		return s_ele.duckdb_logical_type;
+	}
 	// FIXME: this is more or less copied from DeriveLogicalType in DuckDB's Parquet reader
 	//  we should just emit DuckDB's type in parquet_schema and remove this method
 	if (!s_ele.child_columns.empty()) {
@@ -709,9 +954,9 @@ bool DuckLakeParquetTypeChecker::CheckTypes(const vector<LogicalType> &types) {
 }
 
 void DuckLakeParquetTypeChecker::Fail() {
-	string error_message = StringUtil::Format(
-	    "Failed to map column \"%s%s\" from file \"%s\" to the column in table \"%s\"",
-	    prefix.empty() ? prefix : prefix + ".", column.name, file_metadata.filepath, table.name.GetIdentifierName());
+	string error_message =
+	    StringUtil::Format("Failed to map column \"%s%s\" from file \"%s\" to the column in table \"%s\"",
+	                       prefix.empty() ? prefix : prefix + ".", column.name, file_metadata.filename, table.name);
 	for (auto &failure : failures) {
 		error_message += "\n* " + failure;
 	}
@@ -921,6 +1166,10 @@ unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapColumn(ParquetFileMet
 				// With legacy avro list layout, we just access directly
 				map_entry->child_entries.push_back(
 				    MapColumn(file_metadata, *column.child_columns[0], *field_children[0], prefix));
+			} else if (column.child_columns[0]->name == "element" || column.has_duckdb_type) {
+				// Vortex / DuckDB-native list layout: list → element
+				map_entry->child_entries.push_back(
+				    MapColumn(file_metadata, *column.child_columns[0], *field_children[0], prefix));
 			} else {
 				// for lists we don't need to do any name mapping - the child element always maps to each other
 				// (1) Parquet has an extra element in between the list and its child ("REPEATED") - strip it
@@ -933,9 +1182,14 @@ unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapColumn(ParquetFileMet
 			break;
 		case LogicalTypeId::MAP:
 			// for maps we don't need to do any name mapping - the child elements are always key/value
-			// (1) Parquet has an extra element in between the list and its child ("REPEATED") - strip it
-			map_entry->child_entries =
-			    MapColumns(file_metadata, column.child_columns[0]->child_columns, field_id.Children(), prefix);
+			if (!column.child_columns.empty() && column.child_columns[0]->name == "key_value") {
+				map_entry->child_entries =
+				    MapColumns(file_metadata, column.child_columns[0]->child_columns, field_id.Children(), prefix);
+			} else {
+				// (1) Parquet has an extra element in between the list and its child ("REPEATED") - strip it
+				map_entry->child_entries =
+				    MapColumns(file_metadata, column.child_columns[0]->child_columns, field_id.Children(), prefix);
+			}
 			break;
 		default:
 			throw InvalidInputException("Unsupported nested type %s for add files", field_id.Type());
@@ -950,19 +1204,6 @@ static bool SupportsHivePartitioning(const LogicalType &type) {
 		return false;
 	}
 	return true;
-}
-
-static optional_idx GetIdentityPartitionKeyIndex(optional_ptr<DuckLakePartition> partition_data,
-                                                 FieldIndex field_index) {
-	if (!partition_data) {
-		return optional_idx();
-	}
-	for (auto &field : partition_data->fields) {
-		if (field.field_id == field_index && field.transform.type == DuckLakeTransformType::IDENTITY) {
-			return optional_idx(field.partition_key_index);
-		}
-	}
-	return optional_idx();
 }
 
 unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapHiveColumn(ParquetFileMetadata &file_metadata,
@@ -984,11 +1225,8 @@ unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapHiveColumn(ParquetFil
 	}
 
 	// Store the hive partition information for later statistics processing
-	DuckLakeTransform transform;
-	transform.type = DuckLakeTransformType::IDENTITY;
-	auto partition_key_index = GetIdentityPartitionKeyIndex(table.GetPartitionData(), target_field_id);
 	file_metadata.hive_partition_values.emplace_back(
-	    HivePartition {target_field_id, field_id.Type(), hive_value, transform, partition_key_index});
+	    HivePartition {target_field_id, field_id.Type(), hive_value, DuckLakeTransformType::IDENTITY});
 
 	// return the map - the name is empty on purpose to signal this comes from a partition
 	auto result = make_uniq<DuckLakeNameMapEntry>();
@@ -1121,9 +1359,8 @@ void DuckLakeFileProcessor::MapColumnStats(ParquetFileMetadata &file_metadata, D
 
 	// Process statistics for hive partition columns
 	for (auto &entry : file_metadata.hive_partition_values) {
-		if (entry.transform.type == DuckLakeTransformType::BUCKET ||
-		    DuckLakePartitionUtils::IsEpochTransform(entry.transform.type)) {
-			// Hash/epoch-ordinal folder values are not source column values, so no statistics from them
+		if (entry.transform_type == DuckLakeTransformType::BUCKET) {
+			// Bucket partitioning uses the result of the hash for the folder names, so we can't get statistics from it
 			continue;
 		}
 
@@ -1169,8 +1406,8 @@ DuckLakeFileProcessor::MapColumns(ParquetFileMetadata &file_metadata,
 			}
 			throw InvalidInputException("Column \"%s%s\" exists in file \"%s\" but was not found in table \"%s\"\n* "
 			                            "Set ignore_extra_columns => true to add the file anyway",
-			                            prefix.empty() ? prefix : prefix + ".", col->name, file_metadata.filepath,
-			                            table.name.GetIdentifierName());
+			                            prefix.empty() ? prefix : prefix + ".", col->name, file_metadata.filename,
+			                            table.name);
 		}
 		auto hive_entry = hive_partitions.find(col->name);
 		if (hive_entry != hive_partitions.end()) {
@@ -1198,41 +1435,10 @@ DuckLakeFileProcessor::MapColumns(ParquetFileMetadata &file_metadata,
 			throw InvalidInputException(
 			    "Column \"%s%s\" exists in table \"%s\" but was not found in file \"%s\"\n* Set "
 			    "allow_missing => true to allow missing fields and columns",
-			    prefix.empty() ? prefix : prefix + ".", entry.second.get().Name(), table.name.GetIdentifierName(),
-			    file_metadata.filepath);
+			    prefix.empty() ? prefix : prefix + ".", entry.second.get().Name(), table.name, file_metadata.filename);
 		}
 	}
 	return column_maps;
-}
-
-static bool IsDuckLakeInternalColumn(const string &name) {
-	return name == "duckdb_schema" || StringUtil::StartsWith(name, "_ducklake_internal_");
-}
-
-void DuckLakeFileProcessor::CollectLiveFieldIds(const vector<unique_ptr<DuckLakeFieldId>> &field_ids,
-                                                unordered_set<idx_t> &result) {
-	for (auto &field_id : field_ids) {
-		result.insert(field_id->GetFieldIndex().index);
-		CollectLiveFieldIds(field_id->Children(), result);
-	}
-}
-
-void DuckLakeFileProcessor::ValidateParquetFieldIds(const ParquetFileMetadata &file,
-                                                    const vector<unique_ptr<ParquetColumn>> &columns,
-                                                    const unordered_set<idx_t> &live_field_ids, const string &prefix) {
-	for (auto &column : columns) {
-		const auto full_name = prefix.empty() ? column->name : StringUtil::Format("%s.%s", prefix, column->name);
-		if (!IsDuckLakeInternalColumn(column->name) && column->field_id.IsValid()) {
-			const auto source_field_id = column->field_id.GetIndex();
-			if (live_field_ids.find(source_field_id) == live_field_ids.end()) {
-				throw InvalidInputException(
-				    "Parquet field ID mismatch for column \"%s\" in file \"%s\": field ID %d is not a live field in "
-				    "table \"%s\"",
-				    full_name, file.filepath, source_field_id, table.name.GetIdentifierName());
-			}
-		}
-		ValidateParquetFieldIds(file, column->child_columns, live_field_ids, full_name);
-	}
 }
 
 void DuckLakeFileProcessor::MapPartitionColumns(ParquetFileMetadata &file) {
@@ -1270,35 +1476,29 @@ void DuckLakeFileProcessor::MapPartitionColumns(ParquetFileMetadata &file) {
 		    DuckLakePartitionUtils::GetPartitionKeyType(partition_field.transform.type, field_id->Type());
 		auto hive_value =
 		    HivePartitioning::GetValue(context, partition_key_name, hive_entry->second, partition_key_type);
-		file.hive_partition_values.emplace_back(HivePartition {partition_field.field_id, partition_key_type, hive_value,
-		                                                       partition_field.transform,
-		                                                       optional_idx(partition_field.partition_key_index)});
+		file.hive_partition_values.emplace_back(
+		    HivePartition {partition_field.field_id, partition_key_type, hive_value, partition_field.transform.type});
 	}
 }
 
 void DuckLakeFileProcessor::DetermineMapping(ParquetFileMetadata &file) {
 	if (hive_partitioning != HivePartitioningType::NO) {
 		// we are mapping hive partitions - check if there are any hive partitioned columns
-		hive_partitions = HivePartitioning::Parse(file.filepath);
+		hive_partitions = HivePartitioning::Parse(file.filename);
 	}
 
 	MapPartitionColumns(file);
-
-	// Before we map parquet columns to DuckLake columns, we need to validate that the parquet field ids are live.
-	unordered_set<idx_t> live_field_ids;
-	CollectLiveFieldIds(table.GetFieldData().GetFieldIds(), live_field_ids);
-	ValidateParquetFieldIds(file, file.columns, live_field_ids);
 
 	file.map_entries = MapColumns(file, file.columns, table.GetFieldData().GetFieldIds());
 }
 
 DuckLakeDataFile DuckLakeFileProcessor::AddFileToTable(ParquetFileMetadata &file) {
 	DuckLakeDataFile result;
-	result.file_name = file.filepath;
+	result.file_name = file.filename;
 	result.row_count = file.row_count.GetIndex();
 	result.file_size_bytes = file.file_size_bytes.GetIndex();
 	result.footer_size = file.footer_size.GetIndex();
-	result.row_group_count = file.row_group_count;
+	result.file_format = target_format;
 
 	auto name_map = make_uniq<DuckLakeNameMap>();
 	name_map->table_id = table.GetTableId();
@@ -1314,43 +1514,31 @@ DuckLakeDataFile DuckLakeFileProcessor::AddFileToTable(ParquetFileMetadata &file
 		if (file.hive_partition_values.size() != partition_data->fields.size()) {
 			invalid_partition = true;
 		} else {
-			vector<bool> found_partition_keys(partition_data->fields.size(), false);
 			for (const auto &hive_partition_value : file.hive_partition_values) {
-				if (!hive_partition_value.partition_key_index.IsValid()) {
-					invalid_partition = true;
-					break;
-				}
-				auto partition_key_index = hive_partition_value.partition_key_index.GetIndex();
-				if (partition_key_index >= partition_data->fields.size() || found_partition_keys[partition_key_index]) {
-					invalid_partition = true;
-					break;
-				}
-				optional_ptr<const DuckLakePartitionField> partition_field;
+				bool found_field = false;
 				for (const auto &field : partition_data->fields) {
-					if (field.partition_key_index == partition_key_index) {
-						partition_field = &field;
+					if (field.field_id.index == hive_partition_value.field_index.index) {
+						found_field = true;
 						break;
 					}
 				}
-				if (!partition_field || partition_field->field_id != hive_partition_value.field_index ||
-				    !(partition_field->transform == hive_partition_value.transform)) {
+				if (!found_field) {
 					invalid_partition = true;
 					break;
 				}
-				if (!IsValidTransformedHivePartitionValue(hive_partition_value, *partition_field)) {
-					invalid_partition = true;
-					break;
-				}
-				found_partition_keys[partition_key_index] = true;
 			}
 		}
 		if (invalid_partition) {
 			throw InvalidInputException("File \"%s\" contains an invalid partition value for the table configuration.",
-			                            file.filepath);
+			                            file.filename);
+		}
+		unordered_map<idx_t, idx_t> field_partition_key_map;
+		for (auto &partition_fields : partition_data->fields) {
+			field_partition_key_map[partition_fields.field_id.index] = partition_fields.partition_key_index;
 		}
 		for (auto &hive_partition : file.hive_partition_values) {
 			result.partition_values.push_back(
-			    {hive_partition.partition_key_index.GetIndex(), hive_partition.hive_value});
+			    {field_partition_key_map[hive_partition.field_index.index], hive_partition.hive_value});
 		}
 		result.partition_id = partition_data->partition_id;
 	}
@@ -1362,7 +1550,33 @@ vector<DuckLakeDataFile> DuckLakeFileProcessor::AddFiles(const vector<string> &g
 	// Each file's intermediate metadata is discarded immediately after processing
 	vector<DuckLakeDataFile> written_files;
 	for (auto &glob : globs) {
-		ReadParquetFullMetadata(glob, written_files);
+		if (!PathLooksLikeGlob(glob)) {
+			auto inferred = InferExternalFileFormat(glob);
+			if (!StringUtil::CIEquals(inferred, target_format)) {
+				throw InvalidInputException(
+				    "Cannot add %s file \"%s\" to a DuckLake table configured for %s; formats must match", inferred,
+				    glob, target_format);
+			}
+		} else {
+			string glob_hint;
+			if (TryInferGlobFormatHint(glob, glob_hint) && !StringUtil::CIEquals(glob_hint, target_format)) {
+				throw InvalidInputException(
+				    "Cannot add %s glob \"%s\" to a DuckLake table configured for %s; formats must match", glob_hint,
+				    glob, target_format);
+			}
+		}
+		if (StringUtil::CIEquals(target_format, "vortex")) {
+			ReadVortexFullMetadata(glob, written_files);
+		} else {
+			ReadParquetFullMetadata(glob, written_files);
+		}
+	}
+	for (auto &file : written_files) {
+		if (!StringUtil::CIEquals(file.file_format, target_format)) {
+			throw InvalidInputException(
+			    "Cannot mix data file formats when adding files; expected %s but found %s in \"%s\"", target_format,
+			    file.file_format, file.file_name);
+		}
 	}
 	return written_files;
 }
@@ -1375,7 +1589,9 @@ static void DuckLakeAddDataFilesExecute(ClientContext &context, TableFunctionInp
 	if (state.finished) {
 		return;
 	}
-	DuckLakeFileProcessor processor(transaction, context, bind_data);
+	auto &ducklake_catalog = bind_data.catalog.Cast<DuckLakeCatalog>();
+	auto target_format = ducklake_catalog.GetDataFileFormat(context, bind_data.table);
+	DuckLakeFileProcessor processor(transaction, context, bind_data, std::move(target_format));
 	auto files_to_add = processor.AddFiles(bind_data.globs);
 	// add the files
 	transaction.AppendFiles(bind_data.table.GetTableId(), std::move(files_to_add));

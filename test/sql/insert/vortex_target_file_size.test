@@ -1,0 +1,39 @@
+# name: test/sql/insert/vortex_target_file_size.test
+# description: Vortex writers rotate when ducklake_target_file_size is small
+# group: [insert]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+SET ducklake_default_data_file_format='vortex'
+
+statement ok
+SET ducklake_default_data_inlining_row_limit=0
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/vortex_target_file_size')
+
+statement ok
+CREATE TABLE ducklake.test(i BIGINT, s VARCHAR);
+
+statement ok
+SET ducklake_target_file_size = '1KB'
+
+statement ok
+INSERT INTO ducklake.test SELECT i, repeat('abcdefghij', 20) FROM range(200) t(i);
+
+query I
+SELECT COUNT(*) > 1 FROM glob('${DATA_PATH}/vortex_target_file_size/main/test/*.vortex')
+----
+true
+
+query I
+SELECT COUNT(*) FROM ducklake.test
+----
+200

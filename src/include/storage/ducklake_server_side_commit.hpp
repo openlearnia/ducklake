@@ -47,8 +47,6 @@ private:
 
 	//! Read commit metadata (author, message, snapshot ids).
 	void ReadCommitHeader();
-	//! Read staged dropped file rows once and cache them.
-	void ReadStagedDroppedFileEntries();
 	//! Load column types for every table touched in this commit.
 	void ReadColumnTypes();
 	//! Read staged data files and their per-file column stats.
@@ -74,8 +72,6 @@ private:
 
 	//! Query the metadata catalog for the latest snapshot.
 	DuckLakeSnapshot ReadLatestSnapshot();
-	//! Whether the metadata schema has the >= 1.1-dev1 additions.
-	bool ReadSupportsV1_1Metadata();
 	//! Build a DuckLakeTableStats from parsed global stats.
 	unique_ptr<DuckLakeTableStats> BuildTableStats(const DuckLakeGlobalStatsInfo &gs);
 	//! Build a full DuckLakeStats map from global stats.
@@ -109,9 +105,6 @@ private:
 	TransactionChangeInformation transaction_changes;
 	map<ColumnKey, LogicalType> column_types;
 	map<TableIndex, shared_ptr<DuckLakeTableStats>> existing_table_stats;
-	bool staged_dropped_files_read = false;
-	vector<pair<string, idx_t>> staged_dropped_files;
-	map<TableIndex, DroppedDataFileStats> staged_dropped_file_stats;
 
 	//! Per-table SQL literal tuples for inlined-data inserts.
 	map<TableIndex, vector<string>> staged_inlined_tuples;
@@ -121,8 +114,8 @@ private:
 	map<idx_t, string> inlined_table_name_cache;
 	//! Delete files attached to transaction-local data files.
 	map<idx_t, vector<DuckLakeDeleteFile>> attached_deletes;
-	//! Compaction-output files indexed by compaction_id, then ordered by file_order.
-	map<idx_t, map<idx_t, DuckLakeDataFile>> compaction_output_files;
+	//! Compaction-output files indexed by compaction_id.
+	map<idx_t, DuckLakeDataFile> compaction_output_files;
 };
 
 } // namespace duckdb

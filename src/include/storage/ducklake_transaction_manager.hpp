@@ -9,7 +9,6 @@
 #pragma once
 
 #include "duckdb/transaction/transaction_manager.hpp"
-#include "duckdb/main/attached_database.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
 

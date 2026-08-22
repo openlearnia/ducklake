@@ -24,6 +24,10 @@ CREATE TABLE t (id INTEGER, data VARCHAR);
 statement ok
 CALL ducklake_set_option('ducklake', 'target_file_size', '1.5KB');
 
+# Keep each logical INSERT in one physical file
+statement ok
+SET ducklake_target_file_size = '512MB'
+
 # Create small files A (VERSION 2)
 statement ok
 INSERT INTO t SELECT i, 'small1' FROM range(100) t(i);
@@ -32,11 +36,32 @@ INSERT INTO t SELECT i, 'small1' FROM range(100) t(i);
 statement ok
 INSERT INTO t SELECT i + 100, 'small2' FROM range(100) t(i);
 
+statement ok
+RESET ducklake_target_file_size
+
+# Fit exactly the two source files regardless of their physical format
+statement ok
+SET VARIABLE pair_target = (
+	SELECT sum(file_size_bytes) + 1
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL
+)
+
+statement ok
+CALL ducklake_set_option('ducklake', 'target_file_size', concat(getvariable('pair_target')::VARCHAR, 'B'));
+
 # Merge A+B into a single file (VERSION 4)
 query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 't')
 ----
 t	2	1
+
+statement ok
+SET VARIABLE merged_ab_size = (
+	SELECT file_size_bytes
+	FROM __ducklake_metadata_ducklake.ducklake_data_file
+	WHERE end_snapshot IS NULL
+)
 
 # Create small files C (VERSION 5)
 statement ok
@@ -48,7 +73,11 @@ INSERT INTO t SELECT i + 300, 'small4' FROM range(100) t(i);
 
 # Merge C+D into a single file (VERSION 7)
 query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 't')
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files(
+	'ducklake',
+	't',
+	max_file_size=>getvariable('merged_ab_size')
+)
 ----
 t	2	1
 
@@ -56,7 +85,7 @@ t	2	1
 # - Merged AB (ids 0-199) with partial_max = 3 (max snapshot in merged file)
 # - Merged CD (ids 200-399) with partial_max = 6 (max snapshot in merged file)
 query III
-SELECT begin_snapshot, end_snapshot, partial_max FROM __ducklake_metadata_ducklake.ducklake_data_file;
+SELECT begin_snapshot, end_snapshot, partial_max FROM __ducklake_metadata_ducklake.ducklake_data_file ORDER BY begin_snapshot;
 ----
 2	NULL	3
 5	NULL	6

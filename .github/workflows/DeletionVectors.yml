@@ -1,5 +1,7 @@
 name: Deletion Vector Tests
-on: [push, pull_request,repository_dispatch]
+# openlearnia fork: manual only — Grain uses GrainExtensionPublish.yml
+on:
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
   cancel-in-progress: true
