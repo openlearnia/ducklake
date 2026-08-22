@@ -785,6 +785,7 @@ PhysicalOperator &DuckLakeCatalog::PlanInsert(ClientContext &context, PhysicalPl
 	}
 	auto &ducklake_table = op.table.Cast<DuckLakeTableEntry>();
 	VerifyNotMaterializedViewBackingTable(context, ducklake_table, "insert into");
+	Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_INSERT, ducklake_table);
 
 	// Sort data according to the table's SET SORTED BY configuration
 	auto sort_data = ducklake_table.GetSortData();
@@ -832,6 +833,7 @@ PhysicalOperator &DuckLakeCatalog::PlanCreateTableAs(ClientContext &context, Phy
 	auto &columns = create_info.columns;
 	auto &duck_transaction = DuckLakeTransaction::Get(context, *this);
 	auto &duck_schema = op.schema.Cast<DuckLakeSchemaEntry>();
+	Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_CREATE, duck_schema);
 	// FIXME: if table already exists and we are doing CREATE IF NOT EXISTS - skip
 	reference<PhysicalOperator> root = plan;
 	optional_ptr<DuckLakeInlineData> inline_data;

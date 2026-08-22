@@ -4,6 +4,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "storage/ducklake_storage.hpp"
 #include "storage/ducklake_scan.hpp"
+#include "storage/ducklake_catalog.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "storage/ducklake_secret.hpp"
 #include "duckdb/logging/log_manager.hpp"
@@ -77,6 +78,30 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("ducklake_mv_stale_read",
 	                          "Behavior when querying a stale DuckLake materialized view: allow, warn, or error",
 	                          LogicalType::VARCHAR, Value("allow"), set_mv_stale_read, SetScope::GLOBAL);
+	config.AddExtensionOption("ducklake_role",
+	                          "Active DuckLake RBAC role for this session (empty = PUBLIC grants only)",
+	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::LOCAL);
+	config.AddExtensionOption("ducklake_admin_role",
+	                          "Name of the DuckLake RBAC role that bypasses privilege checks", LogicalType::VARCHAR,
+	                          Value("admin"), nullptr, SetScope::GLOBAL);
+	auto set_enable_rbac = [](ClientContext &context, SetScope, Value &parameter) {
+		bool enable = parameter.IsNull() ? false : BooleanValue::Get(parameter.DefaultCastAs(LogicalType::BOOLEAN));
+		auto databases = context.db->GetDatabaseManager().GetDatabases(context);
+		for (auto &attached : databases) {
+			auto &catalog = attached->GetCatalog();
+			if (catalog.GetCatalogType() != "ducklake") {
+				continue;
+			}
+			auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
+			// one-way like DuckDB's security settings: once RBAC is enabled
+			// for an attached catalog, setting this to false is an error
+			ducklake_catalog.Rbac().SetEnabled(enable);
+		}
+	};
+	config.AddExtensionOption("ducklake_enable_rbac",
+	                          "Enable role-based access control on all attached DuckLake catalogs (one-way: cannot be "
+	                          "disabled without detaching)",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), set_enable_rbac, SetScope::GLOBAL);
 
 	DuckLakeSnapshotsFunction snapshots;
 	loader.RegisterFunction(snapshots);
@@ -149,6 +174,25 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	DuckLakeMaterializedViewsFunction materialized_views;
 	loader.RegisterFunction(materialized_views);
+
+	// RBAC management
+	DuckLakeCreateRoleFunction create_role;
+	loader.RegisterFunction(create_role);
+
+	DuckLakeDropRoleFunction drop_role;
+	loader.RegisterFunction(drop_role);
+
+	DuckLakeGrantFunction grant_privileges;
+	loader.RegisterFunction(grant_privileges);
+
+	DuckLakeRevokeFunction revoke_privileges;
+	loader.RegisterFunction(revoke_privileges);
+
+	DuckLakeRolesFunction list_roles;
+	loader.RegisterFunction(list_roles);
+
+	DuckLakeGrantsFunction list_grants;
+	loader.RegisterFunction(list_grants);
 
 	// Register ducklake_scan so it can be found during deserialization
 	auto ducklake_scan = DuckLakeFunctions::GetDuckLakeScanFunction(loader.GetDatabaseInstance());

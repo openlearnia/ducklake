@@ -15,6 +15,7 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/storage/object_cache.hpp"
 #include "storage/ducklake_catalog_set.hpp"
+#include "storage/ducklake_rbac.hpp"
 #include "storage/ducklake_metadata_info.hpp"
 #include "storage/ducklake_partition_data.hpp"
 #include "storage/ducklake_stats.hpp"
@@ -139,6 +140,12 @@ public:
 	//! persisted/local file format; empty tables use catalog options then the session default.
 	string GetDataFileFormat(ClientContext &context, SchemaIndex schema_id, TableIndex table_id);
 	string GetDataFileFormat(ClientContext &context, DuckLakeTableEntry &table);
+
+	//! Role-based access control state for this catalog (enabled via the
+	//! ENABLE_RBAC attach option - see docs/rbac.md)
+	DuckLakeRbac &Rbac() {
+		return *rbac;
+	}
 
 	optional_ptr<BoundAtClause> CatalogSnapshot() const;
 
@@ -348,6 +355,8 @@ private:
 	vector<DuckLakeMaterializedViewInfo> materialized_views_cache;
 	//! Optional callback for instrumenting metadata queries
 	QueryCallback query_callback;
+	//! Role-based access control state
+	unique_ptr<DuckLakeRbac> rbac;
 };
 
 } // namespace duckdb
