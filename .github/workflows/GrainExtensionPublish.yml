@@ -109,9 +109,10 @@ jobs:
           fi
           cp "$EXT" grain-pkg/ducklake.duckdb_extension
           cp "$EXT" "grain-pkg/ducklake-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
-          test -x duckdb-runtime/bin/duckdb
+          test -f duckdb-runtime/bin/duckdb
           test -f duckdb-runtime/lib/libduckdb.so
           test -f duckdb-runtime/include/duckdb.h
+          chmod +x duckdb-runtime/bin/duckdb
           SHORT_SHA="${GIT_SHA::7}"
           SHORT_DUCKDB_REF="${DUCKDB_REF::10}"
           BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

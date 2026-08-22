@@ -36,6 +36,7 @@ required_caller_fragments = (
     "override_duckdb_repository: https://github.com/openlearnia/duckdb.git",
     "duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}",
     "upload_duckdb_binaries: true",
+    "chmod +x duckdb-runtime/bin/duckdb",
 )
 for fragment in required_caller_fragments:
     if fragment not in caller:
