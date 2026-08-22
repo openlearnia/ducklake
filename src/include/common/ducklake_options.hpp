@@ -37,6 +37,9 @@ struct DuckLakeOptions {
 	map<SchemaIndex, option_map_t> schema_options;
 	map<TableIndex, option_map_t> table_options;
 	idx_t busy_timeout = 5000;
+	//! Enable role-based access control for this catalog (one-way once
+	//! enabled: disabling requires a detach + re-attach)
+	bool enable_rbac = false;
 };
 
 } // namespace duckdb

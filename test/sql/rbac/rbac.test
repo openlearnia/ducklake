@@ -1,0 +1,261 @@
+# name: test/sql/rbac/rbac.test
+# description: Role-based access control for DuckLake catalogs
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+# ------------------------------------------------------------------------ #
+# Default: RBAC disabled - everything works without any grants
+# ------------------------------------------------------------------------ #
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/rbac_lake.db' AS ducklake (DATA_PATH '__TEST_DIR__/rbac_lake_files');
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (42);
+
+query I
+SELECT * FROM ducklake.t;
+----
+42
+
+# roles / grants are empty
+query II
+SELECT * FROM ducklake_roles('ducklake');
+----
+
+query TTIT
+SELECT * FROM ducklake_grants('ducklake');
+----
+
+# ------------------------------------------------------------------------ #
+# Set up roles and grants before enabling enforcement
+# ------------------------------------------------------------------------ #
+
+statement ok
+FROM ducklake_create_role('ducklake', 'reader');
+
+statement ok
+FROM ducklake_create_role('ducklake', 'writer');
+
+# duplicate role is rejected
+statement error
+FROM ducklake_create_role('ducklake', 'reader');
+----
+Invalid Input Error: Role "reader" already exists
+
+# reserved name is rejected
+statement error
+FROM ducklake_create_role('ducklake', 'PUBLIC');
+----
+Invalid Input Error: Invalid role name "PUBLIC"
+
+# grant reader SELECT on the whole catalog (wildcard)
+statement ok
+FROM ducklake_grant('ducklake', 'reader', 'SELECT');
+
+# grant writer INSERT/UPDATE/DELETE on table t
+statement ok
+FROM ducklake_grant('ducklake', 'writer', 'INSERT,UPDATE,DELETE', table_name := 't');
+
+# hardening: grants to non-existent roles are rejected
+statement error
+FROM ducklake_grant('ducklake', 'ghost', 'SELECT');
+----
+Invalid Input Error: Role "ghost" does not exist - create it with ducklake_create_role first
+
+query TT
+SELECT grantee, privileges FROM ducklake_grants('ducklake') ORDER BY grantee;
+----
+reader	SELECT
+writer	INSERT,UPDATE,DELETE
+
+# unknown privilege is rejected
+statement error
+FROM ducklake_grant('ducklake', 'reader', 'TELEPORT');
+----
+Invalid Input Error: Unknown privilege "TELEPORT" - supported privileges are SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, ADMIN, ALL
+
+# ------------------------------------------------------------------------ #
+# Enable RBAC (one-way)
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_enable_rbac = true;
+
+statement error
+SET ducklake_enable_rbac = false;
+----
+Permission Error: Cannot disable ducklake RBAC while the catalog is attached - detach and re-attach to change it
+
+# ------------------------------------------------------------------------ #
+# Enforcement: reader can read but not write
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_role = 'reader';
+
+query I
+SELECT * FROM ducklake.t;
+----
+42
+
+statement error
+INSERT INTO ducklake.t VALUES (43);
+----
+Permission Error: Role "reader" does not have INSERT privilege on table "main.t" of DuckLake catalog "ducklake"
+
+statement error
+UPDATE ducklake.t SET i = 0;
+----
+Permission Error: Role "reader" does not have UPDATE privilege on table "main.t" of DuckLake catalog "ducklake"
+
+statement error
+DELETE FROM ducklake.t;
+----
+Permission Error: Role "reader" does not have DELETE privilege on table "main.t" of DuckLake catalog "ducklake"
+
+statement error
+CREATE TABLE ducklake.t2(i INTEGER);
+----
+Permission Error: Role "reader" does not have CREATE privilege on schema "main" of DuckLake catalog "ducklake"
+
+statement error
+DROP TABLE ducklake.t;
+----
+Permission Error: Role "reader" does not have DROP privilege on table "main.t" of DuckLake catalog "ducklake"
+
+# reader cannot manage grants
+statement error
+FROM ducklake_grant('ducklake', 'reader', 'DELETE', table_name := 't');
+----
+Permission Error: Role "reader" does not have ADMIN privileges on DuckLake catalog "ducklake"
+
+# ------------------------------------------------------------------------ #
+# Enforcement: writer can write but not read
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_role = 'writer';
+
+statement ok
+INSERT INTO ducklake.t VALUES (43);
+
+statement error
+SELECT * FROM ducklake.t;
+----
+Permission Error: Role "writer" does not have SELECT privilege on table "main.t" of DuckLake catalog "ducklake"
+
+# ------------------------------------------------------------------------ #
+# Enforcement: no role set -> only PUBLIC grants apply (none here)
+# ------------------------------------------------------------------------ #
+
+statement ok
+RESET ducklake_role;
+
+statement error
+SELECT * FROM ducklake.t;
+----
+Permission Error: Role "PUBLIC" does not have SELECT privilege on table "main.t" of DuckLake catalog "ducklake"
+
+# PUBLIC grants apply to every session (grant management needs admin)
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+FROM ducklake_grant('ducklake', 'PUBLIC', 'SELECT');
+
+statement ok
+RESET ducklake_role;
+
+query I
+SELECT * FROM ducklake.t LIMIT 1;
+----
+42
+
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+FROM ducklake_revoke('ducklake', 'PUBLIC', 'SELECT');
+
+statement ok
+RESET ducklake_role;
+
+statement error
+SELECT * FROM ducklake.t;
+----
+Permission Error: Role "PUBLIC" does not have SELECT privilege on table "main.t" of DuckLake catalog "ducklake"
+
+# ------------------------------------------------------------------------ #
+# Admin role (ducklake_admin_role bootstrap) can do everything
+# ------------------------------------------------------------------------ #
+
+statement ok
+SET ducklake_role = 'admin';
+
+query I
+SELECT * FROM ducklake.t ORDER BY i;
+----
+42
+43
+
+statement ok
+DELETE FROM ducklake.t WHERE i = 43;
+
+# ------------------------------------------------------------------------ #
+# Re-attach: enforcement and grants persist in the metadata database
+# ------------------------------------------------------------------------ #
+
+statement ok
+DETACH ducklake;
+
+# re-attach without ENABLE_RBAC: enforcement off again
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/rbac_lake.db' AS ducklake (DATA_PATH '__TEST_DIR__/rbac_lake_files');
+
+query I
+SELECT * FROM ducklake.t;
+----
+42
+
+statement ok
+DETACH ducklake;
+
+# re-attach with ENABLE_RBAC: grants persisted
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/rbac_lake.db' AS ducklake (DATA_PATH '__TEST_DIR__/rbac_lake_files', ENABLE_RBAC true);
+
+statement ok
+SET ducklake_role = 'reader';
+
+query I
+SELECT * FROM ducklake.t;
+----
+42
+
+query II
+SELECT * FROM ducklake_roles('ducklake');
+----
+1	reader
+2	writer
+
+# drop role removes its grants too
+statement ok
+SET ducklake_role = 'admin';
+
+statement ok
+FROM ducklake_drop_role('ducklake', 'writer');
+
+query TT
+SELECT grantee, privileges FROM ducklake_grants('ducklake') ORDER BY grantee;
+----
+reader	SELECT
+
+statement ok
+DETACH ducklake;

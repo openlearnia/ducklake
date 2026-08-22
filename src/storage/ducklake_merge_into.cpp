@@ -559,6 +559,10 @@ PhysicalOperator &DuckLakeCatalog::PlanMergeInto(ClientContext &context, Physica
 		throw NotImplementedException("RETURNING is not implemented for DuckLake yet");
 	}
 	VerifyNotMaterializedViewBackingTable(context, op.table.Cast<DuckLakeTableEntry>(), "merge into");
+	// MERGE can insert, update and delete - require all three privileges
+	Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_INSERT, op.table.Cast<DuckLakeTableEntry>());
+	Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_UPDATE, op.table.Cast<DuckLakeTableEntry>());
+	Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_DELETE, op.table.Cast<DuckLakeTableEntry>());
 	map<MergeActionCondition, vector<unique_ptr<MergeIntoOperator>>> actions;
 
 	// plan the merge into clauses

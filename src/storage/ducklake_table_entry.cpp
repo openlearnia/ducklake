@@ -358,6 +358,7 @@ TableFunction DuckLakeTableEntry::GetScanFunction(ClientContext &context, unique
                                                   const EntryLookupInfo &lookup_info) {
 	auto &ducklake_catalog = ParentCatalog().Cast<DuckLakeCatalog>();
 	ducklake_catalog.VerifyMaterializedViewStaleRead(context, *this);
+	ducklake_catalog.Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_SELECT, *this);
 
 	auto file_format = GetDataFileFormat(context, *this);
 	auto function = DuckLakeFunctions::GetDuckLakeScanFunction(*context.db, file_format);

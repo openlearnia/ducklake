@@ -264,6 +264,7 @@ PhysicalOperator &DuckLakeCatalog::PlanUpdate(ClientContext &context, PhysicalPl
 	}
 	auto &table = op.table.Cast<DuckLakeTableEntry>();
 	VerifyNotMaterializedViewBackingTable(context, table, "update");
+	Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_UPDATE, table);
 
 	DuckLakeCopyInput copy_input(context, table);
 	copy_input.virtual_columns = InsertVirtualColumns::WRITE_ROW_ID;

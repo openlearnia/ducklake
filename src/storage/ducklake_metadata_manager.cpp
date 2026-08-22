@@ -221,9 +221,11 @@ CREATE TABLE {METADATA_CATALOG}.ducklake_macro_impl(macro_id BIGINT, impl_id BIG
 CREATE TABLE {METADATA_CATALOG}.ducklake_macro_parameters(macro_id BIGINT, impl_id BIGINT,column_id BIGINT, parameter_name VARCHAR, parameter_type VARCHAR, default_value VARCHAR, default_value_type VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_sort_info(sort_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_sort_expression(sort_id BIGINT, table_id BIGINT, sort_key_index BIGINT, expression VARCHAR, dialect VARCHAR, sort_direction VARCHAR, null_order VARCHAR);
+CREATE TABLE {METADATA_CATALOG}.ducklake_role(role_id BIGINT PRIMARY KEY, role_name VARCHAR UNIQUE NOT NULL);
+CREATE TABLE {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRIMARY KEY, grantee VARCHAR NOT NULL, schema_id BIGINT, table_id BIGINT, privileges BIGINT NOT NULL);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot VALUES (0, NOW(), 0, 1, 0);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes VALUES (0, 'created_schema:"main"',  NULL, NULL, NULL);
-INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '1.1'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
+INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '1.2'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
 INSERT INTO {METADATA_CATALOG}.ducklake_schema VALUES (0, UUID(), 0, NULL, 'main', 'main/', true);
 	)",
 	                                       DuckDB::SourceID(), SQLString(data_path), encryption_str);
@@ -359,6 +361,17 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1' WHERE key = 'versi
 	)");
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to migrate DuckLake from v1.0 to v1.1: ");
+	}
+}
+
+void DuckLakeMetadataManager::MigrateV06() {
+	auto result = transaction.Query(R"(
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_role(role_id BIGINT PRIMARY KEY, role_name VARCHAR UNIQUE NOT NULL);
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRIMARY KEY, grantee VARCHAR NOT NULL, schema_id BIGINT, table_id BIGINT, privileges BIGINT NOT NULL);
+UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.2' WHERE key = 'version';
+	)");
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to migrate DuckLake from v1.1 to v1.2: ");
 	}
 }
 

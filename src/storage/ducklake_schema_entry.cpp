@@ -72,6 +72,7 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTableExtended(CatalogTrans
 	}
 	// reject columns with reserved DuckLake internal names when inlining is enabled
 	auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
+	duck_catalog.Rbac().CheckSchemaPrivilege(transaction.GetContext(), DUCKLAKE_PRIVILEGE_CREATE, *this);
 	if (duck_catalog.DataInliningRowLimit(transaction.GetContext(), schema_id, TableIndex()) > 0) {
 		DuckLakeUtil::ValidateNoInlinedSystemColumns(base_info.columns);
 	}
@@ -117,6 +118,8 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransactio
                                                                CreateFunctionInfo &info) {
 	unique_ptr<CatalogEntry> macro_entry;
 	auto &create_macro_info = info.Cast<CreateMacroInfo>();
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(transaction.GetContext(),
+	                                                             DUCKLAKE_PRIVILEGE_CREATE, *this);
 	switch (info.type) {
 	case CatalogType::MACRO_ENTRY:
 		macro_entry = make_uniq<ScalarMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
@@ -143,6 +146,8 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateIndex(CatalogTransaction t
 }
 
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(transaction.GetContext(), DUCKLAKE_PRIVILEGE_CREATE,
+	                                                             *this);
 	// check if we have an existing entry with this name
 	if (!HandleCreateConflict(transaction, CatalogType::VIEW_ENTRY, info.view_name, info.on_conflict)) {
 		return nullptr;
@@ -204,6 +209,7 @@ void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInf
 			throw BinderException("Cannot use ALTER TABLE on entry %s - it is not a table", alter.name);
 		}
 		auto &table = table_entry->Cast<DuckLakeTableEntry>();
+		catalog.Cast<DuckLakeCatalog>().Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_ALTER, table);
 		auto new_table = table.Alter(context, transaction, alter);
 		if (alter.alter_table_type == AlterTableType::RENAME_TABLE) {
 			// We must check if this view name does not yet exist.
@@ -337,6 +343,21 @@ void DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		                       CatalogTypeToString(catalog_entry->type), CatalogTypeToString(info.type));
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
+	auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
+	switch (info.type) {
+	case CatalogType::TABLE_ENTRY: {
+		auto &table = catalog_entry->Cast<DuckLakeTableEntry>();
+		duck_catalog.Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_DROP, table);
+		break;
+	}
+	case CatalogType::VIEW_ENTRY:
+	case CatalogType::MACRO_ENTRY:
+	case CatalogType::TABLE_MACRO_ENTRY:
+		duck_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_DROP, *this);
+		break;
+	default:
+		break;
+	}
 	transaction.DropEntry(*catalog_entry);
 }
 

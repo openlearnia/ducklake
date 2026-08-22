@@ -160,4 +160,40 @@ public:
 	DuckLakeMaterializedViewsFunction();
 };
 
+//! Role management: ducklake_create_role(catalog, role)
+class DuckLakeCreateRoleFunction : public TableFunction {
+public:
+	DuckLakeCreateRoleFunction();
+};
+
+//! ducklake_drop_role(catalog, role)
+class DuckLakeDropRoleFunction : public TableFunction {
+public:
+	DuckLakeDropRoleFunction();
+};
+
+//! ducklake_grant(catalog, grantee, privileges [, schema=..] [, table_name=..])
+class DuckLakeGrantFunction : public TableFunction {
+public:
+	DuckLakeGrantFunction();
+};
+
+//! ducklake_revoke(catalog, grantee, privileges [, schema=..] [, table_name=..])
+class DuckLakeRevokeFunction : public TableFunction {
+public:
+	DuckLakeRevokeFunction();
+};
+
+//! ducklake_roles(catalog) - list all roles
+class DuckLakeRolesFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeRolesFunction();
+};
+
+//! ducklake_grants(catalog) - list all grants
+class DuckLakeGrantsFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeGrantsFunction();
+};
+
 } // namespace duckdb
