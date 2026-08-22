@@ -62,7 +62,7 @@ jobs:
       # The extension must compile against the exact OpenLearnia DuckDB commit
       # that adds the MV parser contract, not the stock v1.5.5 tag.
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}
-      override_duckdb_repository: openlearnia/duckdb
+      override_duckdb_repository: https://github.com/openlearnia/duckdb.git
       ci_tools_version: v1.5-variegata
       extension_name: ducklake
       # Focused: Grain lab VPS only. Keep arm64/osx/windows/wasm out of this oven.

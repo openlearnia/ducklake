@@ -33,7 +33,7 @@ if duckdb_ref != submodule_ref:
 caller = CALLER.read_text()
 reusable = REUSABLE.read_text()
 required_caller_fragments = (
-    "override_duckdb_repository: openlearnia/duckdb",
+    "override_duckdb_repository: https://github.com/openlearnia/duckdb.git",
     "duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}",
     "upload_duckdb_binaries: true",
 )
