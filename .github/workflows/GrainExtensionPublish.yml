@@ -7,6 +7,7 @@
 #   gh run download <run_id> -n ducklake-linux_amd64-v1.5.5 -R openlearnia/ducklake
 #
 # Spec: docs/grain-ducklake-extension-ci-requirements.md (in ducklake-vortex)
+# Runners: Blacksmith drop-in (blacksmith-4vcpu-ubuntu-2404) — org app must be installed.
 
 name: Grain Extension Publish
 
@@ -26,6 +27,7 @@ on:
       - "extension_config.cmake"
       - ".github/duckdb-version"
       - ".github/workflows/GrainExtensionPublish.yml"
+      - ".github/workflows/_grain_extension_distribution.yml"
 
 concurrency:
   group: grain-ext-${{ github.ref }}
@@ -38,7 +40,7 @@ permissions:
 jobs:
   get-duckdb-version:
     name: Get DuckDB version
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       duckdb_version: ${{ steps.version.outputs.duckdb_version }}
     steps:
@@ -51,7 +53,7 @@ jobs:
   build-linux-amd64:
     name: Build linux_amd64 ducklake
     needs: get-duckdb-version
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
+    uses: ./.github/workflows/_grain_extension_distribution.yml
     with:
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       ci_tools_version: v1.5-variegata
@@ -66,7 +68,7 @@ jobs:
   publish:
     name: Publish Grain artifact
     needs: [get-duckdb-version, build-linux-amd64]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Download distribution artifact
         uses: actions/download-artifact@v4
