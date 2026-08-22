@@ -205,9 +205,9 @@ ParserOverrideResult DuckLakeMaterializedViewParserOverride(ParserExtensionInfo 
 		                      "(e.g. CREATE MATERIALIZED VIEW mylake.mv_name AS SELECT ...)");
 	}
 	if (parts.size() == 1) {
-		return ExtensionError("MATERIALIZED VIEW statements must be qualified with the lake catalog name (e.g. "
-		    "CREATE MATERIALIZED VIEW mylake.mv_name AS SELECT ...), or call the ducklake_create_materialized_view() "
-		    "table function directly");
+		// Unqualified materialized views belong to DuckDB's native catalog. Let the
+		// default parser handle them instead of claiming them for DuckLake.
+		return ParserOverrideResult();
 	}
 	if (parts.size() == 2) {
 		parsed.catalog = parts[0];

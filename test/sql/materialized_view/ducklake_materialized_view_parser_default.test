@@ -12,11 +12,15 @@ ATTACH 'ducklake:__TEST_DIR__/mv_parser_default.db' AS ducklake (DATA_PATH '__TE
 statement ok
 CREATE TABLE ducklake.base AS SELECT 1 AS grp, 10 AS val
 
-# A statement owned by DuckLake reports DuckLake's validation error under the default policy.
-statement error
-CREATE MATERIALIZED VIEW unqualified_mv AS SELECT 1
+# Unqualified statements belong to DuckDB's native catalog and bypass DuckLake's rewrite.
+statement ok
+CREATE MATERIALIZED VIEW unqualified_mv AS SELECT 1 AS value
+
+query IT
+SELECT value, table_type FROM unqualified_mv, information_schema.tables
+WHERE table_schema = 'main' AND table_name = 'unqualified_mv'
 ----
-must be qualified with the lake catalog
+1	MATERIALIZED VIEW
 
 # Statements outside DuckLake's grammar still fall through to DuckDB's parser.
 statement error
