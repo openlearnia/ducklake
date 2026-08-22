@@ -82,6 +82,12 @@ on:
         required: false
         type: boolean
         default: true
+      # Upload the DuckDB CLI, shared library, and C header built from the same
+      # source checkout as the extension. Linux amd64 only for the paired release.
+      upload_duckdb_binaries:
+        required: false
+        type: boolean
+        default: false
       # Supply an override repository to build, instead of using the current one
       override_repository:
         required: false
@@ -483,6 +489,34 @@ jobs:
         run: |
           eval "$(jq -r '.test_env_variables // {} | to_entries[] | "export \(.key)=\(.value | @sh)"' <<< '${{inputs.test_config}}')"
           make test_${{ inputs.build_type }}
+
+      - name: Stage pinned DuckDB runtime
+        if: ${{ inputs.upload_duckdb_binaries && matrix.duckdb_arch == 'linux_amd64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/${{ inputs.build_type }}/duckdb
+          DUCKDB_LIBRARY=$(find build/${{ inputs.build_type }}/src -maxdepth 1 -type f -name 'libduckdb.so*' | head -n1)
+          if [[ -z "$DUCKDB_LIBRARY" ]]; then
+            echo "libduckdb.so not found in the paired DuckDB build" >&2
+            find build/${{ inputs.build_type }} -maxdepth 3 -name 'libduckdb*' -print >&2
+            exit 1
+          fi
+          test -f duckdb/src/include/duckdb.h
+          mkdir -p paired-duckdb/bin paired-duckdb/lib paired-duckdb/include
+          cp build/${{ inputs.build_type }}/duckdb paired-duckdb/bin/duckdb
+          cp "$DUCKDB_LIBRARY" paired-duckdb/lib/libduckdb.so
+          cp duckdb/src/include/duckdb.h paired-duckdb/include/duckdb.h
+          sha256sum paired-duckdb/bin/duckdb paired-duckdb/lib/libduckdb.so paired-duckdb/include/duckdb.h \
+            > paired-duckdb/SHA256SUMS
+
+      - name: Upload pinned DuckDB runtime
+        if: ${{ inputs.upload_duckdb_binaries && matrix.duckdb_arch == 'linux_amd64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: duckdb-${{ inputs.duckdb_version }}-runtime-${{matrix.duckdb_arch}}
+          path: paired-duckdb/
 
       - uses: actions/upload-artifact@v4
         if: ${{ !inputs.upload_all_extensions }}

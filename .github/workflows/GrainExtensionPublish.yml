@@ -1,4 +1,4 @@
-# Publish a Grain-facing linux_amd64 ducklake.duckdb_extension (MV + incremental).
+# Publish a compatibility-locked linux_amd64 DuckDB + DuckLake MV bundle.
 # Parquet-only — does not set DUCKLAKE_VORTEX_EXTENSION_DIR / does not call DuckDB CDN deploy.
 #
 # Grain / VPS download (public, no token) — Release assets preferred:
@@ -26,6 +26,7 @@ on:
       - "test/sql/materialized_view/**"
       - "extension_config.cmake"
       - ".github/duckdb-version"
+      - ".github/duckdb-ref"
       - ".github/workflows/GrainExtensionPublish.yml"
       - ".github/workflows/_grain_extension_distribution.yml"
 
@@ -43,19 +44,25 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       duckdb_version: ${{ steps.version.outputs.duckdb_version }}
+      duckdb_ref: ${{ steps.version.outputs.duckdb_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: .github
       - id: version
-        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
+          echo "duckdb_ref=$(cat .github/duckdb-ref)" >> "$GITHUB_OUTPUT"
 
   build-linux-amd64:
     name: Build linux_amd64 ducklake
     needs: get-duckdb-version
     uses: ./.github/workflows/_grain_extension_distribution.yml
     with:
-      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
+      # The extension must compile against the exact OpenLearnia DuckDB commit
+      # that adds the MV parser contract, not the stock v1.5.5 tag.
+      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}
+      override_duckdb_repository: openlearnia/duckdb
       ci_tools_version: v1.5-variegata
       extension_name: ducklake
       # Focused: Grain lab VPS only. Keep arm64/osx/windows/wasm out of this oven.
@@ -63,6 +70,7 @@ jobs:
         linux_arm64;linux_amd64_musl;osx_amd64;osx_arm64;windows_amd64;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
       skip_tests: false
       build_duckdb_shell: true
+      upload_duckdb_binaries: true
       reduced_ci_mode: disabled
 
   publish:
@@ -73,13 +81,20 @@ jobs:
       - name: Download distribution artifact
         uses: actions/download-artifact@v4
         with:
-          name: ducklake-${{ needs.get-duckdb-version.outputs.duckdb_version }}-extension-linux_amd64
+          name: ducklake-${{ needs.get-duckdb-version.outputs.duckdb_ref }}-extension-linux_amd64
           path: dist/
+
+      - name: Download pinned DuckDB runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: duckdb-${{ needs.get-duckdb-version.outputs.duckdb_ref }}-runtime-linux_amd64
+          path: duckdb-runtime/
 
       - name: Stage Grain package
         id: stage
         env:
           DUCKDB_VERSION: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
+          DUCKDB_REF: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}
           GIT_SHA: ${{ github.sha }}
           GIT_REF_NAME: ${{ github.ref_name }}
           GIT_REPO: ${{ github.repository }}
@@ -94,10 +109,56 @@ jobs:
           fi
           cp "$EXT" grain-pkg/ducklake.duckdb_extension
           cp "$EXT" "grain-pkg/ducklake-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
+          test -x duckdb-runtime/bin/duckdb
+          test -f duckdb-runtime/lib/libduckdb.so
+          test -f duckdb-runtime/include/duckdb.h
           SHORT_SHA="${GIT_SHA::7}"
+          SHORT_DUCKDB_REF="${DUCKDB_REF::10}"
           BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          export BUILT_AT
-          python3 -c 'import json,os,pathlib; pathlib.Path("grain-pkg/build-info.json").write_text(json.dumps({"extension":"ducklake","duckdb_version":os.environ["DUCKDB_VERSION"],"platform":"linux_amd64","git_repo":os.environ["GIT_REPO"],"git_ref":os.environ["GIT_REF_NAME"],"git_sha":os.environ["GIT_SHA"],"built_at":os.environ["BUILT_AT"],"features":["materialized_views","delta_refresh","join_incremental","staleness"],"vortex_bundled":False}, indent=2)+"\n")'
+          DUCKDB_ARCHIVE="duckdb-${DUCKDB_VERSION}-${SHORT_DUCKDB_REF}-linux_amd64.tar.gz"
+          tar -C duckdb-runtime -czf "grain-pkg/${DUCKDB_ARCHIVE}" bin lib include
+          export BUILT_AT DUCKDB_ARCHIVE
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          package = Path("grain-pkg")
+          asset_names = [
+              f"ducklake-{os.environ['DUCKDB_VERSION']}-linux_amd64.duckdb_extension",
+              os.environ["DUCKDB_ARCHIVE"],
+          ]
+          checksums = {
+              name: hashlib.sha256((package / name).read_bytes()).hexdigest()
+              for name in asset_names
+          }
+          build_info = {
+              "bundle": "duckdb-ducklake-materialized-views",
+              "duckdb_version": os.environ["DUCKDB_VERSION"],
+              "duckdb_repository": "openlearnia/duckdb",
+              "duckdb_ref": os.environ["DUCKDB_REF"],
+              "ducklake_repository": os.environ["GIT_REPO"],
+              "ducklake_ref": os.environ["GIT_SHA"],
+              "git_ref": os.environ["GIT_REF_NAME"],
+              "platform": "linux_amd64",
+              "built_at": os.environ["BUILT_AT"],
+              "features": [
+                  "materialized_views",
+                  "delta_refresh",
+                  "derived_avg",
+                  "conditional_min_max",
+                  "join_incremental",
+                  "staleness",
+              ],
+              "vortex_bundled": False,
+              "sha256": checksums,
+          }
+          (package / "build-info.json").write_text(json.dumps(build_info, indent=2) + "\n")
+          (package / "SHA256SUMS").write_text(
+              "".join(f"{digest}  {name}\n" for name, digest in checksums.items())
+          )
+          PY
           ls -lh grain-pkg/
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "release_tag=grain-ext-${DUCKDB_VERSION}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
@@ -107,6 +168,7 @@ jobs:
             echo "- Artifact: \`ducklake-linux_amd64-${DUCKDB_VERSION}\`"
             echo "- Platform: \`linux_amd64\`"
             echo "- DuckDB: \`${DUCKDB_VERSION}\`"
+            echo "- DuckDB commit: \`${DUCKDB_REF}\`"
             echo "- SHA: \`${GIT_SHA}\`"
             echo "- Vortex bundled: false"
             echo ""
@@ -135,9 +197,10 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Grain DuckLake ${{ needs.get-duckdb-version.outputs.duckdb_version }} (${{ steps.stage.outputs.short_sha }})
           body: |
-            linux_amd64 `ducklake` extension for Grain MV lab (Parquet-only, unsigned).
+            Compatibility-locked linux_amd64 DuckDB runtime and DuckLake extension with materialized views.
 
             - DuckDB ABI: `${{ needs.get-duckdb-version.outputs.duckdb_version }}`
+            - DuckDB commit: `${{ needs.get-duckdb-version.outputs.duckdb_ref }}`
             - Commit: `${{ github.sha }}`
             - Ref: `${{ github.ref_name }}`
             - Features: materialized_views, delta_refresh, join_incremental, staleness
@@ -146,12 +209,15 @@ jobs:
             Grain install:
             ```bash
             gh release download ${{ steps.stage.outputs.release_tag }} -R ${{ github.repository }} \
-              -p 'ducklake-*-linux_amd64.duckdb_extension' -p build-info.json
+              -p 'duckdb-*-linux_amd64.tar.gz' -p 'ducklake-*-linux_amd64.duckdb_extension' \
+              -p build-info.json -p SHA256SUMS
             # or
             gh run download -n ducklake-linux_amd64-${{ needs.get-duckdb-version.outputs.duckdb_version }} -R ${{ github.repository }}
             ```
             Then set `GRAIN_DUCKLAKE_EXTENSION_PATH=/opt/grain/extensions/ducklake.duckdb_extension`.
           files: |
             grain-pkg/ducklake-${{ needs.get-duckdb-version.outputs.duckdb_version }}-linux_amd64.duckdb_extension
+            grain-pkg/duckdb-*-linux_amd64.tar.gz
             grain-pkg/build-info.json
+            grain-pkg/SHA256SUMS
           fail_on_unmatched_files: true
