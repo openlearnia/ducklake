@@ -547,7 +547,8 @@ public:
 //! The projection emits (schema_name, view_name, refresh_mode, rows_refreshed).
 static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Binder &binder, idx_t bind_index,
                                                     unique_ptr<LogicalOperator> plan, DuckLakeTableEntry &table,
-                                                    TableIndex mv_view_id, const string &refresh_mode,
+                                                    TableIndex mv_view_id, const string &schema_name,
+                                                    const string &view_name, const string &refresh_mode,
                                                     vector<string> &return_names) {
 	plan->ResolveOperatorTypes();
 	if (DuckLakeTypes::RequiresCast(plan->types)) {
@@ -590,11 +591,11 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 	mv_op->children.push_back(std::move(copy));
 	mv_op->ResolveOperatorTypes();
 
-	// project (schema, name, mode constant, rows)
+	// project (schema, name, mode constant, rows) — user-facing MV names, not backing table
 	vector<unique_ptr<Expression>> projections;
 	auto mv_bindings = mv_op->GetColumnBindings();
-	projections.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::VARCHAR, mv_bindings[0]));
-	projections.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::VARCHAR, mv_bindings[1]));
+	projections.push_back(make_uniq<BoundConstantExpression>(Value(schema_name)));
+	projections.push_back(make_uniq<BoundConstantExpression>(Value(view_name)));
 	projections.push_back(make_uniq<BoundConstantExpression>(Value(refresh_mode)));
 	projections.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, mv_bindings[2]));
 	auto projection = make_uniq<LogicalProjection>(bind_index, std::move(projections));
@@ -805,7 +806,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	// write the initial content: definition plan -> files -> refresh operator
 	auto plan = std::move(bound.plan);
 	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(plan), table,
-	                        transaction.GetNewMaterializedViews().back().id, "full", return_names);
+	                        transaction.GetNewMaterializedViews().back().id, schema, view_name, "full", return_names);
 }
 
 DuckLakeCreateMaterializedViewFunction::DuckLakeCreateMaterializedViewFunction()
@@ -1277,8 +1278,8 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 				auto join_sql = BuildJoinIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 				                                               last_refreshed + 1, current_snapshot);
 				auto join_plan = BindDefinitionPlan(*input.binder, context, join_sql, "join-incremental refresh");
-				return BuildMVWritePlan(context, *input.binder, bind_index, std::move(join_plan), table, mv->id,
-				                        "join_incremental", return_names);
+				return BuildMVWritePlan(context, *input.binder, bind_index, std::move(join_plan), table, mv->id, schema,
+				                        view_name, "join_incremental", return_names);
 			}
 		}
 	}
@@ -1302,21 +1303,21 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 			auto delta_sql = BuildDeltaRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names, bound.types,
 			                                      last_refreshed + 1, current_snapshot);
 			auto delta_plan = BindDefinitionPlan(*input.binder, context, delta_sql, "delta refresh");
-			return BuildMVWritePlan(context, *input.binder, bind_index, std::move(delta_plan), table, mv->id, "delta",
-			                        return_names);
+			return BuildMVWritePlan(context, *input.binder, bind_index, std::move(delta_plan), table, mv->id, schema,
+			                        view_name, "delta", return_names);
 		}
 		auto incremental_sql = BuildIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 		                                                  last_refreshed + 1, current_snapshot);
 		auto incremental_plan = BindDefinitionPlan(*input.binder, context, incremental_sql, "incremental refresh");
-		return BuildMVWritePlan(context, *input.binder, bind_index, std::move(incremental_plan), table, mv->id,
-		                        "incremental", return_names);
+		return BuildMVWritePlan(context, *input.binder, bind_index, std::move(incremental_plan), table, mv->id, schema,
+		                        view_name, "incremental", return_names);
 	}
 
 	auto binder = Binder::CreateBinder(context, input.binder);
 	auto &sql_statement = static_cast<SQLStatement &>(*parsed_definition);
 	auto bound = binder->Bind(sql_statement);
-	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), table, mv->id, "full",
-	                        return_names);
+	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), table, mv->id, schema,
+	                        view_name, "full", return_names);
 }
 
 DuckLakeRefreshMaterializedViewFunction::DuckLakeRefreshMaterializedViewFunction()
