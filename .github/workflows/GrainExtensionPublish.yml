@@ -73,9 +73,6 @@ jobs:
       build_duckdb_shell: true
       upload_duckdb_binaries: true
       upload_all_extensions: true
-      # postgres_scanner links against libpq during the Linux build. Keep the
-      # client library in the same vcpkg toolchain as the preview DuckDB build.
-      vcpkg_extra_dependencies: '{"linux_amd64":["libpq"]}'
       test_config: '{"test_env_variables":{"ENABLE_POSTGRES_SCANNER":"1","ENABLE_GRAIN_BUNDLE_EXTENSIONS":"1"}}'
       reduced_ci_mode: disabled
 
