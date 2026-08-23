@@ -21,6 +21,7 @@ on:
   push:
     branches:
       - vortex-integration
+      - ducklake-2-preview-port
     paths:
       - "src/**"
       - "test/sql/materialized_view/**"
