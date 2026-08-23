@@ -65,6 +65,10 @@ jobs:
       override_git_describe: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       override_duckdb_repository: https://github.com/openlearnia/duckdb.git
       ci_tools_version: v1.5-variegata
+      # The DuckDB 2 preview bundle needs the current libpq Meson port; the
+      # older vcpkg pin still builds PostgreSQL 16 through the broken Makefile
+      # path on Blacksmith's release triplet.
+      vcpkg_commit: 127402f1c75bb3d5ff6bce04b285faa4930a5aca
       extension_name: ducklake
       # Focused: Grain lab VPS only. Keep arm64/osx/windows/wasm out of this oven.
       exclude_archs: >-
