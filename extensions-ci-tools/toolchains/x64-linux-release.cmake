@@ -8,6 +8,8 @@ set(VCPKG_CMAKE_SYSTEM_NAME Linux)
 set(VCPKG_CRT_LINKAGE dynamic)
 set(VCPKG_LIBRARY_LINKAGE static)
 set(VCPKG_BUILD_TYPE release)
+set(VCPKG_C_FLAGS "-fPIC")
+set(VCPKG_CXX_FLAGS "-fPIC")
 set(ENV{ZIC} /usr/bin/zic)
 set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE
     "${CMAKE_CURRENT_LIST_DIR}/native-linux-toolchain.cmake")
