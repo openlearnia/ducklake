@@ -1,0 +1,50 @@
+# name: native DuckDB materialized view lifecycle on the PEG parser
+# group: [materialized_view]
+
+statement ok
+CREATE TABLE mv_base(id INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO mv_base VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE MATERIALIZED VIEW mv_native AS SELECT sum(val) AS total FROM mv_base
+
+query T
+SELECT table_type FROM information_schema.tables WHERE table_name = 'mv_native'
+----
+MATERIALIZED VIEW
+
+query I
+SELECT is_materialized::INTEGER FROM duckdb_tables() WHERE table_name = 'mv_native'
+----
+1
+
+query I
+SELECT total FROM mv_native
+----
+30
+
+statement ok
+INSERT INTO mv_base VALUES (3, 7)
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_native
+
+query I
+SELECT total FROM mv_native
+----
+37
+
+statement error
+INSERT INTO mv_native VALUES (99)
+----
+<REGEX>:.*[Mm]aterialized view.*
+
+statement error
+DROP TABLE mv_native
+----
+<REGEX>:.*[Mm]aterialized view.*
+
+statement ok
+DROP MATERIALIZED VIEW mv_native
