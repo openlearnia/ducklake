@@ -666,6 +666,33 @@ PhysicalOperator &DuckLakeDelete::PlanDelete(ClientContext &context, PhysicalPla
 	auto delete_source = FindDeleteSource(child_plan);
 	auto delete_map = make_shared_ptr<DuckLakeDeleteMap>();
 	if (delete_source) {
+		// DuckDB 2.0 can prune the three file-identity vectors used by the
+		// DuckLake delete sink when a rowid predicate is kept above the scan.
+		// Restore the complete scan projection after physical planning; filters
+		// still reference the original leading rowid position.
+		delete_source->projection_ids.resize(delete_source->column_ids.size());
+		delete_source->types.clear();
+		for (idx_t i = 0; i < delete_source->projection_ids.size(); i++) {
+			delete_source->projection_ids[i] = i;
+			auto column_id = delete_source->column_ids[i].GetPrimaryIndex();
+			if (delete_source->column_ids[i].IsVirtualColumn()) {
+				delete_source->types.push_back(delete_source->virtual_columns.at(column_id).type);
+			} else {
+				delete_source->types.push_back(delete_source->returned_types[column_id]);
+			}
+		}
+		// The preview planner materializes the remainder filter with the old
+		// projected type vector. Keep that operator's chunk shape in sync with
+		// the restored scan projection.
+		std::function<void(PhysicalOperator &)> restore_filter_types = [&](PhysicalOperator &op) {
+			if (op.type == PhysicalOperatorType::FILTER) {
+				op.types = delete_source->types;
+			}
+			for (auto &child : op.children) {
+				restore_filter_types(child.get());
+			}
+		};
+		restore_filter_types(child_plan);
 		auto &bind_data = delete_source->bind_data->Cast<MultiFileBindData>();
 		auto &reader = bind_data.multi_file_reader->Cast<DuckLakeMultiFileReader>();
 		auto &file_list = bind_data.file_list->Cast<DuckLakeMultiFileList>();
