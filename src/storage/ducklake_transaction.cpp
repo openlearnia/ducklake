@@ -789,6 +789,11 @@ Connection &DuckLakeTransaction::GetConnection() {
 		auto &client_config = ClientConfig::GetConfig(*connection->context);
 		client_config.user_settings.SetUserSetting(CatalogErrorMaxSchemasSetting::SettingIndex, Value::UBIGINT(0));
 		connection->BeginTransaction();
+		// DuckLake's catalog APIs intentionally use recoverable lookup errors
+		// inside explicit transactions (for example DROP followed by a probe).
+		// Match DuckDB 2.0's non-invalidating transaction policy on the metadata
+		// connection so those errors do not poison the transaction.
+		connection->Query("SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE'");
 	}
 	return *connection;
 }
