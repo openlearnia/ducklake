@@ -87,7 +87,7 @@ static bool CanSkipFileByTopNDynamicFilter(const DuckLakeFileListEntry &file_ent
 	}
 	for (auto &it : filter_info.column_filters) {
 		auto &col_filter = it.second;
-		auto filter_data = DuckLakeUtil::GetOptionalDynamicFilterData(*col_filter.table_filter);
+		auto filter_data = ExpressionFilter::GetRootOptionalDynamicFilterData(*col_filter.table_filter);
 		if (!filter_data) {
 			continue;
 		}
@@ -110,9 +110,11 @@ static bool CanSkipFileByTopNDynamicFilter(const DuckLakeFileListEntry &file_ent
 		// from here we'll try to cast and compare with the dynamic filter values
 		// if casts fail, just skip pruning
 		Value casted_constant;
-		if (!constant.DefaultTryCastAs(col_filter.column_type, casted_constant, nullptr)) {
+		auto casted = constant.DefaultTryCastAs(col_filter.column_type);
+		if (!casted) {
 			continue;
 		}
+		casted_constant = std::move(*casted);
 
 		switch (comparison_type) {
 		case ExpressionType::COMPARE_GREATERTHAN:
@@ -122,9 +124,11 @@ static bool CanSkipFileByTopNDynamicFilter(const DuckLakeFileListEntry &file_ent
 				continue;
 			}
 			Value file_max;
-			if (!Value(max_str).DefaultTryCastAs(col_filter.column_type, file_max, nullptr)) {
+			auto casted_max = Value(max_str).DefaultTryCastAs(col_filter.column_type);
+			if (!casted_max) {
 				continue;
 			}
+			file_max = std::move(*casted_max);
 			if (comparison_type == ExpressionType::COMPARE_GREATERTHAN) {
 				return !(file_max > casted_constant);
 			}
@@ -137,9 +141,11 @@ static bool CanSkipFileByTopNDynamicFilter(const DuckLakeFileListEntry &file_ent
 				continue;
 			}
 			Value file_min;
-			if (!Value(min_str).DefaultTryCastAs(col_filter.column_type, file_min, nullptr)) {
+			auto casted_min = Value(min_str).DefaultTryCastAs(col_filter.column_type);
+			if (!casted_min) {
 				continue;
 			}
+			file_min = std::move(*casted_min);
 			if (comparison_type == ExpressionType::COMPARE_LESSTHAN) {
 				return !(file_min < casted_constant);
 			}
@@ -548,9 +554,9 @@ ReaderInitializeType DuckLakeMultiFileReader::CreateMappingWithGlobalState(
 		if (entry != file_options.end()) {
 			auto mapping_id = MappingIndex(entry->second.GetValue<idx_t>());
 			auto transaction = read_info.transaction.lock();
-			auto mapping = transaction->GetMappingById(mapping_id);
+			auto &mapping = transaction->GetMappingById(mapping_id);
 			// use the mapping to generate a new set of global columns for this file
-			auto mapped_columns = CreateNewMapping(context, reader_data, global_columns, *mapping);
+			auto mapped_columns = CreateNewMapping(context, reader_data, global_columns, mapping);
 			return MultiFileReader::CreateMapping(context, reader_data, mapped_columns, column_ids_to_use, filters,
 			                                      multi_file_list, bind_data, virtual_columns,
 			                                      MultiFileColumnMappingMode::BY_NAME);

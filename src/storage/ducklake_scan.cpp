@@ -107,10 +107,16 @@ struct DuckLakePartitionRowGroup : public PartitionRowGroup {
 	bool HasPendingWrites() override { return false; }
 };
 
-static bool DuckLakeSupportsPushdownType(const FunctionData &, idx_t column_id) {
+static bool DuckLakeSupportsPushdownType(const FunctionData &bind_data, idx_t column_id) {
 	// A DuckLake rowid is a synthesized row_id_start + file_row_number value.
 	// DuckDB 2.0's generic filter mapper otherwise applies the global predicate
 	// to the file-local ordinal before the virtual expression is evaluated.
+	// Delete scans need the rowid predicate in the scan plan so their hidden
+	// filename/file-index/ordinal projections remain aligned for the delete sink.
+	auto &info = bind_data.Cast<DuckLakeFunctionInfo>();
+	if (info.scan_type == DuckLakeScanType::SCAN_DELETIONS) {
+		return true;
+	}
 	return column_id != COLUMN_IDENTIFIER_ROW_ID;
 }
 
