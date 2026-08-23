@@ -668,7 +668,8 @@ PhysicalOperator &DuckLakeDelete::PlanDelete(ClientContext &context, PhysicalPla
 	// UPDATE reuses this planner with zero-based deletion metadata already
 	// present in its projection; only a standalone DELETE needs restoration.
 	if (delete_source) {
-		if (row_id_indexes.size() == 3 && row_id_indexes[0] > 0) {
+		if (row_id_indexes.size() == 3 && row_id_indexes[0] > 0 &&
+		    delete_source->projection_ids.size() < delete_source->column_ids.size()) {
 		// DuckDB 2.0 can prune the three file-identity vectors used by the
 		// DuckLake delete sink when a rowid predicate is kept above the scan.
 		// Restore the complete scan projection after physical planning; filters
