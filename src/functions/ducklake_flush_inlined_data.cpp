@@ -11,6 +11,8 @@
 #include "duckdb/planner/operator/logical_set_operation.hpp"
 #include "storage/ducklake_compaction.hpp"
 #include "duckdb/common/multi_file/multi_file_function.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/storage/storage_info.hpp"
 #include "storage/ducklake_multi_file_list.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
@@ -372,6 +374,19 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 		sort_order_sql = DuckLakeSort::BuildSortOrderSQL(*sort_data, latest_table.GetColumns(), table.GetColumns());
 	}
 
+	optional_idx configured_batch_size;
+	optional_idx configured_batch_size_bytes;
+	if (copy_options.info) {
+		auto row_group_size = copy_options.info->options.find("row_group_size");
+		if (row_group_size != copy_options.info->options.end() && !row_group_size->second.empty()) {
+			configured_batch_size = row_group_size->second[0].DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>();
+		}
+		auto row_group_size_bytes = copy_options.info->options.find("row_group_size_bytes");
+		if (row_group_size_bytes != copy_options.info->options.end() && !row_group_size_bytes->second.empty()) {
+			configured_batch_size_bytes = DBConfig::ParseMemoryLimit(row_group_size_bytes->second[0].ToString());
+		}
+	}
+
 	// generate the LogicalCopyToFile
 	auto copy = make_uniq<LogicalCopyToFile>(std::move(copy_options.copy_function), std::move(copy_options.bind_data),
 	                                         std::move(copy_options.info), binder.GenerateTableIndex());
@@ -383,6 +398,8 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	copy->overwrite_mode = copy_options.overwrite_mode;
 	copy->per_thread_output = copy_options.per_thread_output;
 	copy->file_size_bytes = copy_options.file_size_bytes;
+	copy->batch_size = configured_batch_size.IsValid() ? configured_batch_size : DEFAULT_ROW_GROUP_SIZE;
+	copy->batch_size_bytes = configured_batch_size_bytes;
 	copy->rotate = copy_options.rotate;
 	copy->return_type = copy_options.return_type;
 

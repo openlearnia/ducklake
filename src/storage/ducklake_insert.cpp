@@ -26,7 +26,9 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
+#include "duckdb/storage/storage_info.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -672,6 +674,18 @@ PhysicalOperator &DuckLakeInsert::PlanCopyForInsert(ClientContext &context, Phys
 			}
 		}
 	}
+	optional_idx configured_batch_size;
+	optional_idx configured_batch_size_bytes;
+	if (copy_options.info) {
+		auto row_group_size = copy_options.info->options.find("row_group_size");
+		if (row_group_size != copy_options.info->options.end() && !row_group_size->second.empty()) {
+			configured_batch_size = row_group_size->second[0].DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>();
+		}
+		auto row_group_size_bytes = copy_options.info->options.find("row_group_size_bytes");
+		if (row_group_size_bytes != copy_options.info->options.end() && !row_group_size_bytes->second.empty()) {
+			configured_batch_size_bytes = DBConfig::ParseMemoryLimit(row_group_size_bytes->second[0].ToString());
+		}
+	}
 
 	auto copy_return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::WRITTEN_FILE_STATISTICS);
 	auto &physical_copy = planner
@@ -686,6 +700,12 @@ PhysicalOperator &DuckLakeInsert::PlanCopyForInsert(ClientContext &context, Phys
 	physical_copy.overwrite_mode = copy_options.overwrite_mode;
 	physical_copy.per_thread_output = copy_options.per_thread_output;
 	physical_copy.file_size_bytes = copy_options.file_size_bytes;
+	// DuckDB 2.0 no longer infers COPY batch sizing from the Parquet options map.
+	// Keep the input batches aligned with the configured row-group limits so a
+	// managed write does not split one logical file into STANDARD_VECTOR_SIZE
+	// fragments (which also fragments DuckLake delete files during flush).
+	physical_copy.batch_size = configured_batch_size.IsValid() ? configured_batch_size : DEFAULT_ROW_GROUP_SIZE;
+	physical_copy.batch_size_bytes = configured_batch_size_bytes;
 	physical_copy.return_type = copy_options.return_type;
 
 	physical_copy.partition_output = copy_options.partition_output;
