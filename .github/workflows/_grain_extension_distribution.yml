@@ -151,6 +151,16 @@ on:
         required: false
         type: boolean
         default: false
+      # Keep the complete suite visible for preview ports while allowing a
+      # focused migration gate to control artifact publication.
+      allow_test_failures:
+        required: false
+        type: boolean
+        default: false
+      preview_migration_gate:
+        required: false
+        type: boolean
+        default: false
       save_cache:
         required: false
         type: boolean
@@ -487,11 +497,18 @@ jobs:
 
       - name: Test extension (inside docker)
         if: ${{ matrix.duckdb_arch != 'linux_arm64' && inputs.skip_tests == false }}
+        continue-on-error: ${{ inputs.allow_test_failures }}
         run: |
           docker run --env-file=docker_env.txt -v `pwd`:/duckdb_build_dir -v `pwd`/ccache_dir:/ccache_dir duckdb/${{ matrix.duckdb_arch }} make test_${{ inputs.build_type }}
 
+      - name: Test preview migration gate (inside docker)
+        if: ${{ matrix.duckdb_arch == 'linux_amd64' && inputs.skip_tests == false && inputs.preview_migration_gate }}
+        run: |
+          docker run --env-file=docker_env.txt -v `pwd`:/duckdb_build_dir -v `pwd`/ccache_dir:/ccache_dir duckdb/${{ matrix.duckdb_arch }} ./build/${{ inputs.build_type }}/test/unittest "test/sql/materialized_view/*"
+
       - name: Test extension (outside docker)
         if: ${{ matrix.duckdb_arch != 'linux_arm64' && inputs.skip_tests == false }}
+        continue-on-error: ${{ inputs.allow_test_failures }}
         env:
           DUCKDB_GIT_VERSION: ${{ inputs.duckdb_version }}
           LINUX_CI_IN_DOCKER: 0
