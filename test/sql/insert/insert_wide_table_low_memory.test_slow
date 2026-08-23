@@ -116,3 +116,10 @@ query I
 SELECT COUNT(*) FROM ducklake.wide_table WHERE col_0 = 50
 ----
 1
+
+# Restore process-wide settings for subsequent tests.
+statement ok
+RESET memory_limit
+
+statement ok
+RESET temp_directory

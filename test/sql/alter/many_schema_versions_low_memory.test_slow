@@ -121,3 +121,12 @@ query I
 SELECT SUM(col_199) FROM ducklake.target
 ----
 1596
+
+# Restore process-wide settings for subsequent tests. The DuckDB 2.0 preview
+# keeps these settings on the shared test connection, so leaving the stress
+# values active makes later tests fail with an unrelated allocation error.
+statement ok
+RESET memory_limit
+
+statement ok
+RESET temp_directory
