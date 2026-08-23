@@ -113,6 +113,14 @@ LogicalType DuckLakeTypes::FromString(const string &type) {
 
 string DuckLakeTypes::ToString(const LogicalType &type) {
 	if (type.HasAlias()) {
+		// DuckDB 2.0 exposes unnamed STRUCT values (for example ROW/tuple
+		// expressions) with the internal alias "tuple".  This is still a
+		// regular STRUCT for DuckLake storage purposes, not a user-defined
+		// type.  Treat it like the equivalent named STRUCT so CREATE TABLE AS
+		// FROM all_types remains portable across the preview ABI.
+		if (type.id() == LogicalTypeId::STRUCT && StringUtil::CIEquals(type.GetAlias(), "tuple")) {
+			return "struct";
+		}
 		if (type.IsJSONType()) {
 			return "json";
 		}
