@@ -565,6 +565,10 @@ DuckLakeCopyOptions DuckLakeInsert::GetCopyOptions(ClientContext &context, DuckL
 	result.bind_data = std::move(function_data);
 
 	result.use_tmp_file = false;
+	// DuckDB 2.0 rejects/degenerates extremely small rotation targets. Keep a
+	// practical lower bound so metadata options such as `1B` still produce a
+	// finite, usable output file.
+	static constexpr idx_t MINIMUM_WRITE_FILE_SIZE = 4096;
 	if (copy_input.partition_data) {
 		result.filename_pattern.SetFilenamePattern("ducklake-{uuidv7}");
 		result.partition_output = true;
@@ -574,7 +578,7 @@ DuckLakeCopyOptions DuckLakeInsert::GetCopyOptions(ClientContext &context, DuckL
 		result.partition_output = false;
 		result.write_empty_file = false;
 		// file_size_bytes is currently only supported for unpartitioned writes
-		result.file_size_bytes = target_file_size;
+		result.file_size_bytes = MaxValue<idx_t>(target_file_size, MINIMUM_WRITE_FILE_SIZE);
 		result.rotate = true;
 	}
 	result.file_path = copy_input.data_path;

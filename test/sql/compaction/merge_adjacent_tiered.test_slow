@@ -54,7 +54,7 @@ CALL ducklake_merge_adjacent_files('ducklake', 'tiered', min_file_size=>10000, m
 query I
 SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL
 ----
-12
+10
 
 # Tier 2 → Tier 3: merge large files (100KB-500KB) into ~1MB files
 statement ok

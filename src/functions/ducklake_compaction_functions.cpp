@@ -14,6 +14,8 @@
 #include "storage/ducklake_multi_file_list.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/storage/storage_info.hpp"
 #include "fmt/format.h"
 
 #include "functions/ducklake_compaction_functions.hpp"
@@ -637,20 +639,45 @@ DuckLakeCompactor::GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry>
 		root = DuckLakeCompactor::InsertSort(binder, root, latest_table, sort_data);
 	}
 
+	// Preserve the configured row-group settings before moving copy_options.info into the logical COPY node.
+	optional_idx configured_batch_size;
+	optional_idx configured_batch_size_bytes;
+	if (copy_options.info) {
+		auto row_group_size = copy_options.info->options.find("row_group_size");
+		if (row_group_size != copy_options.info->options.end() && !row_group_size->second.empty()) {
+			configured_batch_size = row_group_size->second[0].DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>();
+		}
+		auto row_group_size_bytes = copy_options.info->options.find("row_group_size_bytes");
+		if (row_group_size_bytes != copy_options.info->options.end() && !row_group_size_bytes->second.empty()) {
+			configured_batch_size_bytes = DBConfig::ParseMemoryLimit(row_group_size_bytes->second[0].ToString());
+		}
+	}
+
 	// generate the LogicalCopyToFile
 	auto copy = make_uniq<LogicalCopyToFile>(std::move(copy_options.copy_function), std::move(copy_options.bind_data),
 	                                         std::move(copy_options.info), binder.GenerateTableIndex());
 
 	auto &fs = FileSystem::GetFileSystem(context);
-	copy->file_path = copy_options.filename_pattern.CreateFilename(fs, copy_options.file_path,
-	                                                               copy_options.file_extension, 0);
+	if (write_row_id) {
+		copy->file_path = copy_options.file_path;
+		copy->batch_size = configured_batch_size.IsValid() ? configured_batch_size : DEFAULT_ROW_GROUP_SIZE;
+		copy->batch_size_bytes = configured_batch_size_bytes;
+		copy->file_size_bytes = copy_options.file_size_bytes;
+		copy->rotate = copy_options.rotate;
+		copy->preserve_order = PreserveOrderType::DONT_PRESERVE_ORDER;
+	} else {
+		copy->file_path = copy_options.filename_pattern.CreateFilename(fs, copy_options.file_path,
+		                                                               copy_options.file_extension, 0);
+		copy->batch_size = DEFAULT_ROW_GROUP_SIZE;
+		copy->file_size_bytes = optional_idx();
+		copy->rotate = false;
+		copy->preserve_order = PreserveOrderType::PRESERVE_ORDER;
+	}
 	copy->use_tmp_file = copy_options.use_tmp_file;
 	copy->filename_pattern = std::move(copy_options.filename_pattern);
 	copy->file_extension = std::move(copy_options.file_extension);
 	copy->overwrite_mode = copy_options.overwrite_mode;
 	copy->per_thread_output = false;
-	copy->file_size_bytes = copy_options.file_size_bytes;
-	copy->rotate = copy_options.rotate;
 	copy->return_type = copy_options.return_type;
 
 	copy->partition_output = copy_options.partition_output;
@@ -661,9 +688,6 @@ DuckLakeCompactor::GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry>
 		copy->names.emplace_back(name);
 	}
 	copy->expected_types = std::move(copy_options.expected_types);
-	copy->preserve_order = PreserveOrderType::PRESERVE_ORDER;
-	copy->file_size_bytes = optional_idx();
-	copy->rotate = false;
 	copy->children.push_back(std::move(root));
 
 	optional_idx target_row_id_start;
