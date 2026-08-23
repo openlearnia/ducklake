@@ -25,6 +25,14 @@ SELECT table_name FROM information_schema.tables WHERE table_catalog = 'ducklake
 base
 mv1
 
+# standard catalog discovery preserves the logical MV type
+query TT
+SELECT table_name, table_type FROM information_schema.tables
+WHERE table_catalog = 'ducklake' AND table_schema = 'main' ORDER BY table_name
+----
+base	BASE TABLE
+mv1	MATERIALIZED VIEW
+
 # the materialized view is queryable like a table
 query III
 SELECT grp, total, cnt FROM ducklake.mv1 ORDER BY grp

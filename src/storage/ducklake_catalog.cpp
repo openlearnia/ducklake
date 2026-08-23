@@ -536,6 +536,7 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			catalog_entry_name = materialized_view_name->second;
 		}
 		auto create_table_info = make_uniq<CreateTableInfo>(schema_entry, catalog_entry_name);
+		create_table_info->catalog_materialized_view = materialized_view_name != materialized_view_names.end();
 		for (auto &tag : table.tags) {
 			if (tag.key == "comment") {
 				create_table_info->comment = tag.value;
