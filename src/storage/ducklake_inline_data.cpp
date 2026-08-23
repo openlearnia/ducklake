@@ -187,7 +187,7 @@ struct StatsFallbackOperator {
 template <class T, class OP>
 DuckLakeColumnStats TemplatedUpdateStats(Vector &input_vec, const LogicalType &type, idx_t row_count) {
 	UnifiedVectorFormat format;
-	input_vec.ToUnifiedFormat(row_count, format);
+	input_vec.ToUnifiedFormat(format);
 
 	auto data = UnifiedVectorFormat::GetData<T>(format);
 	auto &validity = format.validity;
@@ -259,7 +259,7 @@ void UpdateStats(vector<DuckLakeBaseColumnStats> &stats, idx_t c, Vector &data, 
 			break;
 		}
 		case LogicalTypeId::LIST: {
-			auto &child = ListVector::GetEntry(data);
+				auto &child = ListVector::GetChildMutable(data);
 			UpdateStats(column_stats.children, 0, child, ListVector::GetListSize(data), field_id.GetChildByIndex(0));
 			break;
 		}
@@ -355,7 +355,7 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
 			// extract row_ids from the row_id column
 			auto &row_id_vec = chunk.data[physical_col_count];
 			UnifiedVectorFormat row_id_format;
-			row_id_vec.ToUnifiedFormat(chunk.size(), row_id_format);
+			row_id_vec.ToUnifiedFormat(row_id_format);
 			auto row_id_data = UnifiedVectorFormat::GetData<int64_t>(row_id_format);
 			for (idx_t r = 0; r < chunk.size(); r++) {
 				auto idx = row_id_format.sel->get_index(r);
@@ -366,7 +366,7 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
 			for (idx_t i = 0; i < physical_col_count; i++) {
 				phys_chunk.data[i].Reference(chunk.data[i]);
 			}
-			phys_chunk.SetCardinality(chunk.size());
+			phys_chunk.SetChildCardinality(chunk.size());
 			phys_data->Append(append_state, phys_chunk);
 		}
 		result->data = std::move(phys_data);

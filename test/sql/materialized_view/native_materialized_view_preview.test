@@ -26,6 +26,11 @@ SELECT is_materialized::INTEGER FROM duckdb_tables() WHERE table_name = 'mv_nati
 1
 
 query I
+SELECT is_stale::INTEGER FROM duckdb_materialized_views() WHERE view_name = 'mv_native'
+----
+0
+
+query I
 SELECT total FROM mv_native
 ----
 30
@@ -34,12 +39,109 @@ statement ok
 INSERT INTO mv_base VALUES (3, 7)
 
 statement ok
+SET materialized_view_stale_read = 'error'
+
+statement error
+SELECT total FROM mv_native
+----
+<REGEX>:.*[Mm]aterialized view.*stale.*
+
+statement ok
+SET materialized_view_stale_read = 'allow'
+
+statement ok
 REFRESH MATERIALIZED VIEW mv_native
 
 query I
 SELECT total FROM mv_native
 ----
 37
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE mv_native
+
+query I
+SELECT total FROM mv_native
+----
+37
+
+statement ok
+INSERT INTO mv_base VALUES (4, 5)
+
+query I
+SELECT is_stale::INTEGER FROM duckdb_materialized_views() WHERE view_name = 'mv_native'
+----
+1
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE mv_native
+
+query I
+SELECT total FROM mv_native
+----
+42
+
+query I
+SELECT is_stale::INTEGER FROM duckdb_materialized_views() WHERE view_name = 'mv_native'
+----
+0
+
+statement ok
+CREATE TABLE mv_incremental_base(id INTEGER, payload VARCHAR)
+
+statement ok
+INSERT INTO mv_incremental_base VALUES (1, 'one'), (2, 'two')
+
+statement ok
+CREATE MATERIALIZED VIEW mv_projection AS SELECT id, upper(payload) AS payload FROM mv_incremental_base
+
+statement ok
+INSERT INTO mv_incremental_base VALUES (3, 'three'), (4, 'four')
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE mv_projection
+
+query IT rowsort
+SELECT * FROM mv_projection
+----
+1	ONE
+2	TWO
+3	THREE
+4	FOUR
+
+query T
+SELECT last_refresh_mode FROM duckdb_materialized_views() WHERE view_name = 'mv_projection'
+----
+append
+
+statement ok
+CREATE TABLE mv_incremental_aggregate(grp INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO mv_incremental_aggregate VALUES (1, 10), (1, NULL), (2, 5)
+
+statement ok
+CREATE MATERIALIZED VIEW mv_delta AS
+SELECT grp, count(*) AS rows, count(val) AS vals, sum(val) AS total, min(val) AS minimum, max(val) AS maximum
+FROM mv_incremental_aggregate GROUP BY grp
+
+statement ok
+INSERT INTO mv_incremental_aggregate VALUES (1, 20), (1, NULL), (2, 3), (3, NULL), (3, 7)
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE mv_delta
+
+query IIIIII rowsort
+SELECT * FROM mv_delta
+----
+1	4	2	30	10	20
+2	2	2	8	3	5
+3	2	1	7	7	7
+
+query T
+SELECT last_refresh_mode FROM duckdb_materialized_views() WHERE view_name = 'mv_delta'
+----
+delta
 
 statement error
 INSERT INTO mv_native VALUES (99)
