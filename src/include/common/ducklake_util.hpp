@@ -20,7 +20,7 @@ class ColumnList;
 class DuckLakeMetadataManager;
 class FileSystem;
 class TableFilter;
-class DynamicFilter;
+class LegacyDynamicFilter;
 
 struct ParsedCatalogEntry {
 	string schema;
@@ -40,7 +40,7 @@ public:
 	static ParsedCatalogEntry ParseCatalogEntry(const string &input);
 	static string JoinPath(FileSystem &fs, const string &a, const string &b);
 
-	static DynamicFilter *GetOptionalDynamicFilter(const TableFilter &filter);
+	static LegacyDynamicFilter *GetOptionalDynamicFilter(const TableFilter &filter);
 
 	//! Create the data path directory if it does not yet exist
 	static void EnsureDirectoryExists(FileSystem &fs, const string &data_path);

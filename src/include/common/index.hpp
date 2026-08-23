@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/table_index.hpp"
 #include "duckdb/common/unordered_set.hpp"
 
 namespace duckdb {
@@ -37,32 +38,6 @@ struct SchemaIndex {
 		return index != rhs.index;
 	};
 	inline bool operator<(const SchemaIndex &rhs) const {
-		return index < rhs.index;
-	};
-	bool IsValid() const {
-		return index != DConstants::INVALID_INDEX;
-	}
-	bool IsTransactionLocal() const {
-		D_ASSERT(IsValid());
-		return index >= DuckLakeConstants::TRANSACTION_LOCAL_ID_START;
-	}
-};
-
-struct TableIndex {
-	TableIndex() : index(DConstants::INVALID_INDEX) {
-	}
-	explicit TableIndex(idx_t index) : index(index) {
-	}
-
-	idx_t index;
-
-	inline bool operator==(const TableIndex &rhs) const {
-		return index == rhs.index;
-	};
-	inline bool operator!=(const TableIndex &rhs) const {
-		return index != rhs.index;
-	};
-	inline bool operator<(const TableIndex &rhs) const {
 		return index < rhs.index;
 	};
 	bool IsValid() const {

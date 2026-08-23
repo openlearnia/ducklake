@@ -23,6 +23,9 @@
 #include "common/ducklake_options.hpp"
 #include "common/index.hpp"
 #include "duckdb/planner/table_filter.hpp"
+#include "duckdb/common/serializer/binary_deserializer.hpp"
+#include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/common/serializer/memory_stream.hpp"
 
 #include <functional>
 
@@ -74,7 +77,11 @@ struct ColumnFilterInfo {
 
 	ColumnFilterInfo(const ColumnFilterInfo &other)
 	    : column_field_index(other.column_field_index), column_type(other.column_type),
-	      table_filter(other.table_filter->Copy()) {
+	      table_filter(nullptr) {
+		MemoryStream stream;
+		BinarySerializer::Serialize(*other.table_filter, stream);
+		stream.Rewind();
+		table_filter = BinaryDeserializer::Deserialize<TableFilter>(stream);
 	}
 };
 

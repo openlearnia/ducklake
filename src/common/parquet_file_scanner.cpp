@@ -22,7 +22,7 @@ ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFil
     : context(context) {
 	auto &instance = DatabaseInstance::GetDatabase(context);
 	ExtensionLoader loader(instance, "ducklake");
-	auto &scan_entry = loader.GetTableFunction(scan_function_name);
+	auto &scan_entry = loader.GetTableFunction(Identifier(scan_function_name));
 	parquet_scan = scan_entry.functions.functions[0];
 
 	// Prepare the inputs for the bind
@@ -30,7 +30,7 @@ ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFil
 	children.push_back(Value(file.path));
 	named_parameter_map_t named_params;
 	vector<LogicalType> input_types;
-	vector<string> input_names;
+	vector<Identifier> input_names;
 
 	// ducklake-managed paths may contain incidental key=value segments
 	named_params["hive_partitioning"] = Value::BOOLEAN(false);

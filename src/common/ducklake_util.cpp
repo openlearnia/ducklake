@@ -8,6 +8,7 @@
 #include "storage/ducklake_metadata_manager.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
 #include "duckdb/planner/filter/dynamic_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/function/scalar/variant_utils.hpp"
 
 #include <cmath>
@@ -159,7 +160,7 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 	case LogicalTypeId::ENUM:
 		return EscapeVarcharForSQL(value.ToString());
 	case LogicalTypeId::VARIANT: {
-		Vector tmp(value);
+		Vector tmp(value, count_t(idx_t(1)));
 		RecursiveUnifiedVectorFormat format;
 		Vector::RecursiveToUnifiedFormat(tmp, 1, format);
 		UnifiedVariantVectorData vector_data(format);
@@ -184,7 +185,8 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 			if (is_unnamed) {
 				ret += ToSQLString(metadata_manager, child);
 			} else {
-				ret += "'" + StringUtil::Replace(name, "'", "''") + "': " + ToSQLString(metadata_manager, child);
+				ret += "'" + StringUtil::Replace(name.GetIdentifierName(), "'", "''") + "': " +
+				       ToSQLString(metadata_manager, child);
 			}
 			if (i < struct_values.size() - 1) {
 				ret += ", ";
@@ -325,16 +327,16 @@ string DuckLakeUtil::JoinPath(FileSystem &fs, const string &a, const string &b) 
 	}
 }
 
-DynamicFilter *DuckLakeUtil::GetOptionalDynamicFilter(const TableFilter &filter) {
-	if (filter.filter_type != TableFilterType::OPTIONAL_FILTER) {
+LegacyDynamicFilter *DuckLakeUtil::GetOptionalDynamicFilter(const TableFilter &filter) {
+	if (filter.filter_type != TableFilterType::LEGACY_OPTIONAL_FILTER) {
 		return nullptr;
 	}
-	auto &optional = filter.Cast<OptionalFilter>();
-	if (!optional.child_filter || optional.child_filter->filter_type != TableFilterType::DYNAMIC_FILTER) {
+	auto &optional = filter.Cast<LegacyOptionalFilter>();
+	if (!optional.child_filter || optional.child_filter->filter_type != TableFilterType::LEGACY_DYNAMIC_FILTER) {
 		return nullptr;
 	}
-	auto &dynamic = optional.child_filter->Cast<DynamicFilter>();
-	if (!dynamic.filter_data || !dynamic.filter_data->filter) {
+	auto &dynamic = optional.child_filter->Cast<LegacyDynamicFilter>();
+	if (!dynamic.filter_data) {
 		return nullptr;
 	}
 	return &dynamic;
@@ -348,7 +350,7 @@ bool DuckLakeUtil::IsInlinedSystemColumn(const string &name) {
 
 void DuckLakeUtil::ValidateNoInlinedSystemColumns(const ColumnList &columns, const string &table_name) {
 	for (auto &col : columns.Logical()) {
-		if (IsInlinedSystemColumn(col.Name())) {
+		if (IsInlinedSystemColumn(col.Name().GetIdentifierName())) {
 			if (table_name.empty()) {
 				throw BinderException(
 				    "Column name \"%s\" is reserved by DuckLake for internal use when data inlining is enabled. If "
