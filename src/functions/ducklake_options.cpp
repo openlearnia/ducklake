@@ -65,7 +65,7 @@ struct DuckLakeOptionsState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> DuckLakeOptionsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 
 	names.emplace_back("option_name");
@@ -125,7 +125,7 @@ unique_ptr<GlobalTableFunctionState> DuckLakeOptionsInit(ClientContext &context,
 		option_info.scope = "SCHEMA";
 		auto schema_entry = ducklake_catalog.GetEntryById(transaction, snapshot, schema_setting.schema_id);
 		if (schema_entry) {
-			option_info.scope_entry = schema_entry->name;
+			option_info.scope_entry = schema_entry->name.GetIdentifierName();
 		}
 		result->options.push_back(std::move(option_info));
 	}

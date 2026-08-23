@@ -40,7 +40,7 @@ struct TransactionChangeInformation;
 class BoundAtClause;
 class QueryResult;
 class FileSystem;
-class ConstantFilter;
+class LegacyConstantFilter;
 
 struct SnapshotAndStats;
 struct FlushedInlinedTableInfo;
@@ -482,9 +482,9 @@ private:
 	virtual bool ValueIsFinite(const Value &val);
 	virtual string CastValueToTarget(const Value &val, const LogicalType &type);
 	virtual string CastStatsToTarget(const string &stats, const LogicalType &type);
-	virtual string GenerateConstantFilter(const ConstantFilter &constant_filter, const LogicalType &type,
+	virtual string GenerateConstantFilter(const LegacyConstantFilter &constant_filter, const LogicalType &type,
 	                                      unordered_set<string> &referenced_stats);
-	virtual string GenerateConstantFilterDouble(const ConstantFilter &constant_filter, const LogicalType &type,
+	virtual string GenerateConstantFilterDouble(const LegacyConstantFilter &constant_filter, const LogicalType &type,
 	                                            unordered_set<string> &referenced_stats);
 	virtual string GenerateFilterPushdown(const TableFilter &filter, unordered_set<string> &referenced_stats);
 

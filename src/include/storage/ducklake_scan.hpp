@@ -10,6 +10,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "common/ducklake_snapshot.hpp"
 #include "common/index.hpp"
 

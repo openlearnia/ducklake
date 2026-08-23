@@ -1,4 +1,6 @@
 #include "duckdb.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/main/attached_database.hpp"
 
 #include "storage/ducklake_storage.hpp"
 #include "storage/ducklake_catalog.hpp"
@@ -97,7 +99,7 @@ static unique_ptr<Catalog> DuckLakeAttach(optional_ptr<StorageExtensionInfo> sto
 		// if we have a secret - handle the options
 		const auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*secret->secret);
 		for (auto &entry : kv_secret.secret_map) {
-			HandleDuckLakeOption(options, entry.first, entry.second);
+			HandleDuckLakeOption(options, entry.first.GetIdentifierName(), entry.second);
 		}
 	}
 	options.access_mode = attach_options.access_mode;

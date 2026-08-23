@@ -50,7 +50,7 @@ struct CleanupBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> CleanupBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names,
+                                            vector<LogicalType> &return_types, vector<Identifier> &names,
                                             CleanupType type) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto result = make_uniq<CleanupBindData>(catalog, type);
@@ -62,12 +62,12 @@ static unique_ptr<FunctionData> CleanupBind(ClientContext &context, TableFunctio
 	bool has_timestamp = false;
 	bool cleanup_all = false;
 	for (auto &entry : input.named_parameters) {
-		if (StringUtil::CIEquals(entry.first, "dry_run")) {
+		if (StringUtil::CIEquals(entry.first.GetIdentifierName(), "dry_run")) {
 			result->dry_run = entry.second.GetValue<bool>();
 			;
-		} else if (StringUtil::CIEquals(entry.first, "cleanup_all")) {
+		} else if (StringUtil::CIEquals(entry.first.GetIdentifierName(), "cleanup_all")) {
 			cleanup_all = entry.second.GetValue<bool>();
-		} else if (StringUtil::CIEquals(entry.first, "older_than")) {
+		} else if (StringUtil::CIEquals(entry.first.GetIdentifierName(), "older_than")) {
 			from_timestamp = entry.second.GetValue<timestamp_tz_t>();
 			has_timestamp = true;
 		} else {
@@ -105,13 +105,13 @@ static unique_ptr<FunctionData> CleanupBind(ClientContext &context, TableFunctio
 	return std::move(result);
 }
 static unique_ptr<FunctionData> DuckLakeCleanupOldFilesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return CleanupBind(context, input, return_types, names, CleanupType::OLD_FILES);
 }
 
 static unique_ptr<FunctionData> DuckLakeCleanupOrphanedFilesBind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
-                                                                 vector<string> &names) {
+                                                                 vector<Identifier> &names) {
 	return CleanupBind(context, input, return_types, names, CleanupType::ORPHANED_FILES);
 }
 
@@ -161,7 +161,7 @@ void DuckLakeCleanupExecute(ClientContext &context, TableFunctionInput &data_p, 
 }
 
 DuckLakeCleanupOldFilesFunction::DuckLakeCleanupOldFilesFunction()
-    : TableFunction("ducklake_cleanup_old_files", {LogicalType::VARCHAR}, DuckLakeCleanupExecute,
+	: TableFunction(Identifier("ducklake_cleanup_old_files"), {LogicalType::VARCHAR}, DuckLakeCleanupExecute,
                     DuckLakeCleanupOldFilesBind, DuckLakeCleanupInit) {
 	named_parameters["older_than"] = LogicalType::TIMESTAMP_TZ;
 	named_parameters["cleanup_all"] = LogicalType::BOOLEAN;
@@ -169,7 +169,7 @@ DuckLakeCleanupOldFilesFunction::DuckLakeCleanupOldFilesFunction()
 }
 
 DuckLakeCleanupOrphanedFilesFunction::DuckLakeCleanupOrphanedFilesFunction()
-    : TableFunction("ducklake_delete_orphaned_files", {LogicalType::VARCHAR}, DuckLakeCleanupExecute,
+	: TableFunction(Identifier("ducklake_delete_orphaned_files"), {LogicalType::VARCHAR}, DuckLakeCleanupExecute,
                     DuckLakeCleanupOrphanedFilesBind, DuckLakeCleanupInit) {
 	named_parameters["older_than"] = LogicalType::TIMESTAMP_TZ;
 	named_parameters["cleanup_all"] = LogicalType::BOOLEAN;

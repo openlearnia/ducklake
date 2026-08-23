@@ -214,14 +214,14 @@ string DuckLakeFlushData::GetName() const {
 //===--------------------------------------------------------------------===//
 class DuckLakeLogicalFlush : public LogicalExtensionOperator {
 public:
-	DuckLakeLogicalFlush(idx_t table_index, DuckLakeTableEntry &table, DuckLakeInlinedTableInfo inlined_table_p,
+	DuckLakeLogicalFlush(TableIndex table_index, DuckLakeTableEntry &table, DuckLakeInlinedTableInfo inlined_table_p,
 	                     string encryption_key_p, optional_idx partition_id_p, string sort_order_sql_p)
 	    : table_index(table_index), table(table), inlined_table(std::move(inlined_table_p)),
 	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
 	      sort_order_sql(std::move(sort_order_sql_p)) {
 	}
 
-	idx_t table_index;
+	TableIndex table_index;
 	DuckLakeTableEntry &table;
 	DuckLakeInlinedTableInfo inlined_table;
 	string encryption_key;
@@ -244,9 +244,9 @@ public:
 	}
 	vector<ColumnBinding> GetColumnBindings() override {
 		vector<ColumnBinding> result;
-		result.emplace_back(table_index, 0);
-		result.emplace_back(table_index, 1);
-		result.emplace_back(table_index, 2);
+		result.emplace_back(table_index, ProjectionIndex(0));
+		result.emplace_back(table_index, ProjectionIndex(1));
+		result.emplace_back(table_index, ProjectionIndex(2));
 		return result;
 	}
 
@@ -313,16 +313,20 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	auto &columns = table.GetColumns();
 
 	DuckLakeCopyInput copy_input(context, table);
-	copy_input.get_table_index = table_idx;
+	copy_input.get_table_index = table_idx.index;
 	copy_input.virtual_columns = InsertVirtualColumns::WRITE_ROW_ID_AND_SNAPSHOT_ID;
 
 	bool is_encrypted = !copy_input.encryption_key.empty();
 	auto copy_options = DuckLakeInsert::GetCopyOptions(context, copy_input);
 
 	auto virtual_columns = table.GetVirtualColumns();
-	auto ducklake_scan =
-	    make_uniq<LogicalGet>(table_idx, std::move(scan_function), std::move(bind_data), copy_options.expected_types,
-	                          copy_options.names, std::move(virtual_columns));
+	vector<Identifier> scan_names;
+	for (auto &name : copy_options.names) {
+		scan_names.emplace_back(name);
+	}
+	auto ducklake_scan = make_uniq<LogicalGet>(table_idx, std::move(scan_function), std::move(bind_data),
+	                                           copy_options.expected_types, std::move(scan_names),
+	                                           std::move(virtual_columns));
 	auto &column_ids = ducklake_scan->GetMutableColumnIds();
 	for (idx_t i = 0; i < columns.PhysicalColumnCount(); i++) {
 		column_ids.emplace_back(i);
@@ -350,7 +354,8 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	// and instead pull the latest sort setting
 	// First, see if there are transaction local changes to the table
 	// Then fall back to latest snapshot if no local changes
-	auto latest_entry = transaction.GetTransactionLocalEntry(CatalogType::TABLE_ENTRY, table.schema.name, table.name);
+	auto latest_entry = transaction.GetTransactionLocalEntry(CatalogType::TABLE_ENTRY,
+	                                                         table.schema.name.GetIdentifierName(), table.name.GetIdentifierName());
 	if (!latest_entry) {
 		auto latest_snapshot = transaction.GetSnapshot();
 		latest_entry = catalog.GetEntryById(transaction, latest_snapshot, table_id);
@@ -369,7 +374,7 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 
 	// generate the LogicalCopyToFile
 	auto copy = make_uniq<LogicalCopyToFile>(std::move(copy_options.copy_function), std::move(copy_options.bind_data),
-	                                         std::move(copy_options.info));
+	                                         std::move(copy_options.info), binder.GenerateTableIndex());
 
 	copy->file_path = std::move(copy_options.file_path);
 	copy->use_tmp_file = copy_options.use_tmp_file;
@@ -385,7 +390,9 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	copy->write_partition_columns = copy_options.write_partition_columns;
 	copy->write_empty_file = copy_options.write_empty_file;
 	copy->partition_columns = std::move(copy_options.partition_columns);
-	copy->names = std::move(copy_options.names);
+	for (auto &name : copy_options.names) {
+		copy->names.emplace_back(name);
+	}
 	copy->expected_types = std::move(copy_options.expected_types);
 
 	copy->hive_file_pattern =
@@ -591,7 +598,7 @@ LEFT JOIN (
 // Function
 //===--------------------------------------------------------------------===//
 static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, TableFunctionBindInput &input,
-                                                        idx_t bind_index, vector<string> &return_names) {
+                                                        TableIndex bind_index, vector<Identifier> &return_names) {
 	input.binder->SetAlwaysRequireRebind();
 	// gather a list of files to compact
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
@@ -623,7 +630,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 			schemas = ducklake_catalog.GetSchemas(context);
 		} else {
 			// specific schema - fetch it
-			schemas.push_back(ducklake_catalog.GetSchema(context, schema));
+				schemas.push_back(ducklake_catalog.GetSchema(context, Identifier(schema)));
 		}
 
 		// - scan all tables from the relevant schemas
@@ -638,7 +645,8 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	} else {
 		// specific table - fetch the table
 		auto table_catalog_entry =
-		    ducklake_catalog.GetEntry<TableCatalogEntry>(context, schema, table, OnEntryNotFound::THROW_EXCEPTION);
+		    ducklake_catalog.GetEntry<TableCatalogEntry>(context, Identifier(schema), Identifier(table),
+		                                                OnEntryNotFound::THROW_EXCEPTION);
 		auto &dl_schema = table_catalog_entry->schema.Cast<DuckLakeSchemaEntry>();
 		schema_table_map[dl_schema.Cast<DuckLakeSchemaEntry>().GetSchemaId().index].push_back(
 		    table_catalog_entry.get()->Cast<DuckLakeTableEntry>());
@@ -663,16 +671,16 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 			FlushInlinedFileDeletions(context, ducklake_catalog, transaction, table);
 		}
 	}
-	return_names.push_back("schema_name");
-	return_names.push_back("table_name");
-	return_names.push_back("rows_flushed");
+	return_names.emplace_back("schema_name");
+	return_names.emplace_back("table_name");
+	return_names.emplace_back("rows_flushed");
 	if (flushes.empty()) {
 		// nothing to write - generate empty result
 		vector<ColumnBinding> bindings;
 		vector<LogicalType> return_types;
-		bindings.emplace_back(bind_index, 0);
-		bindings.emplace_back(bind_index, 1);
-		bindings.emplace_back(bind_index, 2);
+		bindings.emplace_back(bind_index, ProjectionIndex(0));
+		bindings.emplace_back(bind_index, ProjectionIndex(1));
+		bindings.emplace_back(bind_index, ProjectionIndex(2));
 		return_types.emplace_back(LogicalType::VARCHAR);
 		return_types.emplace_back(LogicalType::VARCHAR);
 		return_types.emplace_back(LogicalType::BIGINT);
@@ -718,7 +726,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	sum_args.push_back(make_uniq<BoundColumnRefExpression>(child->types[2], child_bindings[2]));
 
 	// Pick the right sum overload
-	auto sum_func = sum_entry.functions.GetFunctionByArguments(context, {sum_args[0]->return_type});
+		auto sum_func = sum_entry.functions.GetFunctionByArguments(context, {sum_args[0]->GetReturnType()});
 	FunctionBinder function_binder(context);
 	auto sum_aggregate =
 	    function_binder.BindAggregateFunction(sum_func,            // The SUM(BIGINT) -> HUGEINT function
@@ -728,8 +736,8 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	    );
 
 	// Create LogicalAggregate with GROUP BY schema_name, table_name and SUM(rows_flushed)
-	idx_t group_index = input.binder->GenerateTableIndex();
-	idx_t aggregate_index = input.binder->GenerateTableIndex();
+	TableIndex group_index = input.binder->GenerateTableIndex();
+	TableIndex aggregate_index = input.binder->GenerateTableIndex();
 
 	vector<unique_ptr<Expression>> aggregates;
 	aggregates.push_back(std::move(sum_aggregate));
@@ -745,8 +753,8 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	unique_ptr<Expression> sum_col_ref = make_uniq<BoundColumnRefExpression>(aggregate->types[2], agg_bindings[2]);
 	// Note: SUM(BIGINT) returns HUGEINT. We must use the its output type for the 0 constant
 	unique_ptr<Expression> zero_const = make_uniq<BoundConstantExpression>(Value::Numeric(aggregate->types[2], 0));
-	unique_ptr<Expression> filter_expr = make_uniq<BoundComparisonExpression>(
-	    ExpressionType::COMPARE_GREATERTHAN, std::move(sum_col_ref), std::move(zero_const));
+	unique_ptr<Expression> filter_expr = BoundComparisonExpression::Create(
+		ExpressionType::COMPARE_GREATERTHAN, std::move(sum_col_ref), std::move(zero_const));
 
 	auto filter = make_uniq<LogicalFilter>(std::move(filter_expr));
 	filter->children.push_back(std::move(aggregate));

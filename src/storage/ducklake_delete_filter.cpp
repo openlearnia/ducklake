@@ -6,6 +6,7 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/file_system.hpp"
 
 namespace duckdb {
 
@@ -184,14 +185,14 @@ DeleteFileScanResult DuckLakeDeleteFilter::ScanDeleteFile(ClientContext &context
 		if (snapshot_filter_min.IsValid()) {
 			auto min_constant = Value::BIGINT(NumericCast<int64_t>(snapshot_filter_min.GetIndex()));
 			auto min_filter =
-			    make_uniq<ConstantFilter>(ExpressionType::COMPARE_GREATERTHANOREQUALTO, std::move(min_constant));
-			filters->PushFilter(snapshot_col_idx, std::move(min_filter));
+				make_uniq<LegacyConstantFilter>(ExpressionType::COMPARE_GREATERTHANOREQUALTO, std::move(min_constant));
+			filters->PushFilter(ProjectionIndex(snapshot_col_idx.GetPrimaryIndex()), std::move(min_filter));
 		}
 		if (snapshot_filter_max.IsValid()) {
 			auto max_constant = Value::BIGINT(NumericCast<int64_t>(snapshot_filter_max.GetIndex()));
 			auto max_filter =
-			    make_uniq<ConstantFilter>(ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(max_constant));
-			filters->PushFilter(snapshot_col_idx, std::move(max_filter));
+				make_uniq<LegacyConstantFilter>(ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(max_constant));
+			filters->PushFilter(ProjectionIndex(snapshot_col_idx.GetPrimaryIndex()), std::move(max_filter));
 		}
 		scanner.SetFilters(std::move(filters));
 	}

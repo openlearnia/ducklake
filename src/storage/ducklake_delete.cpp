@@ -68,10 +68,10 @@ static DuckLakeDeleteFile WriteDeleteFileInternal(ClientContext &context, InputT
 	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(input.context, info->format);
 	CopyFunctionBindInput bind_input(*info);
 
-	vector<string> names_to_write {"file_path", "pos"};
+	vector<Identifier> names_to_write {Identifier("file_path"), Identifier("pos")};
 	vector<LogicalType> types_to_write {LogicalType::VARCHAR, LogicalType::BIGINT};
 	if (with_snapshots) {
-		names_to_write.push_back("_ducklake_internal_snapshot_id");
+		names_to_write.push_back(Identifier("_ducklake_internal_snapshot_id"));
 		types_to_write.push_back(LogicalType::BIGINT);
 	}
 
@@ -92,14 +92,14 @@ static DuckLakeDeleteFile WriteDeleteFileInternal(ClientContext &context, InputT
 	write_chunk.Initialize(input.context, types_to_write);
 	// the first vector is constant (the file name)
 	Value filename_val(input.data_file_path);
-	write_chunk.data[0].Reference(filename_val);
+	write_chunk.data[0].SetValue(0, filename_val);
 
 	optional_idx begin_snapshot;
 	idx_t row_count = 0;
-	auto pos_data = FlatVector::GetData<int64_t>(write_chunk.data[1]);
+	auto pos_data = FlatVector::GetDataMutable<int64_t>(write_chunk.data[1]);
 	int64_t *snapshot_data = nullptr;
 	if (with_snapshots) {
-		snapshot_data = FlatVector::GetData<int64_t>(write_chunk.data[2]);
+		snapshot_data = FlatVector::GetDataMutable<int64_t>(write_chunk.data[2]);
 	}
 
 	for (auto &entry : input.positions) {
@@ -253,7 +253,7 @@ public:
 		}
 		ColumnDataAppendState append_state;
 		deleted_row_collection->InitializeAppend(append_state);
-		auto data = FlatVector::GetData<uint64_t>(file_row_id_chunk.data[0]);
+		auto data = FlatVector::GetDataMutable<uint64_t>(file_row_id_chunk.data[0]);
 		idx_t chunk_size = 0;
 		for (idx_t r = 0; r < local_entry.size(); ++r) {
 			data[chunk_size++] = local_entry[r];
@@ -630,7 +630,7 @@ string DuckLakeDelete::GetName() const {
 
 InsertionOrderPreservingMap<string> DuckLakeDelete::ParamsToString() const {
 	InsertionOrderPreservingMap<string> result;
-	result["Table Name"] = table.name;
+	result["Table Name"] = table.name.GetIdentifierName();
 	return result;
 }
 
@@ -689,7 +689,7 @@ PhysicalOperator &DuckLakeCatalog::PlanDelete(ClientContext &context, PhysicalPl
 	vector<idx_t> row_id_indexes;
 	for (idx_t i = 0; i < 3; i++) {
 		auto &bound_ref = op.expressions[i + 1]->Cast<BoundReferenceExpression>();
-		row_id_indexes.push_back(bound_ref.index);
+		row_id_indexes.push_back(bound_ref.Index());
 	}
 	return DuckLakeDelete::PlanDelete(context, planner, op.table.Cast<DuckLakeTableEntry>(), child_plan,
 	                                  std::move(row_id_indexes), std::move(encryption_key));

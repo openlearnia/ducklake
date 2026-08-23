@@ -1,4 +1,6 @@
 #include "functions/ducklake_table_functions.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "common/ducklake_util.hpp"
 #include "storage/ducklake_transaction_changes.hpp"
@@ -31,7 +33,7 @@ struct DuckLakeAddDataFilesData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	string schema_name;
 	if (input.inputs[1].IsNull()) {
@@ -43,7 +45,8 @@ static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context,
 	const auto table_name = StringValue::Get(input.inputs[1]);
 
 	auto entry =
-	    catalog.GetEntry<TableCatalogEntry>(context, schema_name, table_name, OnEntryNotFound::THROW_EXCEPTION);
+	    catalog.GetEntry<TableCatalogEntry>(context, Identifier(schema_name), Identifier(table_name),
+	                                        OnEntryNotFound::THROW_EXCEPTION);
 	auto &table = entry->Cast<DuckLakeTableEntry>();
 
 	auto result = make_uniq<DuckLakeAddDataFilesData>(catalog, table);
@@ -62,7 +65,7 @@ static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context,
 		throw InvalidInputException("File list must be a string or a list of strings");
 	}
 	for (auto &entry : input.named_parameters) {
-		auto lower = StringUtil::Lower(entry.first);
+			auto lower = StringUtil::Lower(entry.first.GetIdentifierName());
 		if (lower == "allow_missing") {
 			result->allow_missing = BooleanValue::Get(entry.second);
 		} else if (lower == "ignore_extra_columns") {
@@ -1217,8 +1220,8 @@ unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapHiveColumn(ParquetFil
 	}
 
 	string error;
-	Value cast_result;
-	if (!hive_value.DefaultTryCastAs(target_type, cast_result, &error)) {
+	auto casted_value = hive_value.DefaultTryCastAs(target_type, &error);
+	if (!casted_value) {
 		throw InvalidInputException("Column \"%s\" exists as a hive partition with value \"%s\", but this value cannot "
 		                            "be cast to the column type \"%s\"",
 		                            field_id.Name(), hive_value.ToString(), field_id.Type());

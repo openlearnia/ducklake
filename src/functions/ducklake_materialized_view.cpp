@@ -38,9 +38,15 @@ namespace duckdb {
 static string SQLQuote(const string &input) {
 	return KeywordHelper::WriteQuoted(input, '\'');
 }
+static string SQLQuote(const Identifier &input) {
+	return SQLQuote(input.GetIdentifierName());
+}
 
 static string SQLIdentifier(const string &input) {
 	return KeywordHelper::WriteQuoted(input, '"');
+}
+static string SQLIdentifier(const Identifier &input) {
+	return SQLIdentifier(input.GetIdentifierName());
 }
 
 static unique_ptr<SelectStatement> ParseSingleSelect(const string &sql, const string &context) {
@@ -122,7 +128,7 @@ static bool ExpressionReferencesOnlyRelation(const ParsedExpression &expr, const
                                              bool &saw_column) {
 	bool valid = true;
 	std::function<void(const ParsedExpression &)> visit = [&](const ParsedExpression &child) {
-		if (child.expression_class != ExpressionClass::COLUMN_REF) {
+		if (child.GetExpressionClass() != ExpressionClass::COLUMN_REF) {
 			ParsedExpressionIterator::EnumerateChildren(child, visit);
 			return;
 		}
@@ -132,7 +138,8 @@ static bool ExpressionReferencesOnlyRelation(const ParsedExpression &expr, const
 			valid = false;
 			return;
 		}
-		auto qualifier = StringUtil::Lower(column.GetTableName());
+		auto &column_names = column.ColumnNames();
+		auto qualifier = column_names.size() > 1 ? StringUtil::Lower(column_names[column_names.size() - 2].GetIdentifierName()) : string();
 		auto expected_alias = StringUtil::Lower(alias);
 		auto expected_table = StringUtil::Lower(table);
 		if ((!expected_alias.empty() && qualifier == expected_alias) || qualifier == expected_table) {
@@ -147,19 +154,20 @@ static bool ExpressionReferencesOnlyRelation(const ParsedExpression &expr, const
 //! Recursively verify that a select-list expression either is a supported non-distinct aggregate
 //! call (without nested aggregates) or contains no aggregates at all.
 static bool SelectItemIsSupported(const ParsedExpression &expr, bool &is_aggregate) {
-	if (expr.expression_class == ExpressionClass::FUNCTION) {
+	if (expr.GetExpressionClass() == ExpressionClass::FUNCTION) {
 		auto &function = expr.Cast<const FunctionExpression>();
-		if (IsSupportedAggregate(function.function_name)) {
-			if (function.distinct) {
+		if (IsSupportedAggregate(function.FunctionName().GetIdentifierName())) {
+			if (function.Distinct()) {
 				return false;
 			}
-			for (auto &child : function.children) {
-				if (child->expression_class == ExpressionClass::FUNCTION &&
-				    IsSupportedAggregate(child->Cast<const FunctionExpression>().function_name)) {
+			for (auto &argument : function.GetArguments()) {
+				auto &child = argument.GetExpression();
+				if (child.GetExpressionClass() == ExpressionClass::FUNCTION &&
+				    IsSupportedAggregate(child.Cast<const FunctionExpression>().FunctionName().GetIdentifierName())) {
 					// nested aggregate
 					return false;
 				}
-				if (child->HasSubquery()) {
+				if (child.HasSubquery()) {
 					return false;
 				}
 			}
@@ -167,15 +175,16 @@ static bool SelectItemIsSupported(const ParsedExpression &expr, bool &is_aggrega
 			return true;
 		}
 		// scalar function - check children for unsupported aggregates
-		for (auto &child : function.children) {
+		for (auto &argument : function.GetArguments()) {
+			auto &child = argument.GetExpression();
 			bool child_aggregate = false;
-			if (!SelectItemIsSupported(*child, child_aggregate) || child_aggregate) {
+			if (!SelectItemIsSupported(child, child_aggregate) || child_aggregate) {
 				return false;
 			}
 		}
 		return true;
 	}
-	if (expr.expression_class == ExpressionClass::STAR) {
+	if (expr.GetExpressionClass() == ExpressionClass::STAR) {
 		return false;
 	}
 	if (expr.HasSubquery() || expr.IsWindow()) {
@@ -227,7 +236,7 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 			return result;
 		}
 		// require a single equality comparison
-		if (join.condition->expression_class != ExpressionClass::COMPARISON) {
+		if (join.condition->GetExpressionClass() != ExpressionClass::COMPARISON) {
 			result.reason = "definition join condition must be a single equality";
 			return result;
 		}
@@ -243,21 +252,26 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		bool right_dim_column = false;
 		bool left_dim_column = false;
 		bool right_fact_column = false;
-		auto left_is_fact = ExpressionReferencesOnlyRelation(*cmp.left, fact_ref->alias, fact_ref->table_name,
+		auto left_is_fact = ExpressionReferencesOnlyRelation(cmp.Left(), fact_ref->alias.GetIdentifierName(),
+		                                                 fact_ref->Table().GetIdentifierName(),
 		                                                  left_fact_column);
-		auto right_is_dim = ExpressionReferencesOnlyRelation(*cmp.right, dim_ref->alias, dim_ref->table_name,
+		auto right_is_dim = ExpressionReferencesOnlyRelation(cmp.Right(), dim_ref->alias.GetIdentifierName(),
+		                                                   dim_ref->Table().GetIdentifierName(),
 		                                                   right_dim_column);
-		auto left_is_dim = ExpressionReferencesOnlyRelation(*cmp.left, dim_ref->alias, dim_ref->table_name,
+		auto left_is_dim = ExpressionReferencesOnlyRelation(cmp.Left(), dim_ref->alias.GetIdentifierName(),
+		                                                 dim_ref->Table().GetIdentifierName(),
 		                                                 left_dim_column);
-		auto right_is_fact = ExpressionReferencesOnlyRelation(*cmp.right, fact_ref->alias, fact_ref->table_name,
+		auto right_is_fact = ExpressionReferencesOnlyRelation(cmp.Right(), fact_ref->alias.GetIdentifierName(),
+		                                                  fact_ref->Table().GetIdentifierName(),
 		                                                   right_fact_column);
 		if (!((left_is_fact && left_fact_column && right_is_dim && right_dim_column) ||
 		      (left_is_dim && left_dim_column && right_is_fact && right_fact_column))) {
 			result.reason = "definition join equality must connect the fact and dimension relations";
 			return result;
 		}
-		if ((!fact_ref->catalog_name.empty() || !dim_ref->catalog_name.empty()) &&
-		    StringUtil::Lower(fact_ref->catalog_name) != StringUtil::Lower(dim_ref->catalog_name)) {
+		if ((!fact_ref->GetQualifiedName().Catalog().empty() || !dim_ref->GetQualifiedName().Catalog().empty()) &&
+		    StringUtil::Lower(fact_ref->GetQualifiedName().Catalog().GetIdentifierName()) !=
+		        StringUtil::Lower(dim_ref->GetQualifiedName().Catalog().GetIdentifierName())) {
 			result.reason = "definition join relations must belong to the same catalog";
 			return result;
 		}
@@ -321,13 +335,13 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 			continue;
 		}
 		const FunctionExpression *func = nullptr;
-		if (item->expression_class == ExpressionClass::FUNCTION &&
-		    IsSupportedAggregate(item->Cast<const FunctionExpression>().function_name)) {
+		if (item->GetExpressionClass() == ExpressionClass::FUNCTION &&
+		    IsSupportedAggregate(item->Cast<const FunctionExpression>().FunctionName().GetIdentifierName())) {
 			func = &item->Cast<const FunctionExpression>();
 		} else {
 			ParsedExpressionIterator::EnumerateChildren(*item, [&](const ParsedExpression &child) {
-				if (!func && child.expression_class == ExpressionClass::FUNCTION &&
-				    IsSupportedAggregate(child.Cast<const FunctionExpression>().function_name)) {
+				if (!func && child.GetExpressionClass() == ExpressionClass::FUNCTION &&
+				    IsSupportedAggregate(child.Cast<const FunctionExpression>().FunctionName().GetIdentifierName())) {
 					func = &child.Cast<const FunctionExpression>();
 				}
 			});
@@ -338,9 +352,11 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 			continue;
 		}
 		if (result.join_eligible) {
-			for (auto &child : func->children) {
+			for (auto &argument : func->GetArguments()) {
+				auto &child = argument.GetExpression();
 				bool saw_column = false;
-				if (!ExpressionReferencesOnlyRelation(*child, fact_ref->alias, fact_ref->table_name, saw_column) ||
+				if (!ExpressionReferencesOnlyRelation(child, fact_ref->alias.GetIdentifierName(),
+				                                    fact_ref->Table().GetIdentifierName(), saw_column) ||
 				    !saw_column) {
 					result.reason = "join-incremental aggregates must reference only fact-side columns";
 					return result;
@@ -350,38 +366,38 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		// The delta expressions below model plain aggregate arguments only. FILTER,
 		// aggregate ORDER BY and exported aggregate state retain incremental support
 		// through changed-key recomputation, but are not safe for algebraic deltas.
-		if (func->filter || (func->order_bys && !func->order_bys->orders.empty()) || func->export_state) {
+		if (func->Filter() || (func->OrderBy() && !func->OrderBy()->orders.empty()) || func->ExportState()) {
 			only_delta_aggs = false;
 			conditional_state_safe = false;
 		}
-		auto fname = StringUtil::Lower(func->function_name);
+		auto fname = StringUtil::Lower(func->FunctionName().GetIdentifierName());
 		MVAggregateInfo info;
 		info.select_index = select_idx;
 		if (fname == "sum") {
 			info.kind = MVAggKind::SUM;
-			info.child_sql = func->children.empty() ? string() : func->children[0]->ToString();
+			info.child_sql = func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
 		} else if (fname == "count" || fname == "count_star") {
-			if (fname == "count_star" || func->children.empty() ||
-			    func->children[0]->expression_class == ExpressionClass::STAR) {
+			if (fname == "count_star" || func->GetArguments().empty() ||
+			    func->GetArguments()[0].GetExpression().GetExpressionClass() == ExpressionClass::STAR) {
 				info.kind = MVAggKind::COUNT_STAR;
 				has_count_star = true;
 			} else {
 				info.kind = MVAggKind::COUNT_COL;
-				info.child_sql = func->children[0]->ToString();
+				info.child_sql = func->GetArguments()[0].GetExpression().ToString();
 			}
 		} else if (fname == "min") {
 			info.kind = MVAggKind::MIN;
 			only_delta_aggs = false;
 			has_minmax = true;
-			info.child_sql = func->children.empty() ? string() : func->children[0]->ToString();
+			info.child_sql = func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
 		} else if (fname == "max") {
 			info.kind = MVAggKind::MAX;
 			only_delta_aggs = false;
 			has_minmax = true;
-			info.child_sql = func->children.empty() ? string() : func->children[0]->ToString();
+			info.child_sql = func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
 		} else if (fname == "avg") {
 			info.kind = MVAggKind::AVG;
-			info.child_sql = func->children.empty() ? string() : func->children[0]->ToString();
+			info.child_sql = func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
 		} else {
 			only_delta_aggs = false;
 			continue;
@@ -411,17 +427,17 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		result.key_expr_sql.push_back(std::move(group_sql));
 	}
 
-	result.base_schema = base.schema_name.empty() ? "main" : base.schema_name;
-	result.base_table = base.table_name;
-	result.base_alias = base.alias;
-	result.base_catalog_qualified = !base.catalog_name.empty();
+	result.base_schema = base.GetQualifiedName().Schema().empty() ? "main" : base.GetQualifiedName().Schema().GetIdentifierName();
+	result.base_table = base.Table().GetIdentifierName();
+	result.base_alias = base.alias.GetIdentifierName();
+	result.base_catalog_qualified = !base.GetQualifiedName().Catalog().empty();
 	if (result.join_eligible) {
-		result.fact_schema = fact_ref->schema_name.empty() ? "main" : fact_ref->schema_name;
-		result.fact_table = fact_ref->table_name;
-		result.fact_alias = fact_ref->alias;
-		result.dim_schema = dim_ref->schema_name.empty() ? "main" : dim_ref->schema_name;
-		result.dim_table = dim_ref->table_name;
-		result.dim_alias = dim_ref->alias;
+		result.fact_schema = fact_ref->GetQualifiedName().Schema().empty() ? "main" : fact_ref->GetQualifiedName().Schema().GetIdentifierName();
+		result.fact_table = fact_ref->Table().GetIdentifierName();
+		result.fact_alias = fact_ref->alias.GetIdentifierName();
+		result.dim_schema = dim_ref->GetQualifiedName().Schema().empty() ? "main" : dim_ref->GetQualifiedName().Schema().GetIdentifierName();
+		result.dim_table = dim_ref->Table().GetIdentifierName();
+		result.dim_alias = dim_ref->alias.GetIdentifierName();
 		result.join_condition_sql = std::move(join_condition_sql);
 		string fact_alias_sql = result.fact_alias.empty() ? "" : " AS " + SQLIdentifier(result.fact_alias);
 		string dim_alias_sql = result.dim_alias.empty() ? "" : " AS " + SQLIdentifier(result.dim_alias);
@@ -597,13 +613,13 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 
 class DuckLakeLogicalMVRefresh : public LogicalExtensionOperator {
 public:
-	DuckLakeLogicalMVRefresh(idx_t table_index_p, DuckLakeTableEntry &table_p, TableIndex mv_view_id_p,
+	DuckLakeLogicalMVRefresh(TableIndex table_index_p, DuckLakeTableEntry &table_p, TableIndex mv_view_id_p,
 	                         string encryption_key_p, optional_idx partition_id_p)
 	    : table_index(table_index_p), table(table_p), mv_view_id(mv_view_id_p),
 	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p) {
 	}
 
-	idx_t table_index;
+	TableIndex table_index;
 	DuckLakeTableEntry &table;
 	TableIndex mv_view_id;
 	string encryption_key;
@@ -627,7 +643,7 @@ public:
 	vector<ColumnBinding> GetColumnBindings() override {
 		vector<ColumnBinding> result;
 		for (idx_t i = 0; i < 3; i++) {
-			result.emplace_back(table_index, i);
+			result.emplace_back(table_index, ProjectionIndex(i));
 		}
 		return result;
 	}
@@ -644,11 +660,11 @@ public:
 //! Wrap a bound plan producing the materialized view content with the write pipeline:
 //! plan -> (casts) -> copy-to-files -> MV refresh operator -> projection.
 //! The projection emits (schema_name, view_name, refresh_mode, rows_refreshed).
-static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Binder &binder, idx_t bind_index,
+static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Binder &binder, TableIndex bind_index,
                                                     unique_ptr<LogicalOperator> plan, DuckLakeTableEntry &table,
                                                     TableIndex mv_view_id, const string &schema_name,
                                                     const string &view_name, const string &refresh_mode,
-                                                    vector<string> &return_names) {
+                                                    vector<Identifier> &return_names) {
 	plan->ResolveOperatorTypes();
 	if (DuckLakeTypes::RequiresCast(plan->types)) {
 		plan = DuckLakeInsert::InsertCasts(binder, plan);
@@ -664,7 +680,7 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 	}
 
 	auto copy = make_uniq<LogicalCopyToFile>(std::move(copy_options.copy_function), std::move(copy_options.bind_data),
-	                                         std::move(copy_options.info));
+	                                         std::move(copy_options.info), binder.GenerateTableIndex());
 	copy->file_path = std::move(copy_options.file_path);
 	copy->use_tmp_file = copy_options.use_tmp_file;
 	copy->filename_pattern = std::move(copy_options.filename_pattern);
@@ -678,13 +694,15 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 	copy->write_partition_columns = copy_options.write_partition_columns;
 	copy->write_empty_file = copy_options.write_empty_file;
 	copy->partition_columns = std::move(copy_options.partition_columns);
-	copy->names = std::move(copy_options.names);
+	for (auto &name : copy_options.names) {
+		copy->names.emplace_back(name);
+	}
 	copy->expected_types = std::move(copy_options.expected_types);
 	copy->hive_file_pattern = copy_input.catalog.UseHiveFilePattern(copy_input.encryption_key.empty(),
 	                                                                copy_input.schema_id, copy_input.table_id);
 	copy->children.push_back(std::move(plan));
 
-	idx_t mv_index = binder.GenerateTableIndex();
+	TableIndex mv_index = binder.GenerateTableIndex();
 	auto mv_op = make_uniq<DuckLakeLogicalMVRefresh>(mv_index, table, mv_view_id, std::move(copy_input.encryption_key),
 	                                                 optional_idx());
 	mv_op->children.push_back(std::move(copy));
@@ -701,17 +719,17 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 	projection->children.push_back(std::move(mv_op));
 	projection->ResolveOperatorTypes();
 
-	return_names = {"schema_name", "view_name", "refresh_mode", "rows_refreshed"};
+	return_names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_mode"), Identifier("rows_refreshed")};
 	return std::move(projection);
 }
 
 //! Result row for statements that do not execute a plan (skip / drop).
-static unique_ptr<LogicalOperator> BuildConstantResult(idx_t bind_index, const string &schema_name,
+static unique_ptr<LogicalOperator> BuildConstantResult(TableIndex bind_index, const string &schema_name,
                                                        const string &view_name, const string &mode, idx_t rows,
-                                                       vector<string> &return_names) {
+                                                       vector<Identifier> &return_names) {
 	auto dummy = make_uniq<LogicalDummyScan>(bind_index);
 	vector<ColumnBinding> bindings;
-	bindings.emplace_back(bind_index, 0);
+	bindings.emplace_back(bind_index, ProjectionIndex(0));
 	vector<unique_ptr<Expression>> projections;
 	projections.push_back(make_uniq<BoundConstantExpression>(Value(schema_name)));
 	projections.push_back(make_uniq<BoundConstantExpression>(Value(view_name)));
@@ -720,7 +738,7 @@ static unique_ptr<LogicalOperator> BuildConstantResult(idx_t bind_index, const s
 	auto projection = make_uniq<LogicalProjection>(bind_index, std::move(projections));
 	projection->children.push_back(std::move(dummy));
 	projection->ResolveOperatorTypes();
-	return_names = {"schema_name", "view_name", "refresh_mode", "rows_refreshed"};
+	return_names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_mode"), Identifier("rows_refreshed")};
 	return std::move(projection);
 }
 
@@ -741,8 +759,8 @@ static void CollectBaseTableRefs(QueryNode &node, vector<reference<BaseTableRef>
 static void CollectBaseTableRefs(ParsedExpression &expression, vector<reference<BaseTableRef>> &out) {
 	if (expression.GetExpressionClass() == ExpressionClass::SUBQUERY) {
 		auto &subquery = expression.Cast<SubqueryExpression>();
-		if (subquery.subquery && subquery.subquery->node) {
-			CollectBaseTableRefs(*subquery.subquery->node, out);
+				if (subquery.Subquery() && subquery.Subquery()->node) {
+					CollectBaseTableRefs(*subquery.Subquery()->node, out);
 		}
 	}
 	ParsedExpressionIterator::EnumerateChildren(expression,
@@ -770,21 +788,23 @@ static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &duckl
 	auto &lake_name = ducklake_catalog.GetName();
 	for (auto &base_ref : base_refs) {
 		auto &ref = base_ref.get();
-		if (!ref.catalog_name.empty() && !StringUtil::CIEquals(ref.catalog_name, lake_name)) {
+		auto qualified_name = ref.GetQualifiedName();
+		if (!qualified_name.Catalog().empty() &&
+		    !StringUtil::CIEquals(qualified_name.Catalog().GetIdentifierName(), lake_name.GetIdentifierName())) {
 			// references an object outside this lake - cannot be tracked as a dependency
 			continue;
 		}
-		auto base_schema = ref.schema_name.empty() ? "main" : ref.schema_name;
-		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, ref.table_name);
-		auto dep_entry = ducklake_catalog.GetEntry(context, base_schema, lookup, OnEntryNotFound::RETURN_NULL);
+		auto base_schema = qualified_name.Schema().empty() ? "main" : qualified_name.Schema().GetIdentifierName();
+		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(qualified_name.Name()));
+		auto dep_entry = ducklake_catalog.GetEntry(context, Identifier(base_schema), lookup, OnEntryNotFound::RETURN_NULL);
 		if (!dep_entry) {
 			// 2-part names parse as schema.table - `<lake>.<table>` lands here with the catalog
 			// name in the schema position. Search the lake's schemas for the table instead.
 			for (auto &schema_entry : ducklake_catalog.GetSchemas(context)) {
-				auto entry =
-				    ducklake_catalog.GetEntry(context, schema_entry.get().name, lookup, OnEntryNotFound::RETURN_NULL);
+				auto entry = ducklake_catalog.GetEntry(context, schema_entry.get().name, lookup,
+			                                               OnEntryNotFound::RETURN_NULL);
 				if (entry) {
-					base_schema = schema_entry.get().name;
+					base_schema = schema_entry.get().name.GetIdentifierName();
 					dep_entry = entry;
 					break;
 				}
@@ -795,8 +815,7 @@ static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &duckl
 			continue;
 		}
 		// qualify so the (re)bind resolves inside the lake regardless of search path
-		ref.catalog_name = lake_name;
-		ref.schema_name = base_schema;
+		ref.SetQualifiedName(QualifiedName(Identifier(lake_name), Identifier(base_schema), qualified_name.Name()));
 		if (dep_entry->type == CatalogType::TABLE_ENTRY) {
 			auto table_id = dep_entry->Cast<DuckLakeTableEntry>().GetTableId();
 			bool already_tracked = false;
@@ -814,7 +833,7 @@ static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &duckl
 }
 
 static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &context, TableFunctionBindInput &input,
-                                                              idx_t bind_index, vector<string> &return_names) {
+                                                              TableIndex bind_index, vector<Identifier> &return_names) {
 	input.binder->SetAlwaysRequireRebind();
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
@@ -847,7 +866,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	vector<string> column_names;
 	case_insensitive_map_t<idx_t> name_counts;
 	for (auto &name : bound.names) {
-		string column_name = name.empty() ? "unnamed" : name;
+		string column_name = name.empty() ? "unnamed" : name.GetIdentifierName();
 		auto count = name_counts.find(column_name);
 		if (count != name_counts.end()) {
 			count->second++;
@@ -862,7 +881,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	}
 
 	// resolve the target schema + name conflicts
-	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), schema);
+	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
 	auto &dl_schema = schema_entry.Cast<DuckLakeSchemaEntry>();
 
 	bool materialized_view_exists = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name) != nullptr;
@@ -876,7 +895,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 		throw CatalogException("Materialized view \"%s.%s\" already exists!", schema, view_name);
 	}
 	auto existing_entry = dl_schema.GetEntry(ducklake_catalog.GetCatalogTransaction(context),
-	                                       CatalogType::TABLE_ENTRY, view_name);
+	                                       CatalogType::TABLE_ENTRY, Identifier(view_name));
 	if (existing_entry) {
 		throw CatalogException("%s with name \"%s\" already exists!", CatalogTypeToString(existing_entry->type),
 		                       view_name);
@@ -888,10 +907,11 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	// The backing table is represented in the DuckDB catalog by the logical MV
 	// name. Its UUID-derived storage path remains private, while standard catalog
 	// discovery exposes the same name that users query.
-	auto create_info = make_uniq<CreateTableInfo>(schema_entry, view_name);
-	create_info->catalog_materialized_view = true;
+	auto create_info = make_uniq<CreateTableInfo>(schema_entry, Identifier(view_name));
+	// DuckDB 2.0 no longer carries a CreateTableInfo MV marker. DuckLake
+	// identifies managed MVs from the metadata catalog/backing-table mapping.
 	for (idx_t i = 0; i < bound.types.size(); i++) {
-		create_info->columns.AddColumn(ColumnDefinition(column_names[i], bound.types[i]));
+		create_info->columns.AddColumn(ColumnDefinition(Identifier(column_names[i]), bound.types[i]));
 	}
 	auto table_binder = Binder::CreateBinder(context, input.binder);
 	auto bound_create = table_binder->BindCreateTableInfo(std::move(create_info));
@@ -950,7 +970,7 @@ static bool DependenciesChanged(DuckLakeTransaction &transaction, const DuckLake
 //! apply signed CDC measures onto existing MV rows for changed keys; keep untouched rows.
 static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMaterializedViewInfo &mv,
                                    const string &mv_schema_name, const MaterializedViewAnalysis &analysis,
-                                   const vector<string> &bound_column_names, const vector<LogicalType> &bound_types,
+                                   const vector<Identifier> &bound_column_names, const vector<LogicalType> &bound_types,
                                    idx_t start_snapshot, idx_t end_snapshot) {
 	auto &lake_name = catalog.GetName();
 	auto base_relation_name = analysis.base_alias.empty() ? analysis.base_table : analysis.base_alias;
@@ -1278,7 +1298,7 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 //!   (backing rows for untouched groups) UNION ALL (full recompute of the changed groups)
 static string BuildIncrementalRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMaterializedViewInfo &mv,
                                          const string &mv_schema_name, const MaterializedViewAnalysis &analysis,
-                                         const vector<string> &bound_column_names, idx_t start_snapshot,
+                                         const vector<Identifier> &bound_column_names, idx_t start_snapshot,
                                          idx_t end_snapshot) {
 	auto &lake_name = catalog.GetName();
 	auto base_relation_name = analysis.base_alias.empty() ? analysis.base_table : analysis.base_alias;
@@ -1364,7 +1384,7 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 //! Join-incremental: fact-only CDC → changed group keys via fact⋈dim, then kept ∪ recompute over the join.
 static string BuildJoinIncrementalRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMaterializedViewInfo &mv,
                                              const string &mv_schema_name, const MaterializedViewAnalysis &analysis,
-                                             const vector<string> &bound_column_names, idx_t start_snapshot,
+                                             const vector<Identifier> &bound_column_names, idx_t start_snapshot,
                                              idx_t end_snapshot) {
 	auto &lake_name = catalog.GetName();
 	auto fact_relation_name = analysis.fact_alias.empty() ? analysis.fact_table : analysis.fact_alias;
@@ -1449,7 +1469,7 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 }
 
 static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &context, TableFunctionBindInput &input,
-                                                               idx_t bind_index, vector<string> &return_names) {
+                                                               TableIndex bind_index, vector<Identifier> &return_names) {
 	input.binder->SetAlwaysRequireRebind();
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
@@ -1471,7 +1491,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
 	DuckLakeMaterializedViewInfo staged_copy;
 	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
-	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), schema);
+	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
 	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
 		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
@@ -1539,8 +1559,8 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 			}
 			auto &dep_table = dep_entry->Cast<DuckLakeTableEntry>();
 			auto &dep_schema = dep_table.ParentSchema();
-			if (StringUtil::Lower(dep_table.name) == StringUtil::Lower(table_name) &&
-			    StringUtil::Lower(dep_schema.name) == StringUtil::Lower(schema_name)) {
+			if (StringUtil::Lower(dep_table.name.GetIdentifierName()) == StringUtil::Lower(table_name) &&
+			    StringUtil::Lower(dep_schema.name.GetIdentifierName()) == StringUtil::Lower(schema_name)) {
 				return i;
 			}
 		}
@@ -1623,7 +1643,7 @@ DuckLakeRefreshMaterializedViewFunction::DuckLakeRefreshMaterializedViewFunction
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &context, TableFunctionBindInput &input,
-                                                            idx_t bind_index, vector<string> &return_names) {
+                                                            TableIndex bind_index, vector<Identifier> &return_names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
@@ -1638,7 +1658,7 @@ static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &conte
 	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
 	DuckLakeMaterializedViewInfo staged_copy;
 	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
-	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), schema);
+	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
 	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
 		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
@@ -1682,7 +1702,7 @@ DuckLakeDropMaterializedViewFunction::DuckLakeDropMaterializedViewFunction()
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> MaterializedViewsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
@@ -1706,15 +1726,16 @@ static unique_ptr<FunctionData> MaterializedViewsBind(ClientContext &context, Ta
 
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
 	                LogicalType::BIGINT,   LogicalType::BOOLEAN, LogicalType::BIGINT,  LogicalType::VARCHAR};
-	names = {"schema_name", "view_name", "sql", "view_id", "backing_table_id", "is_stale",
-	         "last_refreshed_snapshot", "refresh_mode"};
+	names = {Identifier("schema_name"), Identifier("view_name"), Identifier("sql"), Identifier("view_id"),
+	         Identifier("backing_table_id"), Identifier("is_stale"), Identifier("last_refreshed_snapshot"),
+	         Identifier("refresh_mode")};
 	for (auto &mv : entries) {
 		string schema_name = "main";
 		// resolve the schema name for the view at the transaction snapshot
 		for (auto &schema_entry : ducklake_catalog.GetSchemaForSnapshot(transaction, transaction.GetSnapshot())
 		                               .GetSchemaIdMap()) {
 			if (schema_entry.first == mv.schema_id) {
-				schema_name = schema_entry.second.get().name;
+				schema_name = schema_entry.second.get().name.GetIdentifierName();
 				break;
 			}
 		}

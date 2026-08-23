@@ -798,12 +798,13 @@ unique_ptr<MaterializedQueryResult> DuckLakeServerSideCommit::ScanStagedTable(Du
 	string table_name = DuckLakeStagedTable::BaseName(kind);
 	auto &temp_catalog = Catalog::GetCatalog(context, TEMP_CATALOG);
 	auto &table_entry =
-	    temp_catalog.GetEntry<TableCatalogEntry>(context, DEFAULT_SCHEMA, table_name).Cast<DuckTableEntry>();
+		temp_catalog.GetEntry<TableCatalogEntry>(context, Identifier(DEFAULT_SCHEMA), Identifier(table_name))
+		    .Cast<DuckTableEntry>();
 	auto &storage = table_entry.GetStorage();
 
 	auto types = storage.GetTypes();
 	auto &columns = storage.Columns();
-	vector<string> names;
+	vector<Identifier> names;
 	vector<StorageIndex> column_ids;
 	for (idx_t i = 0; i < columns.size(); i++) {
 		names.push_back(columns[i].Name());

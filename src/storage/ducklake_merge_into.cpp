@@ -233,7 +233,7 @@ unique_ptr<LocalSinkState> DuckLakeMergeInsert::GetLocalSinkState(ExecutionConte
 		result->expression_executor = make_uniq<ExpressionExecutor>(context.client, extra_projections);
 		vector<LogicalType> insert_types;
 		for (auto &expr : result->expression_executor->expressions) {
-			insert_types.push_back(expr->return_type);
+			insert_types.push_back(expr->GetReturnType());
 		}
 		result->chunk.Initialize(context.client, insert_types);
 	}
@@ -329,7 +329,7 @@ unique_ptr<LocalSinkState> DuckLakeMergeUpdate::GetLocalSinkState(ExecutionConte
 		result->expression_executor = make_uniq<ExpressionExecutor>(context.client, extra_projections);
 		vector<LogicalType> projected_types;
 		for (auto &expr : result->expression_executor->expressions) {
-			projected_types.push_back(expr->return_type);
+			projected_types.push_back(expr->GetReturnType());
 		}
 		result->projected_chunk.Initialize(context.client, projected_types);
 	}
@@ -491,7 +491,7 @@ static unique_ptr<MergeIntoOperator> DuckLakePlanMergeIntoAction(DuckLakeCatalog
 		break;
 	}
 	case MergeActionType::MERGE_DELETE: {
-		LogicalDelete delete_op(op.table, 0);
+		LogicalDelete delete_op(op.table, TableIndex(0));
 		delete_op.expressions.push_back(nullptr);
 
 		vector<LogicalType> row_id_types {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::BIGINT};
@@ -504,7 +504,7 @@ static unique_ptr<MergeIntoOperator> DuckLakePlanMergeIntoAction(DuckLakeCatalog
 		break;
 	}
 	case MergeActionType::MERGE_INSERT: {
-		LogicalInsert insert_op(op.table, 0);
+		LogicalInsert insert_op(op.table, TableIndex(0));
 		insert_op.bound_constraints = std::move(bound_constraints);
 		for (auto &def : op.bound_defaults) {
 			insert_op.bound_defaults.push_back(def->Copy());

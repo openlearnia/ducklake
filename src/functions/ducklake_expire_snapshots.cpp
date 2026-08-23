@@ -18,7 +18,7 @@ struct ExpireSnapshotsBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto result = make_uniq<ExpireSnapshotsBindData>(catalog);
 	timestamp_tz_t from_timestamp;
@@ -31,9 +31,9 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	const auto older_than_default = ducklake_catalog.GetConfigOption<string>("expire_older_than", {}, {}, "");
 
 	for (auto &entry : input.named_parameters) {
-		if (StringUtil::CIEquals(entry.first, "dry_run")) {
+		if (StringUtil::CIEquals(entry.first.GetIdentifierName(), "dry_run")) {
 			result->dry_run = BooleanValue::Get(entry.second);
-		} else if (StringUtil::CIEquals(entry.first, "versions")) {
+		} else if (StringUtil::CIEquals(entry.first.GetIdentifierName(), "versions")) {
 			has_versions = true;
 			for (auto &snapshot_id : ListValue::GetChildren(entry.second)) {
 				if (!snapshot_list.empty()) {
@@ -41,7 +41,7 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 				}
 				snapshot_list += snapshot_id.ToString();
 			}
-		} else if (StringUtil::CIEquals(entry.first, "older_than")) {
+		} else if (StringUtil::CIEquals(entry.first.GetIdentifierName(), "older_than")) {
 			from_timestamp = entry.second.GetValue<timestamp_tz_t>();
 			has_timestamp = true;
 		} else {
@@ -130,7 +130,7 @@ void DuckLakeExpireSnapshotsExecute(ClientContext &context, TableFunctionInput &
 }
 
 DuckLakeExpireSnapshotsFunction::DuckLakeExpireSnapshotsFunction()
-    : TableFunction("ducklake_expire_snapshots", {LogicalType::VARCHAR}, DuckLakeExpireSnapshotsExecute,
+	: TableFunction(Identifier("ducklake_expire_snapshots"), {LogicalType::VARCHAR}, DuckLakeExpireSnapshotsExecute,
                     DuckLakeExpireSnapshotsBind, DuckLakeExpireSnapshotsInit) {
 	named_parameters["older_than"] = LogicalType::TIMESTAMP_TZ;
 	named_parameters["versions"] = LogicalType::LIST(LogicalType::UBIGINT);

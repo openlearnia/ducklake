@@ -6,6 +6,9 @@
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
+#include "duckdb/common/vector/map_vector.hpp"
 
 namespace duckdb {
 
@@ -336,7 +339,7 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
 
 		if (column_stats.stats.null_count > 0) {
 			auto column_name = table.GetColumn(LogicalIndex(c)).GetName();
-			if (not_null_fields.count(column_name)) {
+			if (not_null_fields.count(column_name.GetIdentifierName())) {
 				throw ConstraintException("NOT NULL constraint failed: %s.%s", table.name, column_name);
 			}
 		}

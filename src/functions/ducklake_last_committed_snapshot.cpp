@@ -11,7 +11,7 @@ namespace duckdb {
 
 static unique_ptr<FunctionData> DuckLakeLastCommittedSnapshotBind(ClientContext &context, TableFunctionBindInput &input,
                                                                   vector<LogicalType> &return_types,
-                                                                  vector<string> &names) {
+                                                                  vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	auto &duck_catalog = transaction.GetCatalog();
@@ -27,7 +27,7 @@ static unique_ptr<FunctionData> DuckLakeLastCommittedSnapshotBind(ClientContext 
 }
 
 DuckLakeLastCommittedSnapshotFunction::DuckLakeLastCommittedSnapshotFunction()
-    : DuckLakeBaseMetadataFunction("ducklake_last_committed_snapshot", DuckLakeLastCommittedSnapshotBind) {
+    : DuckLakeBaseMetadataFunction(Identifier("ducklake_last_committed_snapshot"), DuckLakeLastCommittedSnapshotBind) {
 }
 
 } // namespace duckdb

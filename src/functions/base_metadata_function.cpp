@@ -59,7 +59,7 @@ static void MetadataFunctionExecute(ClientContext &context, TableFunctionInput &
 	output.SetCardinality(count);
 }
 
-DuckLakeBaseMetadataFunction::DuckLakeBaseMetadataFunction(string name_p, table_function_bind_t bind)
+DuckLakeBaseMetadataFunction::DuckLakeBaseMetadataFunction(Identifier name_p, table_function_bind_t bind)
 	: TableFunction(Identifier(std::move(name_p)), {LogicalType::VARCHAR}, MetadataFunctionExecute, bind,
 	               MetadataFunctionInit) {
 }

@@ -5,6 +5,7 @@
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/catalog/catalog.hpp"
 #include "common/ducklake_util.hpp"
 
 namespace duckdb {
@@ -37,7 +38,7 @@ unique_ptr<CatalogEntry> DuckLakeViewEntry::AlterEntry(ClientContext &context, A
 			auto &rename_view = alter_view.Cast<RenameViewInfo>();
 			auto create_info = GetInfo();
 			auto &view_info = create_info->Cast<CreateViewInfo>();
-			view_info.view_name = rename_view.new_view_name;
+			view_info.SetViewName(rename_view.new_view_name);
 			// create a complete copy of this view with only the name changed
 			return make_uniq<DuckLakeViewEntry>(*this, view_info, LocalChangeType::RENAMED);
 		}
@@ -61,16 +62,16 @@ unique_ptr<CreateInfo> DuckLakeViewEntry::GetInfo() const {
 
 string DuckLakeViewEntry::ToSQL() const {
 	string result = "CREATE VIEW ";
-	result += KeywordHelper::WriteOptionallyQuoted(name);
+	result += KeywordHelper::WriteOptionallyQuoted(name.GetIdentifierName());
 	if (!aliases.empty()) {
 		result += " (";
 		result += StringUtil::Join(aliases, aliases.size(), ", ",
-		                           [](const string &alias) { return KeywordHelper::WriteOptionallyQuoted(alias); });
+		                           [](const Identifier &alias) { return KeywordHelper::WriteOptionallyQuoted(alias.GetIdentifierName()); });
 		result += ")";
 	}
 	result += " AS ";
 	// switcharoo of generic {DUCKLAKE_CATALOG}. with actual catalog name
-	result += DuckLakeUtil::ReplaceSkippingQuotes(query_sql, "{DUCKLAKE_CATALOG}.", catalog.GetName() + ".");
+	result += DuckLakeUtil::ReplaceSkippingQuotes(query_sql, "{DUCKLAKE_CATALOG}.", catalog.GetName().GetIdentifierName() + ".");
 	result += ";";
 	return result;
 }
@@ -86,7 +87,7 @@ unique_ptr<CatalogEntry> DuckLakeViewEntry::Copy(ClientContext &context) const {
 unique_ptr<SelectStatement> DuckLakeViewEntry::ParseSelectStatement() const {
 	Parser parser;
 	// switcharoo of generic {DUCKLAKE_CATALOG}. with actual catalog name
-	auto resolved_sql = DuckLakeUtil::ReplaceSkippingQuotes(query_sql, "{DUCKLAKE_CATALOG}.", catalog.GetName() + ".");
+	auto resolved_sql = DuckLakeUtil::ReplaceSkippingQuotes(query_sql, "{DUCKLAKE_CATALOG}.", catalog.GetName().GetIdentifierName() + ".");
 	parser.ParseQuery(resolved_sql);
 	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
 		throw InvalidInputException("Invalid input for view - view must have a single SELECT statement: \"%s\"",

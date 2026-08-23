@@ -5,6 +5,8 @@
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
@@ -39,6 +41,9 @@ namespace {
 
 idx_t EstimateStringMemory(const string &value) {
 	return sizeof(string) + value.length();
+}
+idx_t EstimateStringMemory(const Identifier &value) {
+	return EstimateStringMemory(value.GetIdentifierName());
 }
 
 idx_t EstimateFieldIdCount(const DuckLakeFieldId &field_id) {
@@ -257,25 +262,26 @@ string DuckLakeCatalog::GeneratePathFromName(const string &uuid, const string &n
 }
 
 optional_ptr<CatalogEntry> DuckLakeCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
-	auto schema = GetSchema(transaction, info.schema, OnEntryNotFound::RETURN_NULL);
+	const auto &schema_name = info.SchemaName();
+	auto schema = GetSchema(transaction, schema_name, OnEntryNotFound::RETURN_NULL);
 	if (schema) {
 		if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 			return nullptr;
 		}
 		if (info.on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) {
-			throw CatalogException::EntryAlreadyExists(CatalogType::SCHEMA_ENTRY, info.schema);
+			throw CatalogException::EntryAlreadyExists(CatalogType::SCHEMA_ENTRY, schema_name);
 		}
 		// drop the existing entry
 		DropInfo drop_info;
 		drop_info.type = CatalogType::SCHEMA_ENTRY;
-		drop_info.name = info.schema;
+		drop_info.SetName(schema_name);
 		DropSchema(transaction.GetContext(), drop_info);
 	}
 	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
 	//! get a local table-id
 	auto schema_id = SchemaIndex(duck_transaction.GetLocalCatalogId());
 	auto schema_uuid = duck_transaction.GenerateUUID();
-	auto schema_data_path = DataPath() + DuckLakeCatalog::GeneratePathFromName(schema_uuid, info.schema);
+	auto schema_data_path = DataPath() + DuckLakeCatalog::GeneratePathFromName(schema_uuid, schema_name.GetIdentifierName());
 	auto schema_entry =
 	    make_uniq<DuckLakeSchemaEntry>(*this, info, schema_id, std::move(schema_uuid), std::move(schema_data_path));
 	auto result = schema_entry.get();
@@ -284,7 +290,7 @@ optional_ptr<CatalogEntry> DuckLakeCatalog::CreateSchema(CatalogTransaction tran
 }
 
 void DuckLakeCatalog::DropSchema(ClientContext &context, DropInfo &info) {
-	auto schema = GetSchema(GetCatalogTransaction(context), info.name, info.if_not_found);
+	auto schema = GetSchema(GetCatalogTransaction(context), info.GetQualifiedName().Name(), info.if_not_found);
 	if (!schema) {
 		return;
 	}
@@ -454,8 +460,8 @@ unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context, 
 		throw NotImplementedException("Macro type %s is not implemented", macro.implementations.front().type);
 	}
 	auto macro_info = make_uniq<CreateMacroInfo>(type);
-	macro_info->name = macro.macro_name;
-	macro_info->schema = schema_name;
+	macro_info->SetFunctionName(Identifier(macro.macro_name));
+	macro_info->SetSchema(Identifier(schema_name));
 	macro_info->temporary = false;
 	macro_info->internal = false;
 	for (auto &impl : macro.implementations) {
@@ -483,12 +489,12 @@ unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context, 
 			if (expr_list.size() != 1) {
 				throw InternalException("Expected a single expression");
 			}
-			macro_function->parameters.push_back(make_uniq<ColumnRefExpression>(param.parameter_name));
+			macro_function->parameters.push_back(make_uniq<ColumnRefExpression>(Identifier(param.parameter_name)));
 			auto &expression = expr_list[0]->Cast<ConstantExpression>();
 			auto expr_type = DuckLakeTypes::FromString(param.default_value_type);
 			if (expr_type.id() != LogicalTypeId::UNKNOWN) {
-				expression.value = expression.value.CastAs(context, expr_type);
-				macro_function->default_parameters.insert(make_pair(param.parameter_name, std::move(expr_list[0])));
+				expr_list[0] = make_uniq<ConstantExpression>(expression.GetValue().CastAs(context, expr_type));
+				macro_function->default_parameters.insert(Identifier(param.parameter_name), std::move(expr_list[0]));
 			}
 			macro_function->types.push_back(DuckLakeTypes::FromString(param.parameter_type));
 		}
@@ -504,7 +510,7 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 	ducklake_entries_map_t schema_map;
 	for (auto &schema : catalog.schemas) {
 		CreateSchemaInfo schema_info;
-		schema_info.schema = schema.name;
+				schema_info.SetQualifiedName(QualifiedName(Identifier(schema.name)));
 		auto schema_entry = make_uniq<DuckLakeSchemaEntry>(*this, schema_info, schema.id, std::move(schema.uuid),
 		                                                   std::move(schema.path));
 		schema_map.insert(make_pair(std::move(schema.name), std::move(schema_entry)));
@@ -535,8 +541,7 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		if (materialized_view_name != materialized_view_names.end()) {
 			catalog_entry_name = materialized_view_name->second;
 		}
-		auto create_table_info = make_uniq<CreateTableInfo>(schema_entry, catalog_entry_name);
-		create_table_info->catalog_materialized_view = materialized_view_name != materialized_view_names.end();
+		auto create_table_info = make_uniq<CreateTableInfo>(schema_entry, Identifier(catalog_entry_name));
 		for (auto &tag : table.tags) {
 			if (tag.key == "comment") {
 				create_table_info->comment = tag.value;
@@ -552,7 +557,7 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			if (!col_info.nulls_allowed) {
 				not_null_columns.insert(col_info.name);
 			}
-			ColumnDefinition column(std::move(col_info.name), field_id->Type());
+			ColumnDefinition column(Identifier(std::move(col_info.name)), field_id->Type());
 			for (auto &tag : col_info.tags) {
 				if (tag.key == "comment") {
 					column.SetComment(tag.value);
@@ -569,7 +574,7 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		}
 		// create the NOT NULL constraints
 		for (auto &not_null_col : not_null_columns) {
-			auto &col = create_table_info->columns.GetColumn(not_null_col);
+			auto &col = create_table_info->columns.GetColumn(Identifier(not_null_col));
 			create_table_info->constraints.push_back(make_uniq<NotNullConstraint>(col.Logical()));
 		}
 		// create the table and add it to the schema set
@@ -588,8 +593,10 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			    "Failed to load DuckLake - could not find schema that corresponds to the view entry \"%s\"", view.name);
 		}
 		auto &schema_entry = entry->second.get();
-		auto create_view_info = make_uniq<CreateViewInfo>(schema_entry, view.name);
-		create_view_info->aliases = view.column_aliases;
+		auto create_view_info = make_uniq<CreateViewInfo>(schema_entry, Identifier(view.name));
+		for (auto &alias : view.column_aliases) {
+			create_view_info->aliases.emplace_back(alias);
+		}
 		for (auto &tag : view.tags) {
 			if (tag.key == "comment") {
 				create_view_info->comment = tag.value;
@@ -612,7 +619,8 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			    macro.macro_name);
 		}
 		auto &schema_entry = entry->second.get();
-		auto create_macro = CreateMacroInfoFromDucklake(*transaction.context.lock(), macro, schema_entry.name);
+		auto create_macro = CreateMacroInfoFromDucklake(*transaction.context.lock(), macro,
+	                                                schema_entry.name.GetIdentifierName());
 		if (macro.implementations.front().type == "scalar") {
 			auto macro_catalog_entry =
 			    make_uniq<DuckLakeScalarMacroEntry>(*this, schema_entry, *create_macro, macro.macro_id);
@@ -935,7 +943,7 @@ optional_ptr<BoundAtClause> DuckLakeCatalog::CatalogSnapshot() const {
 void DuckLakeCatalog::OnDetach(ClientContext &context) {
 	// detach the metadata database
 	auto &db_manager = DatabaseManager::Get(context);
-	db_manager.DetachDatabase(context, MetadataDatabaseName(), OnEntryNotFound::RETURN_NULL);
+	db_manager.DetachDatabase(context, Identifier(MetadataDatabaseName()), OnEntryNotFound::RETURN_NULL);
 }
 
 optional_idx DuckLakeCatalog::GetCatalogVersion(ClientContext &context) {
@@ -1165,7 +1173,7 @@ unique_ptr<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViewByB
 
 optional_ptr<CatalogEntry> DuckLakeCatalog::TryResolveMaterializedViewBackingTable(
     DuckLakeTransaction &transaction, const DuckLakeSchemaEntry &schema, const string &view_name) {
-	auto mv = GetMaterializedViewByName(transaction, schema.name, view_name);
+		auto mv = GetMaterializedViewByName(transaction, schema.name.GetIdentifierName(), view_name);
 	if (!mv) {
 		return nullptr;
 	}
@@ -1187,7 +1195,7 @@ unique_ptr<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViewByN
 	SchemaIndex schema_id;
 	bool found_schema = false;
 	for (auto &entry : schema_set.GetSchemaIdMap()) {
-		if (StringUtil::CIEquals(entry.second.get().name, schema_name)) {
+		if (StringUtil::CIEquals(entry.second.get().name.GetIdentifierName(), schema_name)) {
 			schema_id = entry.first;
 			found_schema = true;
 			break;

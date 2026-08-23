@@ -36,7 +36,7 @@ struct MetadataBindData : public TableFunctionData {
 
 class DuckLakeBaseMetadataFunction : public TableFunction {
 public:
-	DuckLakeBaseMetadataFunction(string name, table_function_bind_t bind);
+	DuckLakeBaseMetadataFunction(Identifier name, table_function_bind_t bind);
 
 	static Catalog &GetCatalog(ClientContext &context, const Value &input);
 };
@@ -45,7 +45,7 @@ class DuckLakeSnapshotsFunction : public DuckLakeBaseMetadataFunction {
 public:
 	DuckLakeSnapshotsFunction();
 
-	static void GetSnapshotTypes(vector<LogicalType> &return_types, vector<string> &names);
+	static void GetSnapshotTypes(vector<LogicalType> &return_types, vector<Identifier> &names);
 	static vector<Value> GetSnapshotValues(const DuckLakeSnapshotInfo &snapshot);
 };
 

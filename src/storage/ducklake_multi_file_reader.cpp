@@ -26,6 +26,7 @@
 #include "duckdb/function/function_binder.hpp"
 #include "storage/ducklake_inlined_data_reader.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/filter/dynamic_filter.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
 
@@ -60,8 +61,8 @@ static bool TryFindColumnByFieldId(const vector<MultiFileColumnDefinition> &loca
 static void AddSnapshotFilter(BaseFileReader &reader, const ColumnIndex &col_idx, const LogicalType &col_type,
                               idx_t snapshot_value, ExpressionType comparison_type) {
 	auto constant = Value::UBIGINT(snapshot_value).DefaultCastAs(col_type);
-	auto filter = make_uniq<ConstantFilter>(comparison_type, std::move(constant));
-	reader.filters->PushFilter(col_idx, std::move(filter));
+	auto filter = make_uniq<LegacyConstantFilter>(comparison_type, std::move(constant));
+	reader.filters->PushFilter(ProjectionIndex(col_idx.GetPrimaryIndex()), std::move(filter));
 }
 
 // recursively normalize LIST child names from legacy formats blame legacy Avro/Parquet formats
@@ -107,10 +108,11 @@ static bool CanSkipFileByTopNDynamicFilter(const DuckLakeFileListEntry &file_ent
 
 		// from here we'll try to cast and compare with the dynamic filter values
 		// if casts fail, just skip pruning
-		Value casted_constant;
-		if (!constant.DefaultTryCastAs(col_filter.column_type, casted_constant, nullptr)) {
+		auto casted_constant_value = constant.DefaultTryCastAs(col_filter.column_type);
+		if (!casted_constant_value) {
 			continue;
 		}
+		Value casted_constant = std::move(*casted_constant_value);
 
 		switch (comparison_type) {
 		case ExpressionType::COMPARE_GREATERTHAN:
@@ -119,10 +121,11 @@ static bool CanSkipFileByTopNDynamicFilter(const DuckLakeFileListEntry &file_ent
 			if (max_str.empty()) {
 				continue;
 			}
-			Value file_max;
-			if (!Value(max_str).DefaultTryCastAs(col_filter.column_type, file_max, nullptr)) {
+			auto file_max_value = Value(max_str).DefaultTryCastAs(col_filter.column_type);
+			if (!file_max_value) {
 				continue;
 			}
+			Value file_max = std::move(*file_max_value);
 			if (comparison_type == ExpressionType::COMPARE_GREATERTHAN) {
 				return !(file_max > casted_constant);
 			}
@@ -134,10 +137,11 @@ static bool CanSkipFileByTopNDynamicFilter(const DuckLakeFileListEntry &file_ent
 			if (min_str.empty()) {
 				continue;
 			}
-			Value file_min;
-			if (!Value(min_str).DefaultTryCastAs(col_filter.column_type, file_min, nullptr)) {
+			auto file_min_value = Value(min_str).DefaultTryCastAs(col_filter.column_type);
+			if (!file_min_value) {
 				continue;
 			}
+			Value file_min = std::move(*file_min_value);
 			if (comparison_type == ExpressionType::COMPARE_LESSTHAN) {
 				return !(file_min < casted_constant);
 			}
@@ -215,20 +219,22 @@ vector<MultiFileColumnDefinition> DuckLakeMultiFileReader::ColumnsFromFieldData(
 }
 
 bool DuckLakeMultiFileReader::Bind(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
-                                   vector<string> &names, MultiFileReaderBindData &bind_data) {
+	                                   vector<Identifier> &names, MultiFileReaderBindData &bind_data) {
 	auto &field_data = read_info.table.GetFieldData();
 	auto &columns = bind_data.schema;
 	columns = ColumnsFromFieldData(field_data);
 	//	bind_data.file_row_number_idx = names.size();
 	bind_data.mapping = MultiFileColumnMappingMode::BY_FIELD_ID;
-	names = read_info.column_names;
+	for (auto &name : read_info.column_names) {
+		names.emplace_back(name);
+	}
 	return_types = read_info.column_types;
 	return true;
 }
 
 //! Override the Options bind
 void DuckLakeMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &files,
-                                          vector<LogicalType> &return_types, vector<string> &names,
+                                          vector<LogicalType> &return_types, vector<Identifier> &names,
                                           MultiFileReaderBindData &bind_data) {
 }
 
@@ -548,7 +554,7 @@ ReaderInitializeType DuckLakeMultiFileReader::CreateMapping(
 		vector<string> source_names;
 		vector<FieldIndex> target_field_ids;
 		for (idx_t i = 0; i < MinValue(file_columns.size(), global_columns.size()); i++) {
-			source_names.push_back(file_columns[i].name);
+				source_names.push_back(file_columns[i].name.GetIdentifierName());
 			target_field_ids.emplace_back(global_columns[i].identifier.GetValue<idx_t>());
 		}
 		auto positional_map = DuckLakeNameMap::CreatePositionalMapping(source_names, target_field_ids);
@@ -561,17 +567,17 @@ ReaderInitializeType DuckLakeMultiFileReader::CreateMapping(
 	                                      multi_file_list, bind_data, virtual_columns);
 }
 
-unique_ptr<Expression> DuckLakeMultiFileReader::GetVirtualColumnExpression(
+MultiFileReaderVirtualColumnBinding DuckLakeMultiFileReader::GetVirtualColumnExpression(
     ClientContext &context, MultiFileReaderData &reader_data, const vector<MultiFileColumnDefinition> &local_columns,
-    idx_t &column_id, const LogicalType &type, MultiFileLocalIndex local_idx,
-    optional_ptr<MultiFileColumnDefinition> &global_column_reference) {
+    const idx_t column_id, const LogicalType &type, MultiFileLocalIndex local_idx) {
+	optional_ptr<MultiFileColumnDefinition> global_column_reference;
 	if (column_id == COLUMN_IDENTIFIER_ROW_ID) {
 		// row id column
 		// this is computed as row_id_start + file_row_number OR read from the file
 		// first check if the row id is explicitly defined in this file
 		if (TryFindColumnByFieldId(local_columns, MultiFileReader::ROW_ID_FIELD_ID, row_id_column.get(),
 		                           global_column_reference)) {
-			return nullptr;
+			return MultiFileReaderVirtualColumnBinding(*global_column_reference);
 		}
 		// get the row id start for this file
 		if (!reader_data.file_to_be_opened.extended_info) {
@@ -589,7 +595,7 @@ unique_ptr<Expression> DuckLakeMultiFileReader::GetVirtualColumnExpression(
 		auto file_row_number = make_uniq<BoundReferenceExpression>(type, local_idx.GetIndex());
 
 		// transform this virtual column to file_row_number
-		column_id = MultiFileReader::COLUMN_IDENTIFIER_FILE_ROW_NUMBER;
+		// The file row number is already represented by the local index in the binding.
 
 		// generate the addition
 		vector<unique_ptr<Expression>> children;
@@ -602,12 +608,12 @@ unique_ptr<Expression> DuckLakeMultiFileReader::GetVirtualColumnExpression(
 		if (error.HasError()) {
 			error.Throw();
 		}
-		return function_expr;
+		return MultiFileReaderVirtualColumnBinding(std::move(function_expr), {column_id});
 	}
 	if (column_id == COLUMN_IDENTIFIER_SNAPSHOT_ID) {
 		if (TryFindColumnByFieldId(local_columns, MultiFileReader::LAST_UPDATED_SEQUENCE_NUMBER_ID,
 		                           snapshot_id_column.get(), global_column_reference)) {
-			return nullptr;
+			return MultiFileReaderVirtualColumnBinding(*global_column_reference);
 		}
 		// get the row id start for this file
 		if (!reader_data.file_to_be_opened.extended_info) {
@@ -618,10 +624,9 @@ unique_ptr<Expression> DuckLakeMultiFileReader::GetVirtualColumnExpression(
 		if (entry == options.end()) {
 			throw InternalException("snapshot_id not found for reading snapshot_id column");
 		}
-		return make_uniq<BoundConstantExpression>(entry->second);
+		return MultiFileReaderVirtualColumnBinding(entry->second);
 	}
-	return MultiFileReader::GetVirtualColumnExpression(context, reader_data, local_columns, column_id, type, local_idx,
-	                                                   global_column_reference);
+	return MultiFileReader::GetVirtualColumnExpression(context, reader_data, local_columns, column_id, type, local_idx);
 }
 
 void DuckLakeMultiFileReader::GatherDeletionScanSnapshots(BaseFileReader &reader,
@@ -642,7 +647,7 @@ void DuckLakeMultiFileReader::GatherDeletionScanSnapshots(BaseFileReader &reader
 
 	idx_t count = chunk.size();
 	snapshot_vector.Flatten(count);
-	auto snapshot_data = FlatVector::GetData<int64_t>(snapshot_vector);
+	auto snapshot_data = FlatVector::GetDataMutable<int64_t>(snapshot_vector);
 
 	UnifiedVectorFormat row_id_data;
 	rowid_vector.ToUnifiedFormat(count, row_id_data);
