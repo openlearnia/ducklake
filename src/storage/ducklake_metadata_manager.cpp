@@ -167,17 +167,23 @@ string DuckLakeMetadataManager::MetadataExistsQuery() const {
 }
 
 bool DuckLakeMetadataManager::MetadataExists() {
+	// Run the probe on an isolated connection. DuckDB 2.0 aborts the active
+	// metadata transaction for an expected missing-table lookup.
+	Connection probe(transaction.GetCatalog().GetDatabase());
 	auto query = MetadataExistsQuery();
-	auto result = Query(query);
+	SubstituteCatalogPlaceholders(query);
+	auto result = probe.Query(query);
 	if (result->HasError()) {
-		auto &error_obj = result->GetErrorObject();
-		if (error_obj.Type() == ExceptionType::CATALOG) {
-			// Catalog/schema/table missing means we are attaching a fresh DuckLake.
+		if (result->GetErrorObject().Type() == ExceptionType::CATALOG) {
+			// A missing table is expected for a new lake. DuckDB 2.0 marks the
+			// connection transaction aborted, so the caller must rollback and
+			// reattach before issuing initialization DDL.
 			return false;
 		}
-		error_obj.Throw("Failed to probe DuckLake metadata: ");
+		result->GetErrorObject().Throw("Failed to probe DuckLake metadata: ");
 	}
-	return true;
+	auto chunk = result->Fetch();
+	return chunk && chunk->size() > 0;
 }
 
 void DuckLakeMetadataManager::InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) {
@@ -544,8 +550,12 @@ SELECT
 idx_t DuckLakeMetadataManager::GetNetDataFileRowCount(TableIndex table_id, DuckLakeSnapshot snapshot) {
 	auto query = GetNetDataFileRowCountSql(table_id, GetInlinedDeletionTableName(table_id, snapshot));
 	auto result = transaction.Query(snapshot, query);
-	for (auto &row : *result) {
-		return row.GetValue<idx_t>(0);
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to get net data-file row count from DuckLake: ");
+	}
+	auto &materialized = result->Cast<MaterializedQueryResult>();
+	if (materialized.RowCount() > 0) {
+		return materialized.GetValue(0, 0).GetValue<idx_t>();
 	}
 	return 0;
 }
@@ -568,9 +578,9 @@ LIMIT 1)",
 	if (query_result->HasError()) {
 		query_result->GetErrorObject().Throw("Failed to read persisted DuckLake data file format: ");
 	}
-	auto chunk = query_result->Fetch();
-	if (chunk && chunk->size() > 0 && !chunk->GetValue(0, 0).IsNull()) {
-		result = chunk->GetValue(0, 0).GetValue<string>();
+	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	if (materialized.RowCount() > 0 && !materialized.GetValue(0, 0).IsNull()) {
+		result = materialized.GetValue(0, 0).GetValue<string>();
 		return true;
 	}
 	(void)snapshot;
@@ -588,8 +598,12 @@ WHERE {SNAPSHOT_ID} >= begin_snapshot
 
 idx_t DuckLakeMetadataManager::GetNetInlinedRowCount(const string &inlined_table_name, DuckLakeSnapshot snapshot) {
 	auto result = transaction.Query(snapshot, GetNetInlinedRowCountSql(inlined_table_name));
-	for (auto &row : *result) {
-		return row.GetValue<idx_t>(0);
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to get net inlined row count from DuckLake: ");
+	}
+	auto &materialized = result->Cast<MaterializedQueryResult>();
+	if (materialized.RowCount() > 0) {
+		return materialized.GetValue(0, 0).GetValue<idx_t>();
 	}
 	return 0;
 }
@@ -622,6 +636,14 @@ DuckLakeCatalogInfo DuckLakeMetadataManager::GetCatalogForSnapshot(DuckLakeSnaps
 	    snapshot, [this](DuckLakeSnapshot s, string q) { return Query(s, q); }, ducklake_catalog.DataPath(),
 	    ducklake_catalog.Separator());
 }
+
+struct DuckLakeMaterializedRow {
+	MaterializedQueryResult &result;
+	idx_t index;
+	template <typename T> T GetValue(idx_t column) const { return result.GetValue(column, index).GetValue<T>(); }
+	Value GetBaseValue(idx_t column) const { return result.GetValue(column, index); }
+	bool IsNull(idx_t column) const { return GetBaseValue(column).IsNull(); }
+};
 
 DuckLakeCatalogInfo DuckLakeMetadataManager::BuildCatalogForSnapshot(
     DuckLakeSnapshot snapshot, const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor,
@@ -702,7 +724,9 @@ ORDER BY table_id, parent_column NULLS FIRST, column_order
 	}
 	const idx_t COLUMN_INDEX_START = 8;
 	auto &tables = catalog.tables;
-	for (auto &row : *result) {
+	auto &materialized_result = result->Cast<MaterializedQueryResult>();
+	for (idx_t row_index = 0; row_index < materialized_result.RowCount(); row_index++) {
+		DuckLakeMaterializedRow row {materialized_result, row_index};
 		auto table_id = TableIndex(row.GetValue<uint64_t>(1));
 
 		// check if this column belongs to the current table or not
@@ -899,7 +923,9 @@ ORDER BY sort.table_id, sort.sort_id, sort_expr.sort_key_index
 		result->GetErrorObject().Throw("Failed to get sort information from DuckLake: ");
 	}
 	auto &sorts = catalog.sorts;
-	for (auto &row : *result) {
+	auto &sort_result = result->Cast<MaterializedQueryResult>();
+	for (idx_t row_index = 0; row_index < sort_result.RowCount(); row_index++) {
+		DuckLakeMaterializedRow row {sort_result, row_index};
 		auto sort_id = row.GetValue<uint64_t>(0);
 		auto table_id = TableIndex(row.GetValue<uint64_t>(1));
 
@@ -1000,8 +1026,9 @@ vector<DuckLakeGlobalStatsInfo> TransformGlobalStats(QueryResult &result) {
 	}
 
 	vector<DuckLakeGlobalStatsInfo> global_stats;
-
-	for (auto &row : result) {
+	auto &materialized = result.Cast<MaterializedQueryResult>();
+	for (idx_t row_index = 0; row_index < materialized.RowCount(); row_index++) {
+		DuckLakeMaterializedRow row {materialized, row_index};
 		TransformGlobalStatsRow(row, global_stats);
 	}
 
@@ -1748,7 +1775,9 @@ WHERE data.table_id=%d AND {SNAPSHOT_ID} >= data.begin_snapshot AND ({SNAPSHOT_I
 	auto inlined_deletions = ReadInlinedFileDeletions(table_id, snapshot);
 
 	vector<DuckLakeFileListEntry> files;
-	for (auto &row : *result) {
+	auto &materialized_result = result->Cast<MaterializedQueryResult>();
+	for (idx_t row_index = 0; row_index < materialized_result.RowCount(); row_index++) {
+		DuckLakeMaterializedRow row {materialized_result, row_index};
 		DuckLakeFileListEntry file_entry;
 		idx_t col_idx = 0;
 		file_entry.file_id = DataFileIndex(row.GetValue<idx_t>(col_idx++));
@@ -2093,7 +2122,9 @@ WHERE data.table_id=%d AND {SNAPSHOT_ID} >= data.begin_snapshot AND ({SNAPSHOT_I
 		result->GetErrorObject().Throw("Failed to get extended data file list from DuckLake: ");
 	}
 	vector<DuckLakeFileListExtendedEntry> files;
-	for (auto &row : *result) {
+	auto &materialized_result = result->Cast<MaterializedQueryResult>();
+	for (idx_t row_index = 0; row_index < materialized_result.RowCount(); row_index++) {
+		DuckLakeMaterializedRow row {materialized_result, row_index};
 		DuckLakeFileListExtendedEntry file_entry;
 		file_entry.file_id = DataFileIndex(row.GetValue<idx_t>(0));
 		if (!row.IsNull(1)) {
@@ -2811,7 +2842,9 @@ WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_s
 	if (view_result->HasError()) {
 		view_result->GetErrorObject().Throw("Failed to load materialized views from DuckLake: ");
 	}
-	for (auto &row : *view_result) {
+	auto &materialized_views = view_result->Cast<MaterializedQueryResult>();
+	for (idx_t row_index = 0; row_index < materialized_views.RowCount(); row_index++) {
+		DuckLakeMaterializedRow row {materialized_views, row_index};
 		DuckLakeMaterializedViewInfo info;
 		info.id = TableIndex(row.GetValue<uint64_t>(0));
 		info.uuid = row.GetValue<string>(1);
@@ -2839,7 +2872,9 @@ WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_s
 	for (idx_t i = 0; i < result.size(); i++) {
 		view_index_by_id.emplace(result[i].id.index, i);
 	}
-	for (auto &row : *dependency_result) {
+	auto &materialized_dependencies = dependency_result->Cast<MaterializedQueryResult>();
+	for (idx_t row_index = 0; row_index < materialized_dependencies.RowCount(); row_index++) {
+		DuckLakeMaterializedRow row {materialized_dependencies, row_index};
 		auto view_id = row.GetValue<uint64_t>(0);
 		auto entry = view_index_by_id.find(view_id);
 		if (entry == view_index_by_id.end()) {
@@ -3150,12 +3185,13 @@ string DuckLakeMetadataManager::GetInlinedDeletionTableName(TableIndex table_id,
 		return table_name;
 	}
 
-	// Read path: table visibility implies it was committed, safe to cache at catalog level
+	// Read path: probe on an isolated connection. DuckDB 2.0 aborts the active
+	// transaction when a missing table is referenced, and absence is expected for
+	// tables that have never had inlined file deletes.
+	Connection probe(transaction.GetCatalog().GetDatabase());
 	auto query = StringUtil::Format("SELECT NULL FROM {METADATA_CATALOG}.%s LIMIT 1", table_name);
-	auto result = transaction.Query(snapshot, query);
-	// TODO: Using the error state to check for existence here is fragile.
-	// Even if the table exists, a transient error in the catalog query would lead us to assume it does not exist.
-	// Maybe persist the existence of the deletion inlining table on the table metadata instead?
+	SubstituteCatalogPlaceholders(query);
+	auto result = probe.Query(query);
 	if (!result->HasError()) {
 		delete_inlined_table_cache.insert(table_id.index);
 		catalog.CacheInlinedDeletionTableResult(table_id, snapshot, true);
@@ -4261,11 +4297,18 @@ unique_ptr<DuckLakeSnapshot> DuckLakeMetadataManager::GetSnapshot() {
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to query most recent snapshot for DuckLake: ");
 	}
-	auto snapshot = ParseSnapshot(*result);
-	if (!snapshot) {
+	unique_ptr<DataChunk> snapshot_chunk;
+	ErrorData snapshot_error;
+	if (!result->TryFetch(snapshot_chunk, snapshot_error)) {
+		throw InvalidInputException("Snapshot fetch failed: %s", snapshot_error.RawMessage());
+	}
+	if (!snapshot_chunk || snapshot_chunk->size() == 0) {
 		throw InvalidInputException("No snapshot found in DuckLake");
 	}
-	return snapshot;
+	return make_uniq<DuckLakeSnapshot>(snapshot_chunk->GetValue(0, 0).GetValue<idx_t>(),
+	                                  snapshot_chunk->GetValue(1, 0).GetValue<idx_t>(),
+	                                  snapshot_chunk->GetValue(2, 0).GetValue<idx_t>(),
+	                                  snapshot_chunk->GetValue(3, 0).GetValue<idx_t>());
 }
 
 unique_ptr<DuckLakeSnapshot> DuckLakeMetadataManager::GetSnapshot(BoundAtClause &at_clause, SnapshotBound bound) {
