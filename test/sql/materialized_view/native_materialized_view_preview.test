@@ -143,6 +143,28 @@ SELECT last_refresh_mode FROM duckdb_materialized_views() WHERE view_name = 'mv_
 ----
 delta
 
+statement ok
+UPDATE mv_incremental_aggregate SET val = 11 WHERE grp = 1 AND val = 10
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE mv_delta
+
+query T
+SELECT last_refresh_mode FROM duckdb_materialized_views() WHERE view_name = 'mv_delta'
+----
+full
+
+statement ok
+DELETE FROM mv_incremental_aggregate WHERE grp = 2 AND val = 5
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE mv_delta
+
+query T
+SELECT last_refresh_mode FROM duckdb_materialized_views() WHERE view_name = 'mv_delta'
+----
+full
+
 statement error
 INSERT INTO mv_native VALUES (99)
 ----
