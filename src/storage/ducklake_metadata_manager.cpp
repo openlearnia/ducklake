@@ -5420,8 +5420,14 @@ FROM {METADATA_CATALOG}.ducklake_metadata
 WHERE key = %s AND %s
 )",
 	                                                   SQLString(option_key), scope_filter));
-
-	auto count = result->Fetch()->GetValue(0, 0).GetValue<idx_t>();
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to read config option in DuckLake: ");
+	}
+	auto &count_result = result->Cast<MaterializedQueryResult>();
+	if (count_result.RowCount() == 0 || count_result.ColumnCount() == 0 || count_result.GetValue(0, 0).IsNull()) {
+		throw InternalException("DuckLake metadata count query returned no rows");
+	}
+	auto count = count_result.GetValue(0, 0).GetValue<idx_t>();
 	if (count == 0) {
 		// option does not yet exist - insert the value
 		result = transaction.Query(StringUtil::Format(R"(
