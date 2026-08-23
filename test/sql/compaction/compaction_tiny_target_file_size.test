@@ -1,0 +1,50 @@
+# name: test/sql/compaction/compaction_tiny_target_file_size.test
+# description: tiny DuckLake write targets remain finite under DuckDB 2.0
+# group: [compaction]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/tiny_target')
+
+statement ok
+USE ducklake
+
+statement ok
+CALL ducklake_set_option('ducklake', 'target_file_size', '4B')
+
+statement ok
+CREATE TABLE tiny_4b AS SELECT i AS id FROM range(1000) t(i)
+
+query I
+SELECT count(*) FROM tiny_4b
+----
+1000
+
+statement ok
+CALL ducklake_set_option('ducklake', 'target_file_size', '1KB')
+
+statement ok
+CREATE TABLE tiny_1kb AS SELECT i AS id FROM range(1000) t(i)
+
+query I
+SELECT count(*) FROM tiny_1kb
+----
+1000
+
+statement ok
+CALL ducklake_set_option('ducklake', 'target_file_size', '4KB')
+
+statement ok
+CREATE TABLE tiny_4kb AS SELECT i AS id FROM range(1000) t(i)
+
+query I
+SELECT count(*) FROM tiny_4kb
+----
+1000
