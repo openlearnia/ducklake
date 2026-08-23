@@ -2504,16 +2504,15 @@ static void ColumnToSQLRecursive(const DuckLakeColumnInfo &column, TableIndex ta
 	string parent_idx = DuckLakeUtil::OptionalIdxOrNull(parent);
 
 	string initial_default_val =
-	    !column.initial_default.IsNull() ? KeywordHelper::WriteQuoted(column.initial_default.ToString(), '\'') : "NULL";
+	    !column.initial_default.IsNull() ? SQLString::ToString(column.initial_default.ToString()) : "NULL";
 
 	string default_val = "'NULL'";
 	string default_val_system = "'duckdb'";
 	string default_val_type = "'" + column.default_value_type + "'";
-
 	if (!column.default_value.IsNull()) {
 		auto value = column.default_value.GetValue<string>();
 		if (column.default_value_type == "literal") {
-			default_val = KeywordHelper::WriteQuoted(value, '\'');
+			default_val = SQLString::ToString(value);
 		} else if (column.default_value_type == "expression") {
 			if (value.empty()) {
 				default_val = "''";
@@ -2522,7 +2521,7 @@ static void ColumnToSQLRecursive(const DuckLakeColumnInfo &column, TableIndex ta
 				if (sql_expr.size() != 1) {
 					throw InternalException("Expected a single expression");
 				}
-				default_val = KeywordHelper::WriteQuoted(sql_expr[0]->ToString(), '\'');
+				default_val = SQLString::ToString(sql_expr[0]->ToString());
 			}
 		} else {
 			throw InvalidInputException("Expression type %s not implemented for default value",
