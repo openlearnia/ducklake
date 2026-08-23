@@ -908,8 +908,10 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	// name. Its UUID-derived storage path remains private, while standard catalog
 	// discovery exposes the same name that users query.
 	auto create_info = make_uniq<CreateTableInfo>(schema_entry, Identifier(view_name));
-	// DuckDB 2.0 no longer carries a CreateTableInfo MV marker. DuckLake
-	// identifies managed MVs from the metadata catalog/backing-table mapping.
+	// DuckDB 2.0 keeps catalog-managed MV classification separate from native
+	// MV semantics. Mark the backing relation immediately so discovery is
+	// correct even before the transaction is reloaded from metadata.
+	create_info->catalog_materialized_view = true;
 	for (idx_t i = 0; i < bound.types.size(); i++) {
 		create_info->columns.AddColumn(ColumnDefinition(Identifier(column_names[i]), bound.types[i]));
 	}
