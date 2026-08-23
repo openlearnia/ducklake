@@ -62,6 +62,7 @@ jobs:
       # The extension must compile against the exact OpenLearnia DuckDB commit
       # that adds the MV parser contract, not the stock v1.5.5 tag.
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}
+      override_git_describe: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       override_duckdb_repository: https://github.com/openlearnia/duckdb.git
       ci_tools_version: v1.5-variegata
       extension_name: ducklake
@@ -112,13 +113,19 @@ jobs:
           test -f duckdb-runtime/bin/duckdb
           test -f duckdb-runtime/lib/libduckdb.so
           test -f duckdb-runtime/include/duckdb.h
+          test -f duckdb-runtime/VERSION
+          RUNTIME_VERSION="$(tr -d '\r\n' < duckdb-runtime/VERSION)"
+          if [[ "$RUNTIME_VERSION" != "$DUCKDB_VERSION" ]]; then
+            echo "Paired runtime VERSION is $RUNTIME_VERSION, expected $DUCKDB_VERSION" >&2
+            exit 1
+          fi
           chmod +x duckdb-runtime/bin/duckdb
           SHORT_SHA="${GIT_SHA::7}"
           SHORT_DUCKDB_REF="${DUCKDB_REF::10}"
           BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           DUCKDB_ARCHIVE="duckdb-${DUCKDB_VERSION}-${SHORT_DUCKDB_REF}-linux_amd64.tar.gz"
-          tar -C duckdb-runtime -czf "grain-pkg/${DUCKDB_ARCHIVE}" bin lib include
-          export BUILT_AT DUCKDB_ARCHIVE
+          tar -C duckdb-runtime -czf "grain-pkg/${DUCKDB_ARCHIVE}" bin lib include VERSION
+          export BUILT_AT DUCKDB_ARCHIVE RUNTIME_VERSION
           python3 - <<'PY'
           import hashlib
           import json
@@ -137,6 +144,7 @@ jobs:
           build_info = {
               "bundle": "duckdb-ducklake-materialized-views",
               "duckdb_version": os.environ["DUCKDB_VERSION"],
+              "runtime_version": os.environ["RUNTIME_VERSION"],
               "duckdb_repository": "openlearnia/duckdb",
               "duckdb_ref": os.environ["DUCKDB_REF"],
               "ducklake_repository": os.environ["GIT_REPO"],

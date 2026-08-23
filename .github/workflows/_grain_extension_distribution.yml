@@ -33,6 +33,14 @@ on:
       duckdb_version:
         required: true
         type: string
+      # Version embedded in the paired DuckDB runtime. This must be a release
+      # tag (for example v1.5.5), even when duckdb_version is a fork commit.
+      # Without it a shallow/custom checkout falls back to v0.0.1 and bare
+      # INSTALL statements resolve to a non-existent extension repository.
+      override_git_describe:
+        required: false
+        type: string
+        default: ""
       # The version of the https://github.com/duckdb/extension-ci-tools submodule of the extension. In most cases will be identical to `duckdb_version`.
       # Passing this explicitly is required because of https://github.com/actions/toolkit/issues/1264
       ci_tools_version:
@@ -185,6 +193,7 @@ on:
 
 env:
   VCPKG_BINARY_SOURCES: ${{inputs.vcpkg_binary_sources == '' && 'clear;http,https://vcpkg-cache.duckdb.org,read' || inputs.vcpkg_binary_sources }}
+  OVERRIDE_GIT_DESCRIBE: ${{ inputs.override_git_describe }}
 
 jobs:
   generate_matrix:
@@ -402,6 +411,7 @@ jobs:
           OPENSSL_USE_STATIC_LIBS=true
           DUCKDB_PLATFORM=${{ matrix.duckdb_arch }}
           DUCKDB_GIT_VERSION=${{ inputs.duckdb_version }}
+          OVERRIDE_GIT_DESCRIBE=${{ inputs.override_git_describe }}
           EXTENSION_NAME=${{ inputs.extension_name }}
           EXTENSION_CANONICAL=${{ inputs.extension_canonical }}
           LINUX_CI_IN_DOCKER=1
@@ -507,6 +517,13 @@ jobs:
           cp build/${{ inputs.build_type }}/duckdb paired-duckdb/bin/duckdb
           cp "$DUCKDB_LIBRARY" paired-duckdb/lib/libduckdb.so
           cp duckdb/src/include/duckdb.h paired-duckdb/include/duckdb.h
+          ACTUAL_VERSION="$(build/${{ inputs.build_type }}/duckdb -csv -noheader -c 'select library_version from pragma_version();' | tr -d '\r\n')"
+          EXPECTED_VERSION="${{ inputs.override_git_describe }}"
+          if [[ -n "$EXPECTED_VERSION" && "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]]; then
+            echo "DuckDB runtime version mismatch: expected $EXPECTED_VERSION, got $ACTUAL_VERSION" >&2
+            exit 1
+          fi
+          printf '%s\n' "$ACTUAL_VERSION" > paired-duckdb/VERSION
           sha256sum paired-duckdb/bin/duckdb paired-duckdb/lib/libduckdb.so paired-duckdb/include/duckdb.h \
             > paired-duckdb/SHA256SUMS
 
