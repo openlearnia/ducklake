@@ -11,6 +11,7 @@
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/optimizer/filter_combiner.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "storage/ducklake_table_entry.hpp"
 
@@ -50,23 +51,27 @@ void DuckLakeMultiFileList::AddFilterToPushdownInfo(FilterPushdownInfo &pushdown
 	auto field_index = root_id.GetFieldIndex().index;
 	// Get the column type from the table schema, not from the scan types array
 	const auto &column_type = read_info.column_types[column_index.index];
-	ColumnFilterInfo filter_info_entry(field_index, column_type, std::move(filter));
+	auto expr_filter = ExpressionFilter::FromTableFilter(*filter, column_type);
+	ColumnFilterInfo filter_info_entry(field_index, column_type, std::move(expr_filter));
 	pushdown_info.column_filters.emplace(field_index, std::move(filter_info_entry));
 }
 
 unique_ptr<MultiFileList>
-DuckLakeMultiFileList::DynamicFilterPushdown(MultiFileDynamicPushdownInfo &pushdown_info) const {
-	if (read_info.scan_type != DuckLakeScanType::SCAN_TABLE || !pushdown_info.filters.HasFilters()) {
+DuckLakeMultiFileList::DynamicFilterPushdown(MultiFileDynamicPushdownInfo &dynamic_pushdown_info) const {
+	auto &filters = dynamic_pushdown_info.filters;
+	auto &column_ids = dynamic_pushdown_info.column_ids;
+	if (read_info.scan_type != DuckLakeScanType::SCAN_TABLE || !filters.HasFilters()) {
 		// filter pushdown is only supported when scanning full tables
 		return nullptr;
 	}
 
 	auto result_info = make_uniq<FilterPushdownInfo>();
-
-	auto filter_copy = pushdown_info.filters.Copy();
-	for (auto &entry : *filter_copy) {
-		auto column_id = pushdown_info.column_ids[entry.GetIndex().GetIndex()];
-		AddFilterToPushdownInfo(*result_info, column_id, entry.TakeFilter());
+	for (auto &entry : filters) {
+		auto column_id = column_ids[entry.GetIndex().GetIndex()];
+		AddFilterToPushdownInfo(*result_info, column_id,
+		                        ExpressionFilter::GetExpressionFilter(entry.Filter(),
+		                                                               "DuckLakeMultiFileList::DynamicFilterPushdown")
+		                            .Copy());
 	}
 
 	if (result_info->column_filters.empty()) {

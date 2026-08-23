@@ -488,6 +488,8 @@ private:
 	virtual string GenerateConstantFilterDouble(const LegacyConstantFilter &constant_filter, const LogicalType &type,
 	                                            unordered_set<string> &referenced_stats);
 	virtual string GenerateFilterPushdown(const TableFilter &filter, unordered_set<string> &referenced_stats);
+	virtual string GenerateFilterPushdownExpression(const class ExpressionFilter &filter,
+	                                                unordered_set<string> &referenced_stats);
 
 public:
 	//! Read inlined file deletions for regular table scans (no snapshot info per row)

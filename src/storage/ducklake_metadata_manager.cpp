@@ -23,7 +23,10 @@
 #include "duckdb/planner/filter/dynamic_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/filter/in_filter.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "storage/ducklake_partition_data.hpp"
@@ -1348,6 +1351,9 @@ string DuckLakeMetadataManager::GenerateConstantFilterDouble(const LegacyConstan
 
 string DuckLakeMetadataManager::GenerateFilterPushdown(const TableFilter &filter,
                                                        unordered_set<string> &referenced_stats) {
+	if (filter.filter_type == TableFilterType::EXPRESSION_FILTER) {
+		return GenerateFilterPushdownExpression(filter.Cast<ExpressionFilter>(), referenced_stats);
+	}
 	switch (filter.filter_type) {
 	case TableFilterType::LEGACY_CONSTANT_COMPARISON: {
 		auto &constant_filter = filter.Cast<LegacyConstantFilter>();
@@ -1424,6 +1430,30 @@ string DuckLakeMetadataManager::GenerateFilterPushdown(const TableFilter &filter
 		// unsupported filter
 		return string();
 	}
+}
+
+string DuckLakeMetadataManager::GenerateFilterPushdownExpression(const ExpressionFilter &filter,
+                                                                  unordered_set<string> &referenced_stats) {
+	if (!filter.expr || !BoundComparisonExpression::IsComparison(*filter.expr)) {
+		return string();
+	}
+	auto &comparison = filter.expr->Cast<BoundFunctionExpression>();
+	auto &left = BoundComparisonExpression::Left(comparison);
+	auto &right = BoundComparisonExpression::Right(comparison);
+	ExpressionType comparison_type = comparison.GetExpressionType();
+	const BoundConstantExpression *constant = nullptr;
+	if (right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+	    left.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		constant = &right.Cast<BoundConstantExpression>();
+	} else if (left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+	           right.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		constant = &left.Cast<BoundConstantExpression>();
+		comparison_type = FlipComparisonExpression(comparison_type);
+	} else {
+		return string();
+	}
+	LegacyConstantFilter constant_filter(comparison_type, constant->GetValue());
+	return GenerateConstantFilter(constant_filter, constant->GetValue().type(), referenced_stats);
 }
 
 FilterSQLResult DuckLakeMetadataManager::ConvertFilterPushdownToSQL(const FilterPushdownInfo &filter_info) {
