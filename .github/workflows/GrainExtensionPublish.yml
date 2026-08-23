@@ -73,6 +73,9 @@ jobs:
       build_duckdb_shell: true
       upload_duckdb_binaries: true
       upload_all_extensions: true
+      # libpq builds PostgreSQL's parser sources from the vendored source tree.
+      # The Blacksmith image must provide flex/bison before vcpkg configures it.
+      extra_toolchains: parser_tools
       test_config: '{"test_env_variables":{"ENABLE_POSTGRES_SCANNER":"1","ENABLE_GRAIN_BUNDLE_EXTENSIONS":"1"}}'
       reduced_ci_mode: disabled
 
