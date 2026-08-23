@@ -1,6 +1,7 @@
 {
   "dependencies": [
     "roaring",
-    "libpq"
+    "libpq",
+    "curl"
   ]
 }
