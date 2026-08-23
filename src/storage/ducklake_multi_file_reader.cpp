@@ -26,6 +26,7 @@
 #include "duckdb/function/function_binder.hpp"
 #include "storage/ducklake_inlined_data_reader.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/filter/dynamic_filter.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
@@ -62,7 +63,8 @@ static void AddSnapshotFilter(BaseFileReader &reader, const ColumnIndex &col_idx
                               idx_t snapshot_value, ExpressionType comparison_type) {
 	auto constant = Value::UBIGINT(snapshot_value).DefaultCastAs(col_type);
 	auto filter = make_uniq<LegacyConstantFilter>(comparison_type, std::move(constant));
-	reader.filters->PushFilter(ProjectionIndex(col_idx.GetPrimaryIndex()), std::move(filter));
+	reader.filters->PushFilter(ProjectionIndex(col_idx.GetPrimaryIndex()),
+	                           ExpressionFilter::FromTableFilter(*filter, col_type));
 }
 
 // recursively normalize LIST child names from legacy formats blame legacy Avro/Parquet formats
@@ -532,6 +534,7 @@ ReaderInitializeType DuckLakeMultiFileReader::CreateMapping(
 	}
 
 	const vector<ColumnIndex> &column_ids_to_use = needs_internal_rowid ? extended_column_ids : global_column_ids;
+	optional_ptr<TableFilterSet> mapping_filters = filters;
 
 	if (reader_data.reader->file.extended_info) {
 		auto &file_options = reader_data.reader->file.extended_info->options;
@@ -542,7 +545,7 @@ ReaderInitializeType DuckLakeMultiFileReader::CreateMapping(
 			auto &mapping = transaction->GetMappingById(mapping_id);
 			// use the mapping to generate a new set of global columns for this file
 			auto mapped_columns = CreateNewMapping(context, reader_data, global_columns, mapping);
-			return MultiFileReader::CreateMapping(context, reader_data, mapped_columns, column_ids_to_use, filters,
+			return MultiFileReader::CreateMapping(context, reader_data, mapped_columns, column_ids_to_use, mapping_filters,
 			                                      multi_file_list, bind_data, virtual_columns,
 			                                      MultiFileColumnMappingMode::BY_NAME);
 		}
@@ -559,11 +562,11 @@ ReaderInitializeType DuckLakeMultiFileReader::CreateMapping(
 		}
 		auto positional_map = DuckLakeNameMap::CreatePositionalMapping(source_names, target_field_ids);
 		auto mapped_columns = MapColumns(context, reader_data, global_columns, positional_map);
-		return MultiFileReader::CreateMapping(context, reader_data, mapped_columns, column_ids_to_use, filters,
+		return MultiFileReader::CreateMapping(context, reader_data, mapped_columns, column_ids_to_use, mapping_filters,
 		                                      multi_file_list, bind_data, virtual_columns,
 		                                      MultiFileColumnMappingMode::BY_NAME);
 	}
-	return MultiFileReader::CreateMapping(context, reader_data, global_columns, column_ids_to_use, filters,
+	return MultiFileReader::CreateMapping(context, reader_data, global_columns, column_ids_to_use, mapping_filters,
 	                                      multi_file_list, bind_data, virtual_columns);
 }
 
@@ -608,7 +611,14 @@ MultiFileReaderVirtualColumnBinding DuckLakeMultiFileReader::GetVirtualColumnExp
 		if (error.HasError()) {
 			error.Throw();
 		}
-		return MultiFileReaderVirtualColumnBinding(std::move(function_expr), {column_id});
+		// The expression reads the file-row-number virtual column that the
+		// Parquet reader can materialize.  Returning the requested DuckLake
+		// rowid here makes the generic mapper ask the underlying reader to add
+		// an unsupported ROW_ID virtual column (and DuckDB 2.0 now rejects that
+		// with an internal error).  Keep the dependency list in the local
+		// reader's coordinate space instead.
+		return MultiFileReaderVirtualColumnBinding(
+		    std::move(function_expr), {MultiFileReader::COLUMN_IDENTIFIER_FILE_ROW_NUMBER});
 	}
 	if (column_id == COLUMN_IDENTIFIER_SNAPSHOT_ID) {
 		if (TryFindColumnByFieldId(local_columns, MultiFileReader::LAST_UPDATED_SEQUENCE_NUMBER_ID,

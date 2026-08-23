@@ -47,6 +47,23 @@ unique_ptr<BaseStatistics> DuckLakeStatistics(ClientContext &context, const Func
 	return table.GetStatistics(context, column_index);
 }
 
+unique_ptr<BaseStatistics> DuckLakeStatisticsExtended(ClientContext &context,
+                                                       TableFunctionGetStatisticsInput &input) {
+	if (input.column_index.IsVirtualColumn()) {
+		return nullptr;
+	}
+	auto &multi_file_data = input.bind_data->Cast<MultiFileBindData>();
+	auto &file_list = multi_file_data.file_list->Cast<DuckLakeMultiFileList>();
+	if (file_list.HasTransactionLocalData()) {
+		return nullptr;
+	}
+	// Scalar nested-extract statistics are propagated from the root STRUCT/LIST
+	// statistics by DuckDB's expression statistics callbacks. Return the root
+	// object here; returning the leaf would make STRUCT_EXTRACT attempt to index
+	// a scalar stats object a second time.
+	return file_list.GetTable().GetStatistics(context, input.column_index.GetPrimaryIndex());
+}
+
 BindInfo DuckLakeBindInfo(const optional_ptr<FunctionData> bind_data) {
 	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
 	auto &file_list = multi_file_data.file_list->Cast<DuckLakeMultiFileList>();
@@ -81,11 +98,7 @@ struct DuckLakePartitionRowGroup : public PartitionRowGroup {
 	bool min_max_exact;
 
 	unique_ptr<BaseStatistics> GetColumnStatistics(const StorageIndex &storage_index) override {
-		if (storage_index.HasChildren()) {
-			// MIN/MAX over a nested sub-field - we only track stats for top-level columns, fall back to a scan
-			return nullptr;
-		}
-		return table.GetStatistics(context, storage_index.GetPrimaryIndex());
+		return table.GetStatistics(context, storage_index);
 	}
 
 	bool MinMaxIsExact(const StorageIndex &storage_index) override {
@@ -173,6 +186,7 @@ TableFunction DuckLakeFunctions::GetDuckLakeScanFunction(DatabaseInstance &insta
 	}
 
 	function.statistics = DuckLakeStatistics;
+	function.statistics_extended = DuckLakeStatisticsExtended;
 	function.get_bind_info = DuckLakeBindInfo;
 	function.get_virtual_columns = DuckLakeVirtualColumns;
 	function.get_row_id_columns = DuckLakeGetRowIdColumn;

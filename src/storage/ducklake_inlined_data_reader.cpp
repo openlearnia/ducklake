@@ -185,10 +185,12 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 bool DuckLakeInlinedDataReader::TryEvaluateExpression(ClientContext &context, idx_t virtual_col_idx,
                                                       Vector &input_vector, const LogicalType &input_type,
                                                       Vector &output_vector) {
-	if (expression_map.empty() || virtual_col_idx >= column_ids.size()) {
+	if (expression_map.empty()) {
 		return false;
 	}
-	auto local_id = column_ids[MultiFileLocalIndex(virtual_col_idx)];
+	// Virtual-only projections (notably DuckLake rowid) do not contribute an
+	// entry to column_ids. Their mapper-local index is the output position.
+	auto local_id = virtual_col_idx < column_ids.size() ? column_ids[MultiFileLocalIndex(virtual_col_idx)] : virtual_col_idx;
 	auto expr_it = expression_executors.find(local_id);
 	if (expr_it == expression_executors.end()) {
 		return false;

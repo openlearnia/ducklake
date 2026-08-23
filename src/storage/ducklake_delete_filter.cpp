@@ -2,6 +2,7 @@
 #include "storage/ducklake_deletion_vector.hpp"
 #include "common/parquet_file_scanner.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
@@ -186,13 +187,15 @@ DeleteFileScanResult DuckLakeDeleteFilter::ScanDeleteFile(ClientContext &context
 			auto min_constant = Value::BIGINT(NumericCast<int64_t>(snapshot_filter_min.GetIndex()));
 			auto min_filter =
 				make_uniq<LegacyConstantFilter>(ExpressionType::COMPARE_GREATERTHANOREQUALTO, std::move(min_constant));
-			filters->PushFilter(ProjectionIndex(snapshot_col_idx.GetPrimaryIndex()), std::move(min_filter));
+			filters->PushFilter(ProjectionIndex(snapshot_col_idx.GetPrimaryIndex()),
+			                    ExpressionFilter::FromTableFilter(*min_filter, return_types[2]));
 		}
 		if (snapshot_filter_max.IsValid()) {
 			auto max_constant = Value::BIGINT(NumericCast<int64_t>(snapshot_filter_max.GetIndex()));
 			auto max_filter =
 				make_uniq<LegacyConstantFilter>(ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(max_constant));
-			filters->PushFilter(ProjectionIndex(snapshot_col_idx.GetPrimaryIndex()), std::move(max_filter));
+			filters->PushFilter(ProjectionIndex(snapshot_col_idx.GetPrimaryIndex()),
+			                    ExpressionFilter::FromTableFilter(*max_filter, return_types[2]));
 		}
 		scanner.SetFilters(std::move(filters));
 	}

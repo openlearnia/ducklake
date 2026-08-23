@@ -338,6 +338,29 @@ unique_ptr<BaseStatistics> DuckLakeTableEntry::GetStatistics(ClientContext &cont
 	return GetColumnStats(field_id, *table_stats);
 }
 
+unique_ptr<BaseStatistics> DuckLakeTableEntry::GetStatistics(ClientContext &context,
+                                                              const StorageIndex &storage_index) {
+	auto table_stats = GetTableStats(context);
+	if (!table_stats || !storage_index.HasPrimaryIndex()) {
+		return nullptr;
+	}
+
+	const DuckLakeFieldId *field_id = &field_data->GetByRootIndex(storage_index.ToPhysical());
+	for (idx_t child_idx = 0; child_idx < storage_index.ChildIndexCount(); child_idx++) {
+		auto &child = storage_index.GetChildIndex(child_idx);
+		if (!child.HasPrimaryIndex()) {
+			return nullptr;
+		}
+		if (child.GetPrimaryIndex() >= field_id->Children().size()) {
+			return nullptr;
+		}
+		// StorageIndex child positions are physical offsets within the nested
+		// STRUCT/LIST/MAP value, while DuckLake field IDs are global metadata IDs.
+		field_id = field_id->Children()[child.GetPrimaryIndex()].get();
+	}
+	return GetColumnStats(*field_id, *table_stats);
+}
+
 TableFunction DuckLakeTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	throw InternalException("DuckLakeTableEntry::GetScanFunction called without entry lookup info");
 }
