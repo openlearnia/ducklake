@@ -2,9 +2,9 @@
 # Parquet-only — does not set DUCKLAKE_VORTEX_EXTENSION_DIR / does not call DuckDB CDN deploy.
 #
 # Grain / VPS download (public, no token) — Release assets preferred:
-#   https://github.com/openlearnia/ducklake/releases/download/grain-ext-v1.5.5-<sha>/ducklake-v1.5.5-linux_amd64.duckdb_extension
+#   https://github.com/openlearnia/ducklake/releases/download/grain-ext-v2.0.0-alpha1-<sha>/ducklake-v2.0.0-alpha1-linux_amd64.duckdb_extension
 # Actions artifact (auth required even on public repos):
-#   gh run download <run_id> -n ducklake-linux_amd64-v1.5.5 -R openlearnia/ducklake
+#   gh run download <run_id> -n ducklake-linux_amd64-v2.0.0-alpha1 -R openlearnia/ducklake
 #
 # Spec: docs/grain-ducklake-extension-ci-requirements.md (in ducklake-vortex)
 # Runners: Blacksmith drop-in (blacksmith-4vcpu-ubuntu-2404) — org app must be installed.
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: Create GitHub Release grain-ext-v1.5.5-<shortsha>
+        description: Create GitHub Release grain-ext-v2.0.0-alpha1-<shortsha>
         type: boolean
         default: true
   push:
@@ -60,7 +60,7 @@ jobs:
     uses: ./.github/workflows/_grain_extension_distribution.yml
     with:
       # The extension must compile against the exact OpenLearnia DuckDB commit
-      # that adds the MV parser contract, not the stock v1.5.5 tag.
+      # that adds the MV parser contract, not a stock DuckDB release tag.
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}
       override_git_describe: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       override_duckdb_repository: https://github.com/openlearnia/duckdb.git
@@ -72,6 +72,8 @@ jobs:
       skip_tests: false
       build_duckdb_shell: true
       upload_duckdb_binaries: true
+      upload_all_extensions: true
+      test_config: '{"test_env_variables":{"ENABLE_POSTGRES_SCANNER":"1","ENABLE_GRAIN_BUNDLE_EXTENSIONS":"1"}}'
       reduced_ci_mode: disabled
 
   publish:
@@ -110,6 +112,16 @@ jobs:
           fi
           cp "$EXT" grain-pkg/ducklake.duckdb_extension
           cp "$EXT" "grain-pkg/ducklake-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
+          for name in httpfs postgres_scanner; do
+            extra=$(find dist -type f -name "${name}.duckdb_extension" | head -n1 || true)
+            if [[ -z "$extra" ]]; then
+              echo "Missing paired ${name} extension" >&2
+              find dist -type f | sort >&2
+              exit 1
+            fi
+            cp "$extra" "grain-pkg/${name}.duckdb_extension"
+            cp "$extra" "grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
+          done
           test -f duckdb-runtime/bin/duckdb
           test -f duckdb-runtime/lib/libduckdb.so
           test -f duckdb-runtime/include/duckdb.h
@@ -134,9 +146,9 @@ jobs:
 
           package = Path("grain-pkg")
           asset_names = [
-              f"ducklake-{os.environ['DUCKDB_VERSION']}-linux_amd64.duckdb_extension",
-              os.environ["DUCKDB_ARCHIVE"],
-          ]
+              f"{name}-{os.environ['DUCKDB_VERSION']}-linux_amd64.duckdb_extension"
+              for name in ("ducklake", "httpfs", "postgres_scanner")
+          ] + [os.environ["DUCKDB_ARCHIVE"]]
           checksums = {
               name: hashlib.sha256((package / name).read_bytes()).hexdigest()
               for name in asset_names
@@ -214,6 +226,7 @@ jobs:
             - Ref: `${{ github.ref_name }}`
             - Features: materialized_views, delta_refresh, join_incremental, staleness
             - Vortex: not bundled
+            - Paired extensions: httpfs, postgres_scanner
 
             Grain install:
             ```bash
@@ -225,7 +238,7 @@ jobs:
             ```
             Then set `GRAIN_DUCKLAKE_EXTENSION_PATH=/opt/grain/extensions/ducklake.duckdb_extension`.
           files: |
-            grain-pkg/ducklake-${{ needs.get-duckdb-version.outputs.duckdb_version }}-linux_amd64.duckdb_extension
+            grain-pkg/*-${{ needs.get-duckdb-version.outputs.duckdb_version }}-linux_amd64.duckdb_extension
             grain-pkg/duckdb-*-linux_amd64.tar.gz
             grain-pkg/build-info.json
             grain-pkg/SHA256SUMS

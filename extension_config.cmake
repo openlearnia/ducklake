@@ -27,6 +27,15 @@ if($ENV{ENABLE_POSTGRES_SCANNER})
     include("${EXTENSION_CONFIG_BASE_DIR}/postgres_scanner.cmake")
 endif()
 
+# Build network extensions against this exact DuckDB checkout. Never mix the
+# preview fork with CDN binaries built for another ABI.
+if($ENV{ENABLE_GRAIN_BUNDLE_EXTENSIONS})
+    duckdb_extension_load(httpfs
+            GIT_URL https://github.com/duckdb/duckdb-httpfs
+            GIT_TAG c942cee64bb1bc848168d4ad74fcd9eff2c616e7
+    )
+endif()
+
 if($ENV{ENABLE_QUACK})
     include_directories(
             ${CMAKE_CURRENT_LIST_DIR}/duckdb/third_party/httplib
