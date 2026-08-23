@@ -15,6 +15,11 @@ SELECT table_type FROM information_schema.tables WHERE table_name = 'mv_native'
 ----
 MATERIALIZED VIEW
 
+query T
+SELECT is_insertable_into FROM information_schema.tables WHERE table_name = 'mv_native'
+----
+NO
+
 query I
 SELECT is_materialized::INTEGER FROM duckdb_tables() WHERE table_name = 'mv_native'
 ----
