@@ -258,6 +258,7 @@ ParserOverrideResult DuckLakeMaterializedViewParserOverride(ParserExtensionInfo 
 void DuckLakeRegisterMaterializedViewParser(DBConfig &config) {
 	ParserExtension extension;
 	extension.parser_override = DuckLakeMaterializedViewParserOverride;
+	extension.parser_override_default = true;
 	ParserExtension::Register(config, std::move(extension));
 }
 
