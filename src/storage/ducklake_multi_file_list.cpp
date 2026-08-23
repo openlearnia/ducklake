@@ -97,7 +97,7 @@ unique_ptr<MultiFileList> DuckLakeMultiFileList::ComplexFilterPushdown(ClientCon
 		return nullptr;
 	}
 
-	auto pushdown_info = filter_info ? filter_info->Copy() : make_uniq<FilterPushdownInfo>();
+	auto pushdown_info = filter_info ? filter_info->Copy(context) : make_uniq<FilterPushdownInfo>();
 
 	for (auto &entry : table_filter_set) {
 		AddFilterToPushdownInfo(*pushdown_info, entry.GetIndex().GetIndex(), entry.TakeFilter());
@@ -208,7 +208,10 @@ OpenFileInfo DuckLakeMultiFileList::GetFile(idx_t i) const {
 unique_ptr<MultiFileList> DuckLakeMultiFileList::Copy() const {
 	unique_ptr<FilterPushdownInfo> filter_copy;
 	if (filter_info) {
-		filter_copy = filter_info->Copy();
+		auto transaction = read_info.transaction.lock();
+		if (transaction && transaction->GetConnection().context) {
+			filter_copy = filter_info->Copy(*transaction->GetConnection().context);
+		}
 	}
 
 	auto result = make_uniq<DuckLakeMultiFileList>(read_info, transaction_local_files, transaction_local_data,

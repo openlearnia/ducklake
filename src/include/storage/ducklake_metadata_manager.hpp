@@ -75,13 +75,14 @@ struct ColumnFilterInfo {
 	    : column_field_index(col_idx), column_type(std::move(type)), table_filter(std::move(filter)) {
 	}
 
-	ColumnFilterInfo(const ColumnFilterInfo &other)
+	ColumnFilterInfo(const ColumnFilterInfo &other, ClientContext &context)
 	    : column_field_index(other.column_field_index), column_type(other.column_type),
 	      table_filter(nullptr) {
 		MemoryStream stream;
 		BinarySerializer::Serialize(*other.table_filter, stream);
 		stream.Rewind();
-		table_filter = BinaryDeserializer::Deserialize<TableFilter>(stream);
+		bound_parameter_map_t parameters;
+		table_filter = BinaryDeserializer::Deserialize<TableFilter>(stream, context, parameters);
 	}
 };
 
@@ -90,10 +91,10 @@ struct FilterPushdownInfo {
 
 	FilterPushdownInfo() = default;
 
-	unique_ptr<FilterPushdownInfo> Copy() const {
+	unique_ptr<FilterPushdownInfo> Copy(ClientContext &context) const {
 		auto result = make_uniq<FilterPushdownInfo>();
 		for (const auto &entry : column_filters) {
-			result->column_filters.emplace(entry.first, entry.second);
+			result->column_filters.emplace(entry.first, ColumnFilterInfo(entry.second, context));
 		}
 		return result;
 	}

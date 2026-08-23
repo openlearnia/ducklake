@@ -510,7 +510,9 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 	ducklake_entries_map_t schema_map;
 	for (auto &schema : catalog.schemas) {
 		CreateSchemaInfo schema_info;
-				schema_info.SetQualifiedName(QualifiedName(Identifier(schema.name)));
+		// CreateSchemaInfo expects the schema path followed by an empty name slot.
+		// A one-part QualifiedName is interpreted as an object name by DuckDB 2.0.
+		schema_info.SetQualifiedName(QualifiedName(vector<Identifier> {Identifier(schema.name)}, Identifier()));
 		auto schema_entry = make_uniq<DuckLakeSchemaEntry>(*this, schema_info, schema.id, std::move(schema.uuid),
 		                                                   std::move(schema.path));
 		schema_map.insert(make_pair(std::move(schema.name), std::move(schema_entry)));
@@ -542,6 +544,9 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			catalog_entry_name = materialized_view_name->second;
 		}
 		auto create_table_info = make_uniq<CreateTableInfo>(schema_entry, Identifier(catalog_entry_name));
+		if (materialized_view_name != materialized_view_names.end()) {
+			create_table_info->catalog_materialized_view = true;
+		}
 		for (auto &tag : table.tags) {
 			if (tag.key == "comment") {
 				create_table_info->comment = tag.value;
