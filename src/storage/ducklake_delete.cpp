@@ -665,7 +665,10 @@ PhysicalOperator &DuckLakeDelete::PlanDelete(ClientContext &context, PhysicalPla
                                              bool allow_duplicates) {
 	auto delete_source = FindDeleteSource(child_plan);
 	auto delete_map = make_shared_ptr<DuckLakeDeleteMap>();
+	// UPDATE reuses this planner with zero-based deletion metadata already
+	// present in its projection; only a standalone DELETE needs restoration.
 	if (delete_source) {
+		if (row_id_indexes.size() == 3 && row_id_indexes[0] > 0) {
 		// DuckDB 2.0 can prune the three file-identity vectors used by the
 		// DuckLake delete sink when a rowid predicate is kept above the scan.
 		// Restore the complete scan projection after physical planning; filters
@@ -692,7 +695,8 @@ PhysicalOperator &DuckLakeDelete::PlanDelete(ClientContext &context, PhysicalPla
 				restore_filter_types(child.get());
 			}
 		};
-		restore_filter_types(child_plan);
+			restore_filter_types(child_plan);
+		}
 		auto &bind_data = delete_source->bind_data->Cast<MultiFileBindData>();
 		auto &reader = bind_data.multi_file_reader->Cast<DuckLakeMultiFileReader>();
 		auto &file_list = bind_data.file_list->Cast<DuckLakeMultiFileList>();
