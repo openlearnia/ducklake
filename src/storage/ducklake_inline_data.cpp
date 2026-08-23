@@ -253,7 +253,7 @@ void UpdateStats(vector<DuckLakeBaseColumnStats> &stats, idx_t c, Vector &data, 
 		case LogicalTypeId::STRUCT: {
 			auto &children = StructVector::GetEntries(data);
 			for (idx_t child_idx = 0; child_idx < children.size(); child_idx++) {
-				UpdateStats(column_stats.children, child_idx, *children[child_idx], row_count,
+				UpdateStats(column_stats.children, child_idx, children[child_idx], row_count,
 				            field_id.GetChildByIndex(child_idx));
 			}
 			break;
