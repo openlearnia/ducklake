@@ -2,9 +2,9 @@
 # Parquet-only — does not set DUCKLAKE_VORTEX_EXTENSION_DIR / does not call DuckDB CDN deploy.
 #
 # Grain / VPS download (public, no token) — Release assets preferred:
-#   https://github.com/openlearnia/ducklake/releases/download/grain-ext-v2.0.0-alpha1-<sha>/ducklake-v2.0.0-alpha1-linux_amd64.duckdb_extension
+#   https://github.com/openlearnia/ducklake/releases/download/grain-ext-<duckdb-version>-<sha>/ducklake-<duckdb-version>-linux_amd64.duckdb_extension
 # Actions artifact (auth required even on public repos):
-#   gh run download <run_id> -n ducklake-linux_amd64-v2.0.0-alpha1 -R openlearnia/ducklake
+#   gh run download <run_id> -n ducklake-linux_amd64-<duckdb-version> -R openlearnia/ducklake
 #
 # Spec: docs/grain-ducklake-extension-ci-requirements.md (in ducklake-vortex)
 # Runners: Blacksmith drop-in (blacksmith-4vcpu-ubuntu-2404) — org app must be installed.
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: Create GitHub Release grain-ext-v2.0.0-alpha1-<shortsha>
+        description: Create GitHub Release grain-ext-<duckdb-version>-<shortsha>
         type: boolean
         default: true
   push:
