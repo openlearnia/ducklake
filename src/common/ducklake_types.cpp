@@ -118,7 +118,7 @@ string DuckLakeTypes::ToString(const LogicalType &type) {
 		// regular STRUCT for DuckLake storage purposes, not a user-defined
 		// type.  Treat it like the equivalent named STRUCT so CREATE TABLE AS
 		// FROM all_types remains portable across the preview ABI.
-		if (type.id() == LogicalTypeId::STRUCT && StringUtil::CIEquals(type.GetAlias(), "tuple")) {
+		if (type.id() == LogicalTypeId::STRUCT || type.id() == LogicalTypeId::TUPLE) {
 			return "struct";
 		}
 		if (type.IsJSONType()) {
@@ -134,6 +134,7 @@ string DuckLakeTypes::ToString(const LogicalType &type) {
 	}
 	switch (type.id()) {
 	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
 		return "struct";
 	case LogicalTypeId::VARIANT:
 		return "variant";

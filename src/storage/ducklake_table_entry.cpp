@@ -767,7 +767,7 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, 
 		    "Column name \"%s\" is reserved by DuckLake for internal use when data inlining is enabled. If "
 		    "you must use this column name, disable inlining by calling "
 		    "ducklake_set_option('data_inlining_row_limit', 0).",
-		    info.new_name);
+		    info.new_name.GetIdentifierName());
 	}
 	auto create_info = GetInfo();
 	auto &table_info = create_info->Cast<CreateTableInfo>();
@@ -814,7 +814,7 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, 
 		    "Column name \"%s\" is reserved by DuckLake for internal use when data inlining is enabled. If "
 		    "you must use this column name, disable inlining by calling "
 		    "ducklake_set_option('data_inlining_row_limit', 0).",
-		    info.new_column.Name());
+		    info.new_column.Name().GetIdentifierName());
 	}
 	auto create_info = GetInfo();
 	auto &table_info = create_info->Cast<CreateTableInfo>();
@@ -967,6 +967,8 @@ idx_t GetNestedChildCount(const LogicalType &type) {
 		return 2;
 	case LogicalTypeId::STRUCT:
 		return StructType::GetChildTypes(type).size();
+	case LogicalTypeId::TUPLE:
+		return StructType::GetChildCount(type);
 	default:
 		throw NotImplementedException("Unimplemented nested type %s for DuckLake type evolution", type);
 	}
@@ -980,6 +982,8 @@ string GetNestedChildName(const LogicalType &type, idx_t index) {
 		return index == 0 ? "key" : "value";
 	case LogicalTypeId::STRUCT:
 		return StructType::GetChildTypes(type)[index].first.GetIdentifierName();
+	case LogicalTypeId::TUPLE:
+		return TupleType::GetChildName(index);
 	default:
 		throw NotImplementedException("Unimplemented nested type %s for DuckLake type evolution", type);
 	}
@@ -992,6 +996,8 @@ const LogicalType &GetNestedChildType(const LogicalType &type, idx_t index) {
 		return index == 0 ? MapType::KeyType(type) : MapType::ValueType(type);
 	case LogicalTypeId::STRUCT:
 		return StructType::GetChildTypes(type)[index].second;
+	case LogicalTypeId::TUPLE:
+		return StructType::GetChildType(type, index);
 	default:
 		throw NotImplementedException("Unimplemented nested type %s for DuckLake type evolution", type);
 	}
@@ -1487,6 +1493,15 @@ DuckLakeColumnInfo DuckLakeTableEntry::ConvertColumn(const string &name, const L
 			auto &child = struct_children[child_idx];
 			auto &child_id = field_id.GetChildByIndex(child_idx);
 				column_entry.children.push_back(ConvertColumn(child.first.GetIdentifierName(), child.second, child_id));
+		}
+		break;
+	}
+	case LogicalTypeId::TUPLE: {
+		auto child_count = StructType::GetChildCount(type);
+		for (idx_t child_idx = 0; child_idx < child_count; ++child_idx) {
+			auto &child_id = field_id.GetChildByIndex(child_idx);
+			column_entry.children.push_back(
+			    ConvertColumn(TupleType::GetChildName(child_idx), StructType::GetChildType(type, child_idx), child_id));
 		}
 		break;
 	}
