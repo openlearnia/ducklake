@@ -42,7 +42,8 @@ permissions:
 jobs:
   get-duckdb-version:
     name: Get DuckDB version
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Dont change the run to 4vcpu. it burns the free limits and doesnt work much faster than 2vpcu
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       duckdb_version: ${{ steps.version.outputs.duckdb_version }}
       duckdb_ref: ${{ steps.version.outputs.duckdb_ref }}
@@ -252,6 +253,9 @@ jobs:
           : "${CF_ACCOUNT_ID:?CF_ACCOUNT_ID is required}"
           export CLOUDFLARE_API_TOKEN="$CF_API_TOKEN"
           export CLOUDFLARE_ACCOUNT_ID="$CF_ACCOUNT_ID"
+          npx --yes wrangler@4.76.0 deploy --config extension-repository/wrangler.jsonc
+          npx --yes wrangler@4.76.0 r2 object delete \
+            "openlearnia-duckdb-extensions/artifacts.json" --remote || true
           repo_dir="r2-extension-publish"
           mkdir -p "$repo_dir"
           cp grain-pkg/artifacts.json "$repo_dir/artifacts.json"
