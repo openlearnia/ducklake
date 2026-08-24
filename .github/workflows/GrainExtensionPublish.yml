@@ -214,6 +214,35 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      - name: Publish fork-matched extensions to R2 repository
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          DUCKDB_VERSION: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
+          EXTENSION_REPOSITORY_URL: http://openlearnia-duckdb-extension-repository.defaultcms.workers.dev
+        run: |
+          set -euo pipefail
+          : "${CF_API_TOKEN:?CF_API_TOKEN is required}"
+          : "${CF_ACCOUNT_ID:?CF_ACCOUNT_ID is required}"
+          export CLOUDFLARE_API_TOKEN="$CF_API_TOKEN"
+          export CLOUDFLARE_ACCOUNT_ID="$CF_ACCOUNT_ID"
+          repo_dir="r2-extension-publish"
+          mkdir -p "$repo_dir"
+          for name in ducklake httpfs postgres_scanner; do
+            source="grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
+            plain="$repo_dir/${name}.duckdb_extension"
+            compressed="$repo_dir/${name}.duckdb_extension.gz"
+            cp "$source" "$plain"
+            gzip -1 -c "$plain" > "$compressed"
+            for suffix in duckdb_extension duckdb_extension.gz; do
+              key="openlearnia-duckdb-extensions/${DUCKDB_VERSION}/linux_amd64/${name}.${suffix}"
+              file="$repo_dir/${name}.${suffix}"
+              npx --yes wrangler@4.76.0 r2 object put "$key" --file "$file" --remote --account-id "$CF_ACCOUNT_ID"
+            done
+            curl --fail --silent --show-error --head \
+              "$EXTENSION_REPOSITORY_URL/${DUCKDB_VERSION}/linux_amd64/${name}.duckdb_extension"
+          done
+
       - name: Create GitHub Release
         # Public VPS bootstrap needs Release assets (Actions artifacts require auth).
         # Mint on every vortex-integration push, and on dispatch when create_release=true.
