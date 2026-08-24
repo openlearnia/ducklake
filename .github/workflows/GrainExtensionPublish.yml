@@ -256,7 +256,7 @@ jobs:
           mkdir -p "$repo_dir"
           cp grain-pkg/artifacts.json "$repo_dir/artifacts.json"
           npx --yes wrangler@4.76.0 r2 object put \
-            "openlearnia-duckdb-extensions/artifacts.json" \
+            "openlearnia-duckdb-extensions/_meta/artifacts.json" \
             --file "$repo_dir/artifacts.json" --remote
           curl --fail --silent --show-error \
             "$EXTENSION_REPOSITORY_URL/artifacts.json" | python3 -m json.tool >/dev/null

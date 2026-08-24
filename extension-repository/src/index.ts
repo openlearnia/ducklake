@@ -46,7 +46,10 @@ export default {
 		const key = objectKey(new URL(request.url).pathname);
 		if (!key) return new Response("Not Found", { status: 404, headers: corsHeaders() });
 
-		const object = await env.EXTENSIONS.get(key);
+		// Keep repository metadata in a reserved bucket namespace while exposing
+		// a stable public endpoint for clients that need the latest bundle.
+		const bucketKey = key === "artifacts.json" ? "_meta/artifacts.json" : key;
+		const object = await env.EXTENSIONS.get(bucketKey);
 		if (!object) return new Response("Not Found", { status: 404, headers: corsHeaders() });
 
 		const headers = corsHeaders();
