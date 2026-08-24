@@ -1594,6 +1594,42 @@ static optional_idx FoldBucketValue(ClientContext &context, const Value &constan
 	return optional_idx(1);
 }
 
+static bool CollectBucketEqualityExpressions(ClientContext &context, const Expression &expr,
+                                              const LogicalType &col_type, idx_t bucket_count,
+                                              vector<string> &out) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &func = expr.Cast<BoundFunctionExpression>();
+		if (BoundComparisonExpression::IsComparison(expr) && expr.GetExpressionType() == ExpressionType::COMPARE_EQUAL) {
+			auto &left = BoundComparisonExpression::Left(func);
+			auto &right = BoundComparisonExpression::Right(func);
+			const BoundConstantExpression *constant = nullptr;
+			if (right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				constant = &right.Cast<BoundConstantExpression>();
+			} else if (left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				constant = &left.Cast<BoundConstantExpression>();
+			}
+			if (!constant) {
+				return false;
+			}
+			string partition_value;
+			if (!FoldBucketValue(context, constant->GetValue(), col_type, bucket_count, partition_value).IsValid()) {
+				return false;
+			}
+			out.push_back(std::move(partition_value));
+			return true;
+		}
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		bool found = false;
+		for (auto &child : conjunction.GetChildren()) {
+			found = CollectBucketEqualityExpressions(context, *child, col_type, bucket_count, out) || found;
+		}
+		return found;
+	}
+	return false;
+}
+
 //! Walk a TableFilter and, for each foldable equality / IN-list constant, append the resulting
 //! partition_value string to `out`. Returns true if at least one valid constant was collected.
 //! Unsupported shapes (range comparisons, OR-conjunctions, dynamic filters, etc.) return false
@@ -1601,6 +1637,13 @@ static optional_idx FoldBucketValue(ClientContext &context, const Value &constan
 static bool CollectBucketEqualityValues(ClientContext &context, const TableFilter &filter, const LogicalType &col_type,
                                         idx_t bucket_count, vector<string> &out) {
 	switch (filter.filter_type) {
+	case TableFilterType::EXPRESSION_FILTER: {
+		auto &expression_filter = ExpressionFilter::GetExpressionFilter(filter, "bucket pruning");
+		if (!expression_filter.expr) {
+			return false;
+		}
+		return CollectBucketEqualityExpressions(context, *expression_filter.expr, col_type, bucket_count, out);
+	}
 	case TableFilterType::LEGACY_CONSTANT_COMPARISON: {
 		auto &cf = filter.Cast<LegacyConstantFilter>();
 		if (cf.comparison_type != ExpressionType::COMPARE_EQUAL) {
@@ -1684,7 +1727,7 @@ string DuckLakeMetadataManager::BuildBucketPartitionPruningClause(DuckLakeTableE
 		string clause = StringUtil::Format(
 		    "data.data_file_id IN (SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_file_partition_value "
 		    "WHERE table_id = %d AND partition_key_index = %d AND partition_value IN (%s))",
-		    table_id.index, field.partition_key_index, in_list);
+			    table_id.index, field.partition_key_index, in_list);
 
 		if (!result.empty()) {
 			result += " AND ";
