@@ -1438,7 +1438,8 @@ DuckLakeFileProcessor::MapColumns(ParquetFileMetadata &file_metadata,
 			throw InvalidInputException(
 			    "Column \"%s%s\" exists in table \"%s\" but was not found in file \"%s\"\n* Set "
 			    "allow_missing => true to allow missing fields and columns",
-			    prefix.empty() ? prefix : prefix + ".", entry.second.get().Name(), table.name, file_metadata.filename);
+			    prefix.empty() ? prefix : prefix + ".", entry.second.get().Name(), table.name.GetIdentifierName(),
+			    file_metadata.filename);
 		}
 	}
 	return column_maps;
