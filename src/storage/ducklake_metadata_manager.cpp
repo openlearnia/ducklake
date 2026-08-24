@@ -178,7 +178,12 @@ bool DuckLakeMetadataManager::MetadataExists() {
 	SubstituteCatalogPlaceholders(query);
 	auto result = probe.Query(query);
 	if (result->HasError()) {
-		if (result->GetErrorObject().Type() == ExceptionType::CATALOG) {
+		if (result->GetErrorObject().Type() == ExceptionType::CATALOG ||
+		    // DuckDB 2.0 can surface a malformed type from a sibling attached
+		    // catalog while probing a newly attached metadata database. Treat
+		    // that probe as "not initialized"; the catalog is loaded lazily and
+		    // reports its own corruption when queried directly.
+		    StringUtil::Contains(result->GetErrorObject().Message(), "unsupported type")) {
 			// A missing table is expected for a new lake. DuckDB 2.0 marks the
 			// connection transaction aborted, so the caller must rollback and
 			// reattach before issuing initialization DDL.
