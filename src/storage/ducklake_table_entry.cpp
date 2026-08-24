@@ -772,7 +772,7 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, 
 	auto create_info = GetInfo();
 	auto &table_info = create_info->Cast<CreateTableInfo>();
 	if (!table_info.columns.ColumnExists(info.old_name)) {
-		throw CatalogException("Failed to rename column - column %s does not exist", info.old_name);
+		throw CatalogException("column %s does not exist", info.old_name.GetIdentifierName());
 	}
 	auto &col = table_info.columns.GetColumn(info.old_name);
 	auto &field_id = GetFieldId(col.Physical());
