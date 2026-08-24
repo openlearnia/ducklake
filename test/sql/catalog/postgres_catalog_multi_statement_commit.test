@@ -1,0 +1,30 @@
+# name: test/sql/catalog/postgres_catalog_multi_statement_commit.test
+# description: Postgres metadata commits execute every catalog statement on DuckDB 2 preview
+# group: [catalog]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_POSTGRES_TEST_SERVER 1
+
+test-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/postgres_catalog_multi_statement')
+
+statement ok
+CREATE TABLE ducklake.main.events(id INTEGER, label VARCHAR)
+
+statement ok
+INSERT INTO ducklake.main.events VALUES (1, 'ok'), (2, 'ducklake')
+
+query II
+SELECT * FROM ducklake.main.events ORDER BY id
+----
+1	ok
+2	ducklake

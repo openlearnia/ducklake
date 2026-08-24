@@ -1,6 +1,7 @@
 #include "metadata_manager/postgres_metadata_manager.hpp"
 #include "common/ducklake_util.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_metadata_info.hpp"
@@ -110,7 +111,29 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteQuery(DuckLakeSnapshot s
 	query = StringUtil::Replace(query, "{METADATA_PATH}", metadata_path);
 	query = StringUtil::Replace(query, "{DATA_PATH}", data_path);
 
-	return connection.Query(StringUtil::Format("CALL %s(%s, %s)", command, catalog_literal, SQLString(query)));
+	auto execute_statement = [&](const string &statement) {
+		return connection.Query(StringUtil::Format("CALL %s(%s, %s)", command, catalog_literal, SQLString(statement)));
+	};
+
+	// DuckDB 2 prepares postgres_execute calls and therefore rejects a query string
+	// containing multiple commands. Parse the generated batch and execute its
+	// statements individually. The first postgres_execute call starts the
+	// PostgresTransaction; subsequent calls reuse it, and DuckLake commits or
+	// rolls it back as one catalog transaction.
+	Parser parser;
+	parser.ParseQuery(query);
+	if (parser.statements.size() <= 1) {
+		return execute_statement(query);
+	}
+
+	unique_ptr<QueryResult> result;
+	for (auto &statement : parser.statements) {
+		result = execute_statement(statement->query);
+		if (result->HasError()) {
+			return result;
+		}
+	}
+	return result;
 }
 unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
 	return ExecuteQuery(snapshot, query, "postgres_execute");
