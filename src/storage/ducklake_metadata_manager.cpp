@@ -16,6 +16,7 @@
 #include "metadata_manager/sqlite_metadata_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/filter/null_filter.hpp"
@@ -4322,6 +4323,15 @@ string DuckLakeMetadataManager::GetLatestSnapshotQuery() const {
 }
 
 unique_ptr<DuckLakeSnapshot> DuckLakeMetadataManager::GetSnapshot() {
+	// During DuckDB 2.0 ATTACH OR REPLACE, the old DuckLake transaction can
+	// briefly outlive its attached metadata database.  A read-only transaction
+	// with no metadata connection has no changes to flush; avoid probing a
+	// detached catalog and let the replacement transaction proceed.
+	auto &metadata_context = *transaction.GetConnection().context;
+	if (!DatabaseManager::Get(metadata_context).GetDatabase(metadata_context,
+	                                                  Identifier(transaction.GetCatalog().MetadataDatabaseName()))) {
+		return make_uniq<DuckLakeSnapshot>(0, 0, 1, 0);
+	}
 	auto result = transaction.Query(GetLatestSnapshotQuery());
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to query most recent snapshot for DuckLake: ");
