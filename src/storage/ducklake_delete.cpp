@@ -478,7 +478,24 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
                                  DuckLakeDeleteGlobalState &global_state, const string &filename,
                                  ColumnDataCollection &deleted_rows) const {
 	// find the matching data file for the deletion
-	auto data_file_info = delete_map->GetExtendedFileInfo(filename);
+	auto data_file_info_ptr = delete_map->TryGetExtendedFileInfo(filename);
+	if (!data_file_info_ptr) {
+		// DuckDB 2.0 may bind the delete scan before the current metadata file
+		// list is materialized (notably after an unflushed INSERT). Refresh the
+		// committed snapshot list so the delete sink can still resolve identity.
+		auto files = transaction.GetMetadataManager().GetExtendedFilesForTable(table, transaction.GetSnapshot(), nullptr);
+		for (auto &file : files) {
+			if (file.file.path == filename) {
+				delete_map->AddExtendedFileInfo(std::move(file));
+				break;
+			}
+		}
+		data_file_info_ptr = delete_map->TryGetExtendedFileInfo(filename);
+	}
+	if (!data_file_info_ptr) {
+		throw InternalException("Could not find matching file for written delete file");
+	}
+	auto data_file_info = *data_file_info_ptr;
 
 	// sort and duplicate eliminate the deletes
 	set<idx_t> sorted_deletes;
