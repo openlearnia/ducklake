@@ -29,6 +29,7 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "storage/ducklake_partition_data.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -1440,7 +1441,84 @@ string DuckLakeMetadataManager::GenerateFilterPushdown(const TableFilter &filter
 
 string DuckLakeMetadataManager::GenerateFilterPushdownExpression(const ExpressionFilter &filter,
                                                                   unordered_set<string> &referenced_stats) {
-	if (!filter.expr || !BoundComparisonExpression::IsComparison(*filter.expr)) {
+	if (!filter.expr) {
+		return string();
+	}
+
+	// DuckDB 2.0 represents compound predicates as an EXPRESSION_FILTER. Keep
+	// translating the safe portions of conjunctions, but only translate an OR
+	// when every arm is supported; otherwise pruning could exclude a matching
+	// file. This preserves the conservative behavior of the legacy filter path.
+	if (filter.expr->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+		auto &conjunction = filter.expr->Cast<BoundConjunctionExpression>();
+		string result;
+		for (auto &child : conjunction.GetChildren()) {
+			ExpressionFilter child_filter(child->Copy());
+			string child_result = GenerateFilterPushdownExpression(child_filter, referenced_stats);
+			if (child_result.empty()) {
+				if (conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+					return string();
+				}
+				continue;
+			}
+			if (!result.empty()) {
+				result += conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_OR ? " OR " : " AND ";
+			}
+			result += "(" + child_result + ")";
+		}
+		return result;
+	}
+
+	// Optional/selectivity wrappers are inserted around pushed-down predicates
+	// by DuckDB's 2.0 filter combiner. The wrapper carries the original
+	// expression in bind data; unwrap it before translating the predicate.
+	if (filter.expr->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &function = filter.expr->Cast<BoundFunctionExpression>();
+		if (function.BindInfo() && function.Function().GetName() == OptionalFilterScalarFun::NAME) {
+			auto &data = function.BindInfo()->Cast<OptionalFilterFunctionData>();
+			if (data.child_filter_expr) {
+				ExpressionFilter child_filter(data.child_filter_expr->Copy());
+				return GenerateFilterPushdownExpression(child_filter, referenced_stats);
+			}
+		}
+		if (function.BindInfo() && function.Function().GetName() == SelectivityOptionalFilterScalarFun::NAME) {
+			auto &data = function.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
+			if (data.child_filter_expr) {
+				ExpressionFilter child_filter(data.child_filter_expr->Copy());
+				return GenerateFilterPushdownExpression(child_filter, referenced_stats);
+			}
+		}
+	}
+
+	// OR chains of equality predicates are normalized by DuckDB 2.0 into a
+	// COMPARE_IN operator. Translate the constant arms into the same metadata
+	// predicate used by the legacy IN filter path.
+	if (filter.expr->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
+		auto &op = filter.expr->Cast<BoundOperatorExpression>();
+		if (op.GetExpressionType() == ExpressionType::COMPARE_IN && op.GetChildren().size() >= 2 &&
+		    (op.GetChildren()[0]->GetExpressionClass() == ExpressionClass::BOUND_REF ||
+		     op.GetChildren()[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF)) {
+			string result;
+			for (idx_t i = 1; i < op.GetChildren().size(); i++) {
+				if (op.GetChildren()[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+					return string();
+				}
+				auto &constant = op.GetChildren()[i]->Cast<BoundConstantExpression>();
+				LegacyConstantFilter equality_filter(ExpressionType::COMPARE_EQUAL, constant.GetValue());
+				string child_result = GenerateConstantFilter(equality_filter, constant.GetValue().type(), referenced_stats);
+				if (child_result.empty()) {
+					return string();
+				}
+				if (!result.empty()) {
+					result += " OR ";
+				}
+				result += "(" + child_result + ")";
+			}
+			return result;
+		}
+	}
+
+	if (!BoundComparisonExpression::IsComparison(*filter.expr)) {
 		return string();
 	}
 	auto &comparison = filter.expr->Cast<BoundFunctionExpression>();
