@@ -237,7 +237,7 @@ jobs:
             for suffix in duckdb_extension duckdb_extension.gz; do
               key="openlearnia-duckdb-extensions/${DUCKDB_VERSION}/linux_amd64/${name}.${suffix}"
               file="$repo_dir/${name}.${suffix}"
-              npx --yes wrangler@4.76.0 r2 object put "$key" --file "$file" --remote --account-id "$CF_ACCOUNT_ID"
+              npx --yes wrangler@4.76.0 r2 object put "$key" --file "$file" --remote
             done
             curl --fail --silent --show-error --head \
               "$EXTENSION_REPOSITORY_URL/${DUCKDB_VERSION}/linux_amd64/${name}.duckdb_extension"
