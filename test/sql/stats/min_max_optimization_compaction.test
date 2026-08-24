@@ -38,7 +38,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.t;
 query II
 EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.t;
 ----
-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
+analyzed_plan	<REGEX>:.*(TABLE_SCAN|Table Scan).*
 
 # rewrite the deletes away
 statement ok
@@ -127,7 +127,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.partial;
 query II
 EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.partial;
 ----
-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
+analyzed_plan	<REGEX>:.*(TABLE_SCAN|Table Scan).*
 
 # ============================================
 # 4. Nested columns: scalar MIN/MAX still fold after a rewrite; nested column stays correct
@@ -200,4 +200,4 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.single_tx;
 query II
 EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.single_tx;
 ----
-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
+analyzed_plan	<REGEX>:.*(TABLE_SCAN|Table Scan).*

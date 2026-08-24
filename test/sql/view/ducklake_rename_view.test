@@ -10,6 +10,9 @@ test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
 
 test-env DATA_PATH __TEST_DIR__
 
+statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
+
 
 statement ok
 ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_rename_view_files')
@@ -28,6 +31,9 @@ SELECT * FROM ducklake.v2
 # rename in a transaction
 statement ok
 BEGIN
+
+statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
 
 statement ok
 ALTER VIEW ducklake.v2 RENAME TO v3
@@ -53,6 +59,9 @@ SELECT * FROM ducklake.v2
 # rename a transaction-local view
 statement ok
 BEGIN
+
+statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
 
 statement ok
 CREATE VIEW ducklake.local_view AS SELECT 100

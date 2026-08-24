@@ -11,6 +11,9 @@ test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
 test-env DATA_PATH __TEST_DIR__
 
 statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
+
+statement ok
 ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_rename_files', METADATA_CATALOG 'ducklake_meta')
 
 statement ok
@@ -24,6 +27,9 @@ INSERT INTO tbl VALUES (999), (100);
 
 statement ok
 BEGIN TRANSACTION
+
+statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
 
 statement ok
 ALTER TABLE tbl RENAME TO tbl2

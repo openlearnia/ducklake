@@ -11,6 +11,9 @@ test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
 test-env DATA_PATH __TEST_DIR__
 
 statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
+
+statement ok
 ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/test_macro_transactions');
 
 statement ok
@@ -22,6 +25,9 @@ CREATE MACRO simple(a) AS a;
 
 statement ok
 BEGIN
+
+statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
 
 statement error
 CREATE MACRO simple(a) AS a;
@@ -63,6 +69,9 @@ CREATE MACRO test.simple(a) AS a;
 statement ok
 BEGIN
 
+statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
+
 statement error
 DROP schema test;
 ----
@@ -80,6 +89,9 @@ COMMIT
 # Create and drop macro in same transaction
 statement ok
 BEGIN
+
+statement ok
+SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
 
 statement error
 CREATE MACRO simple(a) AS a;

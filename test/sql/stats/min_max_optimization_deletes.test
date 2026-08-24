@@ -52,7 +52,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.big;
 query II
 EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.big;
 ----
-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
+analyzed_plan	<REGEX>:.*(TABLE_SCAN|Table Scan).*
 
 # ...but COUNT(*) is NOT regressed - it still folds from metadata
 query II
@@ -115,7 +115,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.small;
 query II
 EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.small;
 ----
-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
+analyzed_plan	<REGEX>:.*(TABLE_SCAN|Table Scan).*
 
 query II
 EXPLAIN ANALYZE SELECT COUNT(*) FROM ducklake.small;

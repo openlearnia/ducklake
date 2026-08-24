@@ -52,11 +52,14 @@ static void MetadataFunctionExecute(ClientContext &context, TableFunctionInput &
 		}
 
 		for (idx_t c = 0; c < entry.size(); c++) {
-			output.SetValue(c, count, entry[c]);
+			// Append updates both the value buffer and validity mask. Indexed
+			// writes leave metadata columns appearing NULL in projected
+			// expressions under DuckDB 2.0.
+			output.data[c].Append(entry[c]);
 		}
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetCardinalityUnsafe(count);
 }
 
 DuckLakeBaseMetadataFunction::DuckLakeBaseMetadataFunction(Identifier name_p, table_function_bind_t bind)

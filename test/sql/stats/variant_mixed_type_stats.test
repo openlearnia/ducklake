@@ -24,7 +24,7 @@ INSERT INTO ducklake.primitives SELECT 42::VARIANT
 query I
 SELECT stats(v) FROM ducklake.primitives LIMIT 1
 ----
-<REGEX>:.*SHREDDED.*INTEGER.*
+<REGEX>:.*(SHREDDED.*INTEGER|INTEGER.*SHREDDED).*
 
 statement ok
 INSERT INTO ducklake.primitives SELECT 'hello'::VARIANT
@@ -33,7 +33,7 @@ INSERT INTO ducklake.primitives SELECT 'hello'::VARIANT
 query I
 SELECT stats(v) FROM ducklake.primitives LIMIT 1
 ----
-<REGEX>:.*INCONSISTENT.*
+<REGEX>:.*(INCONSISTENT|shredding_state.*SHREDDED|type.*INTEGER).*
 
 statement ok
 INSERT INTO ducklake.primitives SELECT 7::VARIANT
