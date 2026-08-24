@@ -187,6 +187,32 @@ jobs:
           (package / "SHA256SUMS").write_text(
               "".join(f"{digest}  {name}\n" for name, digest in checksums.items())
           )
+          manifest = {
+              "schema_version": 1,
+              "generated_at": os.environ["BUILT_AT"],
+              "latest": {
+                  "duckdb_version": os.environ["DUCKDB_VERSION"],
+                  "duckdb_ref": os.environ["DUCKDB_REF"],
+                  "ducklake_ref": os.environ["GIT_SHA"],
+                  "platform": "linux_amd64",
+                  "repository_prefix": f"{os.environ['DUCKDB_VERSION']}/linux_amd64",
+                  "runtime": {
+                      "file": os.environ["DUCKDB_ARCHIVE"],
+                      "sha256": checksums[os.environ["DUCKDB_ARCHIVE"]],
+                  },
+                  "extensions": {
+                      name: {
+                          "file": f"{name}.duckdb_extension",
+                          "gzip_file": f"{name}.duckdb_extension.gz",
+                          "sha256": checksums[
+                              f"{name}-{os.environ['DUCKDB_VERSION']}-linux_amd64.duckdb_extension"
+                          ],
+                      }
+                      for name in ("ducklake", "httpfs", "postgres_scanner")
+                  },
+              },
+          }
+          (package / "artifacts.json").write_text(json.dumps(manifest, indent=2) + "\n")
           PY
           ls -lh grain-pkg/
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
@@ -228,6 +254,12 @@ jobs:
           export CLOUDFLARE_ACCOUNT_ID="$CF_ACCOUNT_ID"
           repo_dir="r2-extension-publish"
           mkdir -p "$repo_dir"
+          cp grain-pkg/artifacts.json "$repo_dir/artifacts.json"
+          npx --yes wrangler@4.76.0 r2 object put \
+            "openlearnia-duckdb-extensions/artifacts.json" \
+            --file "$repo_dir/artifacts.json" --remote
+          curl --fail --silent --show-error \
+            "$EXTENSION_REPOSITORY_URL/artifacts.json" | python3 -m json.tool >/dev/null
           for name in ducklake httpfs postgres_scanner; do
             source="grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
             plain="$repo_dir/${name}.duckdb_extension"
@@ -278,5 +310,6 @@ jobs:
             grain-pkg/*-${{ needs.get-duckdb-version.outputs.duckdb_version }}-linux_amd64.duckdb_extension
             grain-pkg/duckdb-*-linux_amd64.tar.gz
             grain-pkg/build-info.json
+            grain-pkg/artifacts.json
             grain-pkg/SHA256SUMS
           fail_on_unmatched_files: true

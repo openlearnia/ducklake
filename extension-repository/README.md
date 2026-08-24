@@ -34,6 +34,15 @@ wrangler deploy
 Upload release assets with the filenames shown above. Keep the exact DuckDB
 version, platform, and fork commit together; extension binaries are ABI-bound.
 
+The publish workflow also writes a root manifest at
+`/artifacts.json`. It describes the latest ABI-locked bundle and its R2 object
+paths, including SHA-256 values for the runtime and extensions. The manifest is
+short-cacheable (60 seconds); versioned extension objects remain immutable.
+
+```sh
+curl https://extensions.openlearnia.com/artifacts.json
+```
+
 Clients install from the Worker URL:
 
 ```sql

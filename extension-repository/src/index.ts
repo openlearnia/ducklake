@@ -51,7 +51,10 @@ export default {
 
 		const headers = corsHeaders();
 		headers.set("Accept-Ranges", "bytes");
-		headers.set("Cache-Control", "public, max-age=31536000, immutable");
+		headers.set(
+			"Cache-Control",
+			key === "artifacts.json" ? "public, max-age=60, must-revalidate" : "public, max-age=31536000, immutable",
+		);
 		headers.set("Content-Type", object.httpMetadata?.contentType ?? contentType(key));
 		headers.set("Content-Length", String(object.size));
 		headers.set("ETag", object.etag);
