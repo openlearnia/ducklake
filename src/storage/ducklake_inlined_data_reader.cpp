@@ -220,6 +220,31 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 				}
 				if (chunk.data[c].GetType() != scan_chunk.data[column_id].GetType()) {
 					// type was changed, we gotta cast the data
+					if (chunk.data[c].GetType().id() == LogicalTypeId::STRUCT &&
+					    scan_chunk.data[column_id].GetType().id() == LogicalTypeId::STRUCT) {
+						bool has_common_member = false;
+						for (auto &target_child : StructType::GetChildTypes(chunk.data[c].GetType())) {
+							for (auto &source_child :
+							     StructType::GetChildTypes(scan_chunk.data[column_id].GetType())) {
+								if (StringUtil::CIEquals(target_child.first.GetIdentifierName(),
+								                       source_child.first.GetIdentifierName())) {
+									has_common_member = true;
+									break;
+								}
+							}
+							if (has_common_member) {
+								break;
+							}
+						}
+						if (!has_common_member) {
+							child_list_t<Value> defaults;
+							for (auto &target_child : StructType::GetChildTypes(chunk.data[c].GetType())) {
+								defaults.emplace_back(target_child.first, Value(target_child.second));
+							}
+							chunk.data[c].Reference(Value::STRUCT(std::move(defaults)), count_t(scan_chunk.size()));
+							break;
+						}
+					}
 					VectorOperations::Cast(context, scan_chunk.data[column_id], chunk.data[c], scan_chunk.size());
 				} else {
 					chunk.data[c].Reference(scan_chunk.data[column_id]);
