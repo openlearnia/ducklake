@@ -1,0 +1,27 @@
+# name: test/sql/materialized_view/native_materialized_view_refresh_history.test
+# description: native DuckDB materialized view refresh history persists successful refreshes
+# group: [materialized_view]
+
+statement ok
+CREATE TABLE base(id INTEGER, value INTEGER)
+
+statement ok
+INSERT INTO base VALUES (1, 10)
+
+statement ok
+CREATE MATERIALIZED VIEW mv AS SELECT sum(value) AS total FROM base
+
+statement ok
+INSERT INTO base VALUES (2, 20)
+
+statement ok
+REFRESH MATERIALIZED VIEW mv
+
+query TTT
+SELECT refresh_mode, refresh_time IS NOT NULL, refresh_ordinal > 0
+FROM duckdb_materialized_view_refresh_history()
+WHERE view_name = 'mv'
+ORDER BY refresh_ordinal
+----
+full	true	true
+delta	true	true

@@ -1,0 +1,33 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_refresh_history.test
+# description: DuckLake materialized view refresh history persists successful refreshes
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_refresh_history.db' AS ducklake (DATA_PATH '{TEST_DIR}/mv_refresh_history_files')
+
+statement ok
+CREATE TABLE ducklake.base AS SELECT 1 AS id, 10 AS value
+
+statement ok
+CREATE MATERIALIZED VIEW ducklake.mv AS SELECT sum(value) AS total FROM ducklake.base
+
+statement ok
+INSERT INTO ducklake.base VALUES (2, 20)
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+----
+full
+
+query TTTI
+SELECT refresh_mode, rows_refreshed, refresh_snapshot > 0, refresh_time IS NOT NULL
+FROM ducklake_materialized_view_refresh_history('ducklake')
+WHERE view_name = 'mv'
+ORDER BY refresh_snapshot
+----
+full	1	true	true
+full	1	true	true

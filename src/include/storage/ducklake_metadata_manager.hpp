@@ -254,7 +254,8 @@ public:
 	//! Materialized view metadata. New views insert with begin_snapshot={SNAPSHOT_ID}; refreshes stamp
 	//! last_refreshed_snapshot={SNAPSHOT_ID}; drops end-snapshot the view and its dependency rows.
 	static string WriteNewMaterializedViews(const vector<DuckLakeMaterializedViewInfo> &new_views);
-	static string UpdateMaterializedViewRefreshes(const set<TableIndex> &refreshed_views);
+	static string UpdateMaterializedViewRefreshes(const vector<DuckLakeMaterializedViewRefreshInfo> &refreshed_views);
+	static string WriteMaterializedViewRefreshHistory(const vector<DuckLakeMaterializedViewRefreshInfo> &refreshes);
 	static string DropMaterializedViews(const set<TableIndex> &dropped_views);
 	//! Load the materialized view registry (views + dependencies) visible at the given snapshot.
 	vector<DuckLakeMaterializedViewInfo> LoadMaterializedViews(DuckLakeSnapshot snapshot);
@@ -384,6 +385,7 @@ public:
 	virtual void MigrateV03(bool allow_failures = false);
 	virtual void MigrateV04();
 	virtual void MigrateV05();
+	virtual void EnsureMaterializedViewRefreshHistoryTable();
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 

@@ -194,8 +194,8 @@ public:
 	set<TableIndex> dropped_views;
 	//! materialized views created in this transaction (staged; flushed after new tables so ids can be remapped)
 	vector<DuckLakeMaterializedViewInfo> new_materialized_views;
-	//! persisted materialized views whose last_refreshed_snapshot should be stamped with the commit snapshot
-	set<TableIndex> refreshed_materialized_views;
+	//! materialized view refreshes whose snapshot and history row are written at commit
+	vector<DuckLakeMaterializedViewRefreshInfo> refreshed_materialized_views;
 	//! persisted materialized views dropped in this transaction
 	set<TableIndex> dropped_materialized_views;
 	unordered_map<string, DataFileIndex> dropped_files;

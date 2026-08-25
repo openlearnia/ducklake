@@ -150,6 +150,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	DuckLakeMaterializedViewsFunction materialized_views;
 	loader.RegisterFunction(materialized_views);
 
+	DuckLakeMaterializedViewRefreshHistoryFunction materialized_view_refresh_history;
+	loader.RegisterFunction(materialized_view_refresh_history);
+
 	// Register ducklake_scan so it can be found during deserialization
 	auto ducklake_scan = DuckLakeFunctions::GetDuckLakeScanFunction(loader.GetDatabaseInstance());
 	loader.RegisterFunction(ducklake_scan);

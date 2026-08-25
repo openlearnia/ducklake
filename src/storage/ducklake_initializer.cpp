@@ -198,6 +198,7 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 				throw NotImplementedException(
 				    "Only DuckLake versions 0.1, 0.2, 0.3-dev1, 0.3, 0.4-dev1, 0.4, 1.0, 1.1 are supported");
 			}
+			metadata_manager.EnsureMaterializedViewRefreshHistoryTable();
 		}
 		if (tag.key == "data_path") {
 			if (options.data_path.empty()) {

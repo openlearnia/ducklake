@@ -244,8 +244,8 @@ public:
 	void DropView(DuckLakeViewEntry &view);
 	//! Stage a materialized view created in this transaction (flushed after new tables are remapped)
 	void CreateMaterializedView(DuckLakeMaterializedViewInfo info);
-	//! Stage a refresh of a materialized view - stamps last_refreshed_snapshot at commit
-	void RefreshMaterializedView(TableIndex view_id);
+	//! Stage a refresh of a materialized view - stamps current state and appends history at commit
+	void RefreshMaterializedView(TableIndex view_id, const string &refresh_mode, idx_t rows_refreshed);
 	//! Stage a materialized view drop - end-snapshots the view + dependencies at commit
 	void DropMaterializedView(TableIndex view_id);
 	//! Materialized views created in this transaction (not yet persisted)

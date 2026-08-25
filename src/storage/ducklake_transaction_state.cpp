@@ -1482,7 +1482,11 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 
 	// stamp refreshes of persisted materialized views with the commit snapshot
 	if (!refreshed_materialized_views.empty()) {
+		for (auto &refresh : refreshed_materialized_views) {
+			commit_state.RemapIdentifier(refresh.view_id);
+		}
 		batch_queries += DuckLakeMetadataManager::UpdateMaterializedViewRefreshes(refreshed_materialized_views);
+		batch_queries += DuckLakeMetadataManager::WriteMaterializedViewRefreshHistory(refreshed_materialized_views);
 	}
 
 	if (!new_scalar_macros.empty() || !new_table_macros.empty()) {

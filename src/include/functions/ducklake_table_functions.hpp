@@ -160,4 +160,9 @@ public:
 	DuckLakeMaterializedViewsFunction();
 };
 
+class DuckLakeMaterializedViewRefreshHistoryFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeMaterializedViewRefreshHistoryFunction();
+};
+
 } // namespace duckdb

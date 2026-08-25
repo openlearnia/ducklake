@@ -510,9 +510,10 @@ class DuckLakeMVRefresh : public PhysicalOperator {
 public:
 	DuckLakeMVRefresh(PhysicalPlan &physical_plan, const vector<LogicalType> &types, DuckLakeTableEntry &table_p,
 	                  TableIndex mv_view_id_p, string encryption_key_p, optional_idx partition_id_p,
-	                  PhysicalOperator &child)
+	                  string refresh_mode_p, PhysicalOperator &child)
 	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 0), table(table_p),
-	      mv_view_id(mv_view_id_p), encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p) {
+	      mv_view_id(mv_view_id_p), encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
+	      refresh_mode(std::move(refresh_mode_p)) {
 		children.push_back(child);
 	}
 
@@ -520,6 +521,7 @@ public:
 	TableIndex mv_view_id;
 	string encryption_key;
 	optional_idx partition_id;
+	string refresh_mode;
 
 public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
@@ -594,7 +596,7 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 		}
 		transaction.AppendFiles(table_id, std::move(global_state.written_files));
 		// stamp last_refreshed_snapshot on the materialized view at commit
-		transaction.RefreshMaterializedView(mv_view_id);
+		transaction.RefreshMaterializedView(mv_view_id, refresh_mode, global_state.rows_flushed);
 		return SinkFinalizeType::READY;
 	}
 
@@ -614,9 +616,10 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 class DuckLakeLogicalMVRefresh : public LogicalExtensionOperator {
 public:
 	DuckLakeLogicalMVRefresh(TableIndex table_index_p, DuckLakeTableEntry &table_p, TableIndex mv_view_id_p,
-	                         string encryption_key_p, optional_idx partition_id_p)
+	                         string encryption_key_p, optional_idx partition_id_p, string refresh_mode_p)
 	    : table_index(table_index_p), table(table_p), mv_view_id(mv_view_id_p),
-	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p) {
+	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
+	      refresh_mode(std::move(refresh_mode_p)) {
 	}
 
 	TableIndex table_index;
@@ -624,12 +627,13 @@ public:
 	TableIndex mv_view_id;
 	string encryption_key;
 	optional_idx partition_id;
+	string refresh_mode;
 
 public:
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
 		auto &child = planner.CreatePlan(*children[0]);
 		return planner.Make<DuckLakeMVRefresh>(types, table, mv_view_id, std::move(encryption_key), partition_id,
-		                                       child);
+		                                       std::move(refresh_mode), child);
 	}
 
 	string GetName() const override {
@@ -704,7 +708,7 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 
 	TableIndex mv_index = binder.GenerateTableIndex();
 	auto mv_op = make_uniq<DuckLakeLogicalMVRefresh>(mv_index, table, mv_view_id, std::move(copy_input.encryption_key),
-	                                                 optional_idx());
+	                                                 optional_idx(), refresh_mode);
 	mv_op->children.push_back(std::move(copy));
 	mv_op->ResolveOperatorTypes();
 
@@ -1765,6 +1769,48 @@ static unique_ptr<FunctionData> MaterializedViewsBind(ClientContext &context, Ta
 
 DuckLakeMaterializedViewsFunction::DuckLakeMaterializedViewsFunction()
     : DuckLakeBaseMetadataFunction("ducklake_materialized_views", MaterializedViewsBind) {
+}
+
+static unique_ptr<FunctionData> MaterializedViewRefreshHistoryBind(ClientContext &context,
+                                                                    TableFunctionBindInput &input,
+                                                                    vector<LogicalType> &return_types,
+                                                                    vector<Identifier> &names) {
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
+	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	auto result = make_uniq<MetadataBindData>();
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::TIMESTAMP,
+	                LogicalType::VARCHAR, LogicalType::BIGINT};
+	names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_snapshot"),
+	         Identifier("refresh_time"), Identifier("refresh_mode"), Identifier("rows_refreshed")};
+
+	string query = R"(
+SELECT s.schema_name, v.view_name, h.refresh_snapshot, h.refresh_time, h.refresh_mode, h.rows_refreshed
+FROM {METADATA_CATALOG}.ducklake_materialized_view_refresh_history h
+JOIN {METADATA_CATALOG}.ducklake_materialized_view v ON h.view_id = v.view_id
+JOIN {METADATA_CATALOG}.ducklake_schema s ON v.schema_id = s.schema_id
+WHERE {SNAPSHOT_ID} >= v.begin_snapshot
+  AND ({SNAPSHOT_ID} < v.end_snapshot OR v.end_snapshot IS NULL)
+ORDER BY h.refresh_snapshot, h.view_id)";
+	auto query_result = transaction.GetMetadataManager().Query(transaction.GetSnapshot(), query);
+	if (query_result->HasError()) {
+		query_result->GetErrorObject().Throw("Failed to read DuckLake materialized view refresh history: ");
+	}
+	for (auto &row : *query_result) {
+		result->rows.emplace_back(vector<Value> {
+		    Value(row.GetValue<string>(0)),
+		    Value(row.GetValue<string>(1)),
+		    Value::BIGINT(NumericCast<int64_t>(row.GetValue<idx_t>(2))),
+		    Value::TIMESTAMP(row.GetValue<timestamp_t>(3)),
+		    Value(row.GetValue<string>(4)),
+		    Value::BIGINT(NumericCast<int64_t>(row.GetValue<idx_t>(5))),
+		});
+	}
+	return std::move(result);
+}
+
+DuckLakeMaterializedViewRefreshHistoryFunction::DuckLakeMaterializedViewRefreshHistoryFunction()
+    : DuckLakeBaseMetadataFunction("ducklake_materialized_view_refresh_history", MaterializedViewRefreshHistoryBind) {
 }
 
 } // namespace duckdb

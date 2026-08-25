@@ -324,6 +324,12 @@ struct DuckLakeViewInfo {
 	vector<DuckLakeTag> tags;
 };
 
+struct DuckLakeMaterializedViewRefreshInfo {
+	TableIndex view_id;
+	string refresh_mode;
+	idx_t rows_refreshed = 0;
+};
+
 struct DuckLakeMaterializedViewInfo {
 	//! id of the materialized view (allocated from the same catalog-id space as tables/views)
 	TableIndex id;
