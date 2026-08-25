@@ -357,7 +357,7 @@ key-aware diff.
 2. Confirm skip path writes nothing.
 3. Publish a preview build containing the implementation so ATTACH catalogs migrate and the table function resolves.
 4. Add brief user-facing note under DuckLake MV docs: how to query history.
-5. Add a key-aware logical-diff provider before populating `rows_added`, `rows_removed`, or `rows_changed`; until then those fields are deliberately NULL rather than inferred from file replacement.
+5. Use a key-aware logical-diff provider when the MV result has a stable identity. The current providers recognize `GROUP BY` output columns as the row key and compare the previous result with the candidate result using null-safe equality. Keyless or otherwise unsupported MVs continue to report NULL rather than inferring logical changes from file replacement.
 
 ---
 

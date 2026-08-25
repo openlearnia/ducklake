@@ -13,15 +13,54 @@ statement ok
 CREATE TABLE ducklake.base AS SELECT 1 AS id, 10 AS value
 
 statement ok
-CREATE MATERIALIZED VIEW ducklake.mv AS SELECT sum(value) AS total FROM ducklake.base
+INSERT INTO ducklake.base VALUES (2, 20)
 
 statement ok
-INSERT INTO ducklake.base VALUES (2, 20)
+CREATE MATERIALIZED VIEW ducklake.mv AS
+SELECT id, sum(value) AS total FROM ducklake.base GROUP BY id
+
+query III
+SELECT rows_added, rows_removed, rows_changed
+FROM ducklake_materialized_view_refresh_history('ducklake')
+WHERE view_name = 'mv'
+ORDER BY refresh_snapshot
+LIMIT 1
+----
+2	0	0
+
+statement ok
+INSERT INTO ducklake.base VALUES (1, 15), (3, 30)
 
 query T
 SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
 ----
-full
+incremental
+
+query III
+SELECT rows_added, rows_removed, rows_changed
+FROM ducklake_materialized_view_refresh_history('ducklake')
+WHERE view_name = 'mv'
+ORDER BY refresh_snapshot DESC
+LIMIT 1
+----
+1	0	1
+
+statement ok
+DELETE FROM ducklake.base WHERE id = 2
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+----
+incremental
+
+query III
+SELECT rows_added, rows_removed, rows_changed
+FROM ducklake_materialized_view_refresh_history('ducklake')
+WHERE view_name = 'mv'
+ORDER BY refresh_snapshot DESC
+LIMIT 1
+----
+0	1	0
 
 query TTTI
 SELECT refresh_mode, rows_refreshed, refresh_snapshot > 0, refresh_time IS NOT NULL
@@ -29,15 +68,16 @@ FROM ducklake_materialized_view_refresh_history('ducklake')
 WHERE view_name = 'mv'
 ORDER BY refresh_snapshot
 ----
-full	1	true	true
-full	1	true	true
+full	2	true	true
+incremental	3	true	true
+incremental	2	true	true
 
 query TTTTTTTT
 SELECT refresh_duration_ms >= 0,
        rows_written = rows_refreshed,
-       rows_added IS NULL,
-       rows_removed IS NULL,
-       rows_changed IS NULL,
+       rows_added >= 0,
+       rows_removed >= 0,
+       rows_changed >= 0,
        source_snapshot > 0,
        source_snapshot_time IS NOT NULL,
        lag_ms >= 0

@@ -71,6 +71,11 @@ static string SQLIdentifier(const Identifier &input) {
 	return SQLIdentifier(input.GetIdentifierName());
 }
 
+static string MaterializedViewReference(DuckLakeCatalog &catalog, const string &schema_name, const string &view_name) {
+	return StringUtil::Format("%s.%s.%s", SQLIdentifier(catalog.GetName()), SQLIdentifier(schema_name),
+	                         SQLIdentifier(view_name));
+}
+
 static unique_ptr<SelectStatement> ParseSingleSelect(const string &sql, const string &context) {
 	Parser parser;
 	parser.ParseQuery(sql);
@@ -83,6 +88,76 @@ static unique_ptr<SelectStatement> ParseSingleSelect(const string &sql, const st
 //! Substitute the {DUCKLAKE_CATALOG} placeholder with the attached catalog name
 static string ResolveMaterializedViewSQL(const string &stored_sql, Catalog &catalog) {
 	return DuckLakeUtil::ReplaceSkippingQuotes(stored_sql, "{DUCKLAKE_CATALOG}.", catalog.GetName() + ".");
+}
+
+//! Build a logical row diff for grouped materialized views. The GROUP BY output columns are
+//! the stable row identity; all remaining output columns participate in changed-row detection.
+static string BuildLogicalDiffSQL(const string &old_relation, const string &candidate_sql,
+                                  const vector<Identifier> &column_names, const vector<idx_t> &key_positions) {
+	if (key_positions.empty()) {
+		return string();
+	}
+
+	string columns;
+	for (idx_t i = 0; i < column_names.size(); i++) {
+		if (i > 0) {
+			columns += ", ";
+		}
+		columns += SQLIdentifier(column_names[i]);
+	}
+	string old_select;
+	if (old_relation.empty()) {
+		// A newly-created MV has no previous relation in the catalog yet. Reuse the
+		// candidate only to obtain the output schema, then force the old side empty.
+		old_select = StringUtil::Format("SELECT %s, TRUE AS __present FROM (%s) AS __empty_old WHERE FALSE",
+		                              columns, candidate_sql);
+	} else {
+		old_select = StringUtil::Format("SELECT %s, TRUE AS __present FROM %s", columns, old_relation);
+	}
+	string new_select = StringUtil::Format("SELECT %s, TRUE AS __present FROM (%s) AS __candidate", columns, candidate_sql);
+
+	string join_condition;
+	for (auto key_position : key_positions) {
+		if (!join_condition.empty()) {
+			join_condition += " AND ";
+		}
+		join_condition += StringUtil::Format("__old.%s IS NOT DISTINCT FROM __new.%s",
+		                                    SQLIdentifier(column_names[key_position]),
+		                                    SQLIdentifier(column_names[key_position]));
+	}
+
+	string changed_condition;
+	for (idx_t i = 0; i < column_names.size(); i++) {
+		bool is_key = false;
+		for (auto key_position : key_positions) {
+			if (key_position == i) {
+				is_key = true;
+				break;
+			}
+		}
+		if (is_key) {
+			continue;
+		}
+		if (!changed_condition.empty()) {
+			changed_condition += " OR ";
+		}
+		changed_condition += StringUtil::Format("NOT (__old.%s IS NOT DISTINCT FROM __new.%s)",
+		                                      SQLIdentifier(column_names[i]), SQLIdentifier(column_names[i]));
+	}
+	if (changed_condition.empty()) {
+		changed_condition = "FALSE";
+	}
+
+	return StringUtil::Format(R"(
+WITH __old AS (%s),
+__new AS (%s)
+SELECT count(*) FILTER (WHERE __old.__present IS NULL) AS rows_added,
+       count(*) FILTER (WHERE __new.__present IS NULL) AS rows_removed,
+       count(*) FILTER (WHERE __old.__present IS NOT NULL AND __new.__present IS NOT NULL
+                         AND (%s)) AS rows_changed
+FROM __old FULL OUTER JOIN __new ON %s
+)",
+	                          old_select, new_select, changed_condition, join_condition);
 }
 
 //===--------------------------------------------------------------------===//
@@ -532,10 +607,11 @@ class DuckLakeMVRefresh : public PhysicalOperator {
 public:
 	DuckLakeMVRefresh(PhysicalPlan &physical_plan, const vector<LogicalType> &types, DuckLakeTableEntry &table_p,
 	                  TableIndex mv_view_id_p, string encryption_key_p, optional_idx partition_id_p,
-	                  string refresh_mode_p, PhysicalOperator &child)
+	                  string refresh_mode_p, string logical_diff_sql_p, PhysicalOperator &child)
 	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 0), table(table_p),
 	      mv_view_id(mv_view_id_p), encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
-	      refresh_mode(std::move(refresh_mode_p)), refresh_start_ms(RefreshClockMillis()) {
+	      refresh_mode(std::move(refresh_mode_p)), logical_diff_sql(std::move(logical_diff_sql_p)),
+	      refresh_start_ms(RefreshClockMillis()) {
 		children.push_back(child);
 	}
 
@@ -544,6 +620,7 @@ public:
 	string encryption_key;
 	optional_idx partition_id;
 	string refresh_mode;
+	string logical_diff_sql;
 	idx_t refresh_start_ms;
 
 public:
@@ -613,18 +690,30 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 			}
 		}
 
-		// Record the refresh stats before moving the files into the transaction. Logical
-		// row diffs are intentionally left NULL until a key-aware diff is available;
-		// retired backing-file rows are not equivalent to logical removals.
+		// Compute logical row diffs before retiring the old backing files. Physical file
+		// replacement is not equivalent to logical row replacement.
 		for (auto &file : global_state.written_files) {
 			global_state.rows_flushed += file.row_count;
 		}
-		transaction.AppendFiles(table_id, std::move(global_state.written_files));
 		DuckLakeMaterializedViewRefreshInfo refresh;
 		refresh.view_id = mv_view_id;
 		refresh.refresh_mode = refresh_mode;
 		refresh.rows_refreshed = global_state.rows_flushed;
 		refresh.refresh_duration_ms = RefreshClockMillis() - refresh_start_ms;
+		if (!logical_diff_sql.empty()) {
+			auto diff_result = transaction.Query(snapshot, logical_diff_sql);
+			if (diff_result->HasError()) {
+				diff_result->GetErrorObject().Throw("Failed to compute materialized view logical refresh diff: ");
+			}
+			auto &diff = diff_result->Cast<MaterializedQueryResult>();
+			if (diff.RowCount() != 1 || diff.ColumnCount() != 3) {
+				throw InternalException("Materialized view logical refresh diff returned an unexpected shape");
+			}
+			refresh.rows_added = NumericCast<idx_t>(diff.GetValue(0, 0).GetValue<int64_t>());
+			refresh.rows_removed = NumericCast<idx_t>(diff.GetValue(1, 0).GetValue<int64_t>());
+			refresh.rows_changed = NumericCast<idx_t>(diff.GetValue(2, 0).GetValue<int64_t>());
+		}
+		transaction.AppendFiles(table_id, std::move(global_state.written_files));
 		refresh.source_snapshot = snapshot.snapshot_id;
 		timestamp_tz_t source_time;
 		if (GetSnapshotTime(transaction, snapshot, source_time)) {
@@ -656,10 +745,11 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 class DuckLakeLogicalMVRefresh : public LogicalExtensionOperator {
 public:
 	DuckLakeLogicalMVRefresh(TableIndex table_index_p, DuckLakeTableEntry &table_p, TableIndex mv_view_id_p,
-	                         string encryption_key_p, optional_idx partition_id_p, string refresh_mode_p)
+	                         string encryption_key_p, optional_idx partition_id_p, string refresh_mode_p,
+	                         string logical_diff_sql_p)
 	    : table_index(table_index_p), table(table_p), mv_view_id(mv_view_id_p),
 	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
-	      refresh_mode(std::move(refresh_mode_p)) {
+	      refresh_mode(std::move(refresh_mode_p)), logical_diff_sql(std::move(logical_diff_sql_p)) {
 	}
 
 	TableIndex table_index;
@@ -668,12 +758,13 @@ public:
 	string encryption_key;
 	optional_idx partition_id;
 	string refresh_mode;
+	string logical_diff_sql;
 
 public:
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
 		auto &child = planner.CreatePlan(*children[0]);
 		return planner.Make<DuckLakeMVRefresh>(types, table, mv_view_id, std::move(encryption_key), partition_id,
-		                                       std::move(refresh_mode), child);
+	                                       std::move(refresh_mode), std::move(logical_diff_sql), child);
 	}
 
 	string GetName() const override {
@@ -708,7 +799,7 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
                                                     unique_ptr<LogicalOperator> plan, DuckLakeTableEntry &table,
                                                     TableIndex mv_view_id, const string &schema_name,
                                                     const string &view_name, const string &refresh_mode,
-                                                    vector<Identifier> &return_names) {
+                                                    const string &logical_diff_sql, vector<Identifier> &return_names) {
 	plan->ResolveOperatorTypes();
 	if (DuckLakeTypes::RequiresCast(plan->types)) {
 		plan = DuckLakeInsert::InsertCasts(binder, plan);
@@ -748,7 +839,7 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 
 	TableIndex mv_index = binder.GenerateTableIndex();
 	auto mv_op = make_uniq<DuckLakeLogicalMVRefresh>(mv_index, table, mv_view_id, std::move(copy_input.encryption_key),
-	                                                 optional_idx(), refresh_mode);
+	                                                 optional_idx(), refresh_mode, logical_diff_sql);
 	mv_op->children.push_back(std::move(copy));
 	mv_op->ResolveOperatorTypes();
 
@@ -892,6 +983,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	auto query = StringValue::Get(input.named_parameters["query"]);
 
 	auto statement = ParseSingleSelect(query, "definition");
+	auto analysis = AnalyzeMaterializedView(*statement);
 
 	// qualify base refs with the lake catalog + resolve dependencies
 	vector<TableIndex> dependencies;
@@ -990,8 +1082,12 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 
 	// write the initial content: definition plan -> files -> refresh operator
 	auto plan = std::move(bound.plan);
+	auto logical_diff_sql = BuildLogicalDiffSQL(
+	    string(),
+	    ResolveMaterializedViewSQL(stored_sql, ducklake_catalog), bound.names, analysis.key_positions);
 	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(plan), table,
-	                        transaction.GetNewMaterializedViews().back().id, schema, view_name, "full", return_names);
+	                        transaction.GetNewMaterializedViews().back().id, schema, view_name, "full",
+	                        logical_diff_sql, return_names);
 }
 
 DuckLakeCreateMaterializedViewFunction::DuckLakeCreateMaterializedViewFunction()
@@ -1633,9 +1729,12 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 				auto bound = binder->Bind(sql_statement);
 				auto join_sql = BuildJoinIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 				                                               last_refreshed + 1, current_snapshot);
-				auto join_plan = BindDefinitionPlan(*input.binder, context, join_sql, "join-incremental refresh");
+					auto join_plan = BindDefinitionPlan(*input.binder, context, join_sql, "join-incremental refresh");
+				auto logical_diff_sql = BuildLogicalDiffSQL(
+				    MaterializedViewReference(ducklake_catalog, schema, view_name), join_sql, bound.names,
+				    analysis.key_positions);
 				return BuildMVWritePlan(context, *input.binder, bind_index, std::move(join_plan), table, mv->id, schema,
-				                        view_name, "join_incremental", return_names);
+				                        view_name, "join_incremental", logical_diff_sql, return_names);
 			}
 		}
 	}
@@ -1659,21 +1758,30 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 			auto delta_sql = BuildDeltaRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names, bound.types,
 			                                      last_refreshed + 1, current_snapshot);
 			auto delta_plan = BindDefinitionPlan(*input.binder, context, delta_sql, "delta refresh");
+			auto logical_diff_sql = BuildLogicalDiffSQL(
+			    MaterializedViewReference(ducklake_catalog, schema, view_name), delta_sql, bound.names,
+			    analysis.key_positions);
 			return BuildMVWritePlan(context, *input.binder, bind_index, std::move(delta_plan), table, mv->id, schema,
-			                        view_name, "delta", return_names);
+			                        view_name, "delta", logical_diff_sql, return_names);
 		}
 		auto incremental_sql = BuildIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 		                                                  last_refreshed + 1, current_snapshot);
 		auto incremental_plan = BindDefinitionPlan(*input.binder, context, incremental_sql, "incremental refresh");
+		auto logical_diff_sql = BuildLogicalDiffSQL(
+		    MaterializedViewReference(ducklake_catalog, schema, view_name), incremental_sql, bound.names,
+		    analysis.key_positions);
 		return BuildMVWritePlan(context, *input.binder, bind_index, std::move(incremental_plan), table, mv->id, schema,
-		                        view_name, "incremental", return_names);
+		                        view_name, "incremental", logical_diff_sql, return_names);
 	}
 
 	auto binder = Binder::CreateBinder(context, input.binder);
 	auto &sql_statement = static_cast<SQLStatement &>(*parsed_definition);
 	auto bound = binder->Bind(sql_statement);
+	auto logical_diff_sql = BuildLogicalDiffSQL(
+	    MaterializedViewReference(ducklake_catalog, schema, view_name), resolved_sql, bound.names,
+	    analysis.key_positions);
 	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), table, mv->id, schema,
-	                        view_name, "full", return_names);
+	                        view_name, "full", logical_diff_sql, return_names);
 }
 
 DuckLakeRefreshMaterializedViewFunction::DuckLakeRefreshMaterializedViewFunction()
