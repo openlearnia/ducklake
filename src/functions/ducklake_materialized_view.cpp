@@ -9,6 +9,7 @@
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
@@ -508,6 +509,17 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 
 	// map group keys onto select list positions
 	for (auto &group : groups) {
+		if (group->GetExpressionClass() == ExpressionClass::CONSTANT) {
+			auto &constant = group->Cast<const ConstantExpression>();
+			if (constant.GetValue().type().IsIntegral()) {
+				auto select_index = constant.GetValue().GetValue<int64_t>();
+				if (select_index >= 1 && NumericCast<idx_t>(select_index) <= node.select_list.size()) {
+					result.key_positions.push_back(NumericCast<idx_t>(select_index - 1));
+					result.key_expr_sql.push_back(node.select_list[NumericCast<idx_t>(select_index - 1)]->ToString());
+					continue;
+				}
+			}
+		}
 		string group_sql = group->ToString();
 		bool found = false;
 		for (idx_t i = 0; i < node.select_list.size(); i++) {

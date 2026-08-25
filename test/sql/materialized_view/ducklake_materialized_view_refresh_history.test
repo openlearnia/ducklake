@@ -17,7 +17,7 @@ INSERT INTO ducklake.base VALUES (2, 20)
 
 statement ok
 CREATE MATERIALIZED VIEW ducklake.mv AS
-SELECT id, sum(value) AS total FROM ducklake.base GROUP BY id
+SELECT id, sum(value) AS total FROM ducklake.base GROUP BY 1
 
 query III
 SELECT rows_added, rows_removed, rows_changed
