@@ -641,11 +641,12 @@ WHERE table_id = %d)",
 }
 
 vector<DuckLakeInlinedTableInfo> DuckLakeMetadataManager::GetInlinedDataTablesForTable(TableIndex table_id) {
-	auto result = Query(StringUtil::Format(R"(
+	auto query = StringUtil::Format(R"(
 SELECT table_name, schema_version
 FROM {METADATA_CATALOG}.ducklake_inlined_data_tables
 WHERE table_id = %d)",
-	                                       table_id.index));
+	                                       table_id.index);
+	auto result = Query(query);
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to read inlined data tables from DuckLake: ");
 	}
