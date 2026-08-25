@@ -216,7 +216,7 @@ CREATE TABLE {METADATA_CATALOG}.ducklake_table(table_id BIGINT, table_uuid UUID,
 CREATE TABLE {METADATA_CATALOG}.ducklake_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, column_aliases VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view_dependency(view_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT);
-CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history(view_id BIGINT, refresh_snapshot BIGINT, refresh_time TIMESTAMPTZ, refresh_mode VARCHAR, rows_refreshed BIGINT);
+CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history(view_id BIGINT, refresh_snapshot BIGINT, refresh_time TIMESTAMPTZ, refresh_mode VARCHAR, rows_refreshed BIGINT, refresh_duration_ms BIGINT, rows_written BIGINT, rows_added BIGINT, rows_removed BIGINT, rows_changed BIGINT, source_snapshot BIGINT, source_snapshot_time TIMESTAMPTZ, lag_ms BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_tag(object_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, key VARCHAR, value VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_column_tag(table_id BIGINT, column_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, key VARCHAR, value VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_data_file(data_file_id BIGINT PRIMARY KEY, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, footer_size BIGINT, row_id_start BIGINT, partition_id BIGINT, encryption_key VARCHAR,  mapping_id BIGINT, partial_max BIGINT);
@@ -387,8 +387,25 @@ CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view_refresh
     refresh_snapshot BIGINT,
     refresh_time TIMESTAMPTZ,
     refresh_mode VARCHAR,
-    rows_refreshed BIGINT
+    rows_refreshed BIGINT,
+    refresh_duration_ms BIGINT,
+    rows_written BIGINT,
+    rows_added BIGINT,
+    rows_removed BIGINT,
+    rows_changed BIGINT,
+    source_snapshot BIGINT,
+    source_snapshot_time TIMESTAMPTZ,
+    lag_ms BIGINT
 );
+
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS refresh_duration_ms BIGINT;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS rows_written BIGINT;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS rows_added BIGINT;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS rows_removed BIGINT;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS rows_changed BIGINT;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS source_snapshot BIGINT;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS source_snapshot_time TIMESTAMPTZ;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS lag_ms BIGINT;
 	)");
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to create DuckLake materialized view refresh history: ");
@@ -3025,10 +3042,23 @@ string DuckLakeMetadataManager::WriteMaterializedViewRefreshHistory(
 		if (!values.empty()) {
 			values += ", ";
 		}
-		values += StringUtil::Format("(%d, {SNAPSHOT_ID}, NOW(), %s, %llu)", refresh.view_id.index,
-		                            SQLString(refresh.refresh_mode), refresh.rows_refreshed);
+		auto optional_value = [](optional_idx value) {
+			return value.IsValid() ? to_string(value.GetIndex()) : string("NULL");
+		};
+		string source_time = refresh.has_source_snapshot_time
+		                         ? Value::TIMESTAMPTZ(refresh.source_snapshot_time).ToSQLString()
+		                         : string("NULL");
+		values += StringUtil::Format(
+		    "(%d, {SNAPSHOT_ID}, NOW(), %s, %llu, %llu, %llu, %s, %s, %s, %s, %s, %s)", refresh.view_id.index,
+		    SQLString(refresh.refresh_mode), refresh.rows_refreshed, refresh.refresh_duration_ms,
+		    refresh.rows_refreshed, optional_value(refresh.rows_added), optional_value(refresh.rows_removed),
+		    optional_value(refresh.rows_changed), refresh.source_snapshot == DConstants::INVALID_INDEX
+		                                                   ? string("NULL")
+		                                                   : to_string(refresh.source_snapshot),
+		    source_time, optional_value(refresh.lag_ms));
 	}
-	return "INSERT INTO {METADATA_CATALOG}.ducklake_materialized_view_refresh_history VALUES " + values + ";";
+	return "INSERT INTO {METADATA_CATALOG}.ducklake_materialized_view_refresh_history(view_id, refresh_snapshot, refresh_time, refresh_mode, rows_refreshed, refresh_duration_ms, rows_written, rows_added, rows_removed, rows_changed, source_snapshot, source_snapshot_time, lag_ms) VALUES " +
+	       values + ";";
 }
 
 string DuckLakeMetadataManager::DropMaterializedViews(const set<TableIndex> &dropped_views) {

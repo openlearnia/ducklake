@@ -28,8 +28,30 @@
 #include "duckdb/common/types/uuid.hpp"
 #include "common/ducklake_util.hpp"
 #include "common/ducklake_types.hpp"
+#include <chrono>
 
 namespace duckdb {
+
+static idx_t RefreshClockMillis() {
+	return NumericCast<idx_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	                              std::chrono::steady_clock::now().time_since_epoch())
+	                              .count());
+}
+
+static bool GetSnapshotTime(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot, timestamp_tz_t &result) {
+	auto query = StringUtil::Format(
+	    "SELECT snapshot_time FROM {METADATA_CATALOG}.ducklake_snapshot WHERE snapshot_id=%llu", snapshot.snapshot_id);
+	auto rows = transaction.Query(snapshot, query);
+	if (rows->HasError()) {
+		return false;
+	}
+	auto &materialized = rows->Cast<MaterializedQueryResult>();
+	if (materialized.RowCount() == 0 || materialized.GetValue(0, 0).IsNull()) {
+		return false;
+	}
+	result = materialized.GetValue(0, 0).GetValue<timestamp_tz_t>();
+	return true;
+}
 
 //===--------------------------------------------------------------------===//
 // Helpers
@@ -513,7 +535,7 @@ public:
 	                  string refresh_mode_p, PhysicalOperator &child)
 	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 0), table(table_p),
 	      mv_view_id(mv_view_id_p), encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
-	      refresh_mode(std::move(refresh_mode_p)) {
+	      refresh_mode(std::move(refresh_mode_p)), refresh_start_ms(RefreshClockMillis()) {
 		children.push_back(child);
 	}
 
@@ -522,6 +544,7 @@ public:
 	string encryption_key;
 	optional_idx partition_id;
 	string refresh_mode;
+	idx_t refresh_start_ms;
 
 public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
@@ -590,13 +613,30 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 			}
 		}
 
-		// record the refresh stats before moving the files into the transaction
+		// Record the refresh stats before moving the files into the transaction. Logical
+		// row diffs are intentionally left NULL until a key-aware diff is available;
+		// retired backing-file rows are not equivalent to logical removals.
 		for (auto &file : global_state.written_files) {
 			global_state.rows_flushed += file.row_count;
 		}
 		transaction.AppendFiles(table_id, std::move(global_state.written_files));
-		// stamp last_refreshed_snapshot on the materialized view at commit
-		transaction.RefreshMaterializedView(mv_view_id, refresh_mode, global_state.rows_flushed);
+		DuckLakeMaterializedViewRefreshInfo refresh;
+		refresh.view_id = mv_view_id;
+		refresh.refresh_mode = refresh_mode;
+		refresh.rows_refreshed = global_state.rows_flushed;
+		refresh.refresh_duration_ms = RefreshClockMillis() - refresh_start_ms;
+		refresh.source_snapshot = snapshot.snapshot_id;
+		timestamp_tz_t source_time;
+		if (GetSnapshotTime(transaction, snapshot, source_time)) {
+			refresh.source_snapshot_time = source_time;
+			refresh.has_source_snapshot_time = true;
+			auto now = Timestamp::GetCurrentTimestamp();
+			if (now.value >= source_time.value) {
+				refresh.lag_ms = NumericCast<idx_t>((now.value - source_time.value) / 1000);
+			}
+		}
+		// Stamp last_refreshed_snapshot and history at commit.
+		transaction.RefreshMaterializedView(std::move(refresh));
 		return SinkFinalizeType::READY;
 	}
 
@@ -1780,12 +1820,19 @@ static unique_ptr<FunctionData> MaterializedViewRefreshHistoryBind(ClientContext
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 	auto result = make_uniq<MetadataBindData>();
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::TIMESTAMP,
-	                LogicalType::VARCHAR, LogicalType::BIGINT};
+	                LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
+	                LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
+	                LogicalType::TIMESTAMP, LogicalType::BIGINT};
 	names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_snapshot"),
-	         Identifier("refresh_time"), Identifier("refresh_mode"), Identifier("rows_refreshed")};
+	         Identifier("refresh_time"), Identifier("refresh_mode"), Identifier("rows_refreshed"),
+	         Identifier("refresh_duration_ms"), Identifier("rows_written"), Identifier("rows_added"),
+	         Identifier("rows_removed"), Identifier("rows_changed"), Identifier("source_snapshot"),
+	         Identifier("source_snapshot_time"), Identifier("lag_ms")};
 
 	string query = R"(
-SELECT s.schema_name, v.view_name, h.refresh_snapshot, h.refresh_time, h.refresh_mode, h.rows_refreshed
+SELECT s.schema_name, v.view_name, h.refresh_snapshot, h.refresh_time, h.refresh_mode, h.rows_refreshed,
+       h.refresh_duration_ms, h.rows_written, h.rows_added, h.rows_removed, h.rows_changed,
+       h.source_snapshot, h.source_snapshot_time, h.lag_ms
 FROM {METADATA_CATALOG}.ducklake_materialized_view_refresh_history h
 JOIN {METADATA_CATALOG}.ducklake_materialized_view v ON h.view_id = v.view_id
 JOIN {METADATA_CATALOG}.ducklake_schema s ON v.schema_id = s.schema_id
@@ -1793,18 +1840,55 @@ WHERE {SNAPSHOT_ID} >= v.begin_snapshot
   AND ({SNAPSHOT_ID} < v.end_snapshot OR v.end_snapshot IS NULL)
 ORDER BY h.refresh_snapshot, h.view_id)";
 	auto query_result = transaction.GetMetadataManager().Query(transaction.GetSnapshot(), query);
+	bool extended_history = true;
 	if (query_result->HasError()) {
-		query_result->GetErrorObject().Throw("Failed to read DuckLake materialized view refresh history: ");
+		// A read-only attach of an older catalog cannot run the additive ALTER TABLE
+		// migration. Fall back to the original six-column contract and expose the
+		// new metrics as NULL instead of making history unreadable.
+		extended_history = false;
+		string fallback_query = R"(
+SELECT s.schema_name, v.view_name, h.refresh_snapshot, h.refresh_time, h.refresh_mode, h.rows_refreshed
+FROM {METADATA_CATALOG}.ducklake_materialized_view_refresh_history h
+JOIN {METADATA_CATALOG}.ducklake_materialized_view v ON h.view_id = v.view_id
+JOIN {METADATA_CATALOG}.ducklake_schema s ON v.schema_id = s.schema_id
+WHERE {SNAPSHOT_ID} >= v.begin_snapshot
+  AND ({SNAPSHOT_ID} < v.end_snapshot OR v.end_snapshot IS NULL)
+ORDER BY h.refresh_snapshot, h.view_id)";
+		query_result = transaction.GetMetadataManager().Query(transaction.GetSnapshot(), fallback_query);
+		if (query_result->HasError()) {
+			query_result->GetErrorObject().Throw("Failed to read DuckLake materialized view refresh history: ");
+		}
 	}
+	auto nullable_bigint = [](const Value &value) -> Value {
+		if (value.IsNull()) {
+			return Value();
+		}
+		return Value::BIGINT(NumericCast<int64_t>(value.GetValue<idx_t>()));
+	};
 	for (auto &row : *query_result) {
-		result->rows.emplace_back(vector<Value> {
+		vector<Value> values {
 		    Value(row.GetValue<string>(0)),
 		    Value(row.GetValue<string>(1)),
 		    Value::BIGINT(NumericCast<int64_t>(row.GetValue<idx_t>(2))),
 		    Value::TIMESTAMP(row.GetValue<timestamp_t>(3)),
 		    Value(row.GetValue<string>(4)),
 		    Value::BIGINT(NumericCast<int64_t>(row.GetValue<idx_t>(5))),
-		});
+		};
+		if (extended_history) {
+			values.emplace_back(nullable_bigint(row.GetChunk().GetValue(6, row.GetRowInChunk())));
+			values.emplace_back(nullable_bigint(row.GetChunk().GetValue(7, row.GetRowInChunk())));
+			values.emplace_back(nullable_bigint(row.GetChunk().GetValue(8, row.GetRowInChunk())));
+			values.emplace_back(nullable_bigint(row.GetChunk().GetValue(9, row.GetRowInChunk())));
+			values.emplace_back(nullable_bigint(row.GetChunk().GetValue(10, row.GetRowInChunk())));
+			values.emplace_back(nullable_bigint(row.GetChunk().GetValue(11, row.GetRowInChunk())));
+			values.emplace_back(row.IsNull(12) ? Value() : Value::TIMESTAMP(row.GetValue<timestamp_t>(12)));
+			values.emplace_back(nullable_bigint(row.GetChunk().GetValue(13, row.GetRowInChunk())));
+		} else {
+			for (idx_t i = 0; i < 8; i++) {
+				values.emplace_back(Value());
+			}
+		}
+		result->rows.emplace_back(std::move(values));
 	}
 	return std::move(result);
 }

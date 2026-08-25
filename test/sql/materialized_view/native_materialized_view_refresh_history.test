@@ -17,6 +17,9 @@ INSERT INTO base VALUES (2, 20)
 statement ok
 REFRESH MATERIALIZED VIEW mv
 
+statement ok
+CHECKPOINT
+
 query TTT
 SELECT refresh_mode, refresh_time IS NOT NULL, refresh_ordinal > 0
 FROM duckdb_materialized_view_refresh_history()
@@ -25,3 +28,18 @@ ORDER BY refresh_ordinal
 ----
 full	true	true
 delta	true	true
+
+query TTTTTTT
+SELECT refresh_duration_ms >= 0,
+       rows_written >= 0,
+       rows_added IS NULL,
+       rows_removed IS NULL,
+       rows_changed IS NULL,
+       source_snapshot_time IS NULL,
+       lag_ms IS NULL
+FROM duckdb_materialized_view_refresh_history()
+WHERE view_name = 'mv'
+ORDER BY refresh_ordinal DESC
+LIMIT 1
+----
+true	true	true	true	true	true	true

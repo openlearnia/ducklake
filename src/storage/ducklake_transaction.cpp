@@ -1824,23 +1824,19 @@ void DuckLakeTransaction::CreateMaterializedView(DuckLakeMaterializedViewInfo in
 	state->new_materialized_views.push_back(std::move(info));
 }
 
-void DuckLakeTransaction::RefreshMaterializedView(TableIndex view_id, const string &refresh_mode, idx_t rows_refreshed) {
+void DuckLakeTransaction::RefreshMaterializedView(DuckLakeMaterializedViewRefreshInfo refresh) {
 	auto stage_refresh = [&]() {
-		DuckLakeMaterializedViewRefreshInfo refresh;
-		refresh.view_id = view_id;
-		refresh.refresh_mode = refresh_mode;
-		refresh.rows_refreshed = rows_refreshed;
 		state->refreshed_materialized_views.push_back(std::move(refresh));
 	};
 	// refreshing a view created in this same transaction only updates the staged row
 	for (auto &info : state->new_materialized_views) {
-		if (info.id == view_id) {
+		if (info.id == refresh.view_id) {
 			info.pending_refresh_stamp = true;
 			stage_refresh();
 			return;
 		}
 	}
-	if (view_id.IsTransactionLocal()) {
+	if (refresh.view_id.IsTransactionLocal()) {
 		throw InternalException("Refreshing a materialized view with a transaction local id that was not created in "
 		                        "this transaction");
 	}

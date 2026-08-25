@@ -328,6 +328,14 @@ struct DuckLakeMaterializedViewRefreshInfo {
 	TableIndex view_id;
 	string refresh_mode;
 	idx_t rows_refreshed = 0;
+	idx_t refresh_duration_ms = 0;
+	optional_idx rows_added;
+	optional_idx rows_removed;
+	optional_idx rows_changed;
+	idx_t source_snapshot = DConstants::INVALID_INDEX;
+	timestamp_tz_t source_snapshot_time;
+	bool has_source_snapshot_time = false;
+	optional_idx lag_ms;
 };
 
 struct DuckLakeMaterializedViewInfo {
