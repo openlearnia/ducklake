@@ -33,6 +33,7 @@ if($ENV{ENABLE_GRAIN_BUNDLE_EXTENSIONS})
     duckdb_extension_load(httpfs
             GIT_URL https://github.com/duckdb/duckdb-httpfs
             GIT_TAG c942cee64bb1bc848168d4ad74fcd9eff2c616e7
+            APPLY_PATCHES
     )
 endif()
 
