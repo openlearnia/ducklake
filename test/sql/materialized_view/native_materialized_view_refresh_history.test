@@ -53,7 +53,7 @@ INSERT INTO grouped_base VALUES (1, 10), (2, 20)
 
 statement ok
 CREATE MATERIALIZED VIEW grouped_mv AS
-SELECT id, sum(value) AS total FROM grouped_base GROUP BY id
+SELECT id, sum(value) AS total FROM grouped_base GROUP BY 1
 
 query III
 SELECT rows_added, rows_removed, rows_changed
@@ -96,3 +96,25 @@ ORDER BY refresh_ordinal DESC
 LIMIT 1
 ----
 0	1	0
+
+# The logical diff must use the current transaction's candidate result.
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO grouped_base VALUES (1, 5), (4, 40)
+
+statement ok
+REFRESH MATERIALIZED VIEW grouped_mv
+
+query III
+SELECT rows_added, rows_removed, rows_changed
+FROM duckdb_materialized_view_refresh_history()
+WHERE view_name = 'grouped_mv'
+ORDER BY refresh_ordinal DESC
+LIMIT 1
+----
+1	0	1
+
+statement ok
+ROLLBACK
