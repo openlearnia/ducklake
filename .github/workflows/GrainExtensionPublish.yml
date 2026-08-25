@@ -288,9 +288,11 @@ jobs:
 
       - name: Create GitHub Release
         # Public VPS bootstrap needs Release assets (Actions artifacts require auth).
-        # Mint on every vortex-integration push, and on dispatch when create_release=true.
+        # Mint on every release-producing branch push, and on dispatch when create_release=true.
+        # ducklake-2-preview-port is a supported deployment source: its manifest is
+        # published to R2, so the matching runtime tarball must be cut on GitHub too.
         if: >-
-          (github.event_name == 'push' && github.ref == 'refs/heads/vortex-integration')
+          (github.event_name == 'push' && (github.ref == 'refs/heads/vortex-integration' || github.ref == 'refs/heads/ducklake-2-preview-port'))
           || (github.event_name == 'workflow_dispatch' && inputs.create_release)
         uses: softprops/action-gh-release@v2
         with:
