@@ -1,0 +1,143 @@
+name: DuckLake WASM playground
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ducklake-2-preview-port
+    paths:
+      - ".github/workflows/wasm-playground.yml"
+      - "wasm-build/**"
+      - "wasm-playground/**"
+      - "src/**"
+      - "duckdb/**"
+
+permissions:
+  contents: read
+
+env:
+  # These values are checked against wasm-build/refs.env below. Keep the
+  # workflow inputs explicit because actions/checkout resolves ref before a
+  # shell step can load an env file.
+  DUCKDB_WASM_REF: v1.33.0
+  EMSDK_VERSION: 3.1.71
+  VCPKG_COMMIT: 84bab45d415d22042bd0b9081aea57f362da3f35
+  PAGES_PROJECT: openlearnia-ducklake-wasm-playground
+
+jobs:
+  build-test-publish:
+    name: Build, test, and publish playground
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout DuckLake and custom DuckDB
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Verify pinned build refs
+        shell: bash
+        run: bash wasm-build/scripts/verify-refs.sh "$GITHUB_WORKSPACE"
+
+      - name: Checkout DuckDB-Wasm build harness
+        uses: actions/checkout@v4
+        with:
+          repository: duckdb/duckdb-wasm
+          ref: ${{ env.DUCKDB_WASM_REF }}
+          path: duckdb-wasm
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: wasm-playground/package-lock.json
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v13
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+
+      - name: Setup vcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
+          git -C vcpkg fetch --depth 1 origin "${VCPKG_COMMIT}"
+          git -C vcpkg checkout --detach "${VCPKG_COMMIT}"
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "VCPKG_ROOT=${GITHUB_WORKSPACE}/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_TOOLCHAIN_PATH=${GITHUB_WORKSPACE}/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/vcpkg" >> "$GITHUB_PATH"
+
+      - name: Install DuckLake WASM dependency
+        shell: bash
+        run: vcpkg install roaring:wasm32-emscripten --clean-after-build
+
+      - name: Install playground dependencies
+        working-directory: wasm-playground
+        run: npm ci
+
+      - name: Build custom MVP runtime
+        shell: bash
+        run: |
+          VCPKG_TOOLCHAIN_PATH="$VCPKG_TOOLCHAIN_PATH" \
+          VCPKG_TARGET_TRIPLET=wasm32-emscripten \
+          bash wasm-build/scripts/build-core.sh mvp "$GITHUB_WORKSPACE/duckdb-wasm" "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/wasm-playground/public/runtime"
+
+      - name: Build custom EH runtime
+        shell: bash
+        run: |
+          VCPKG_TOOLCHAIN_PATH="$VCPKG_TOOLCHAIN_PATH" \
+          VCPKG_TARGET_TRIPLET=wasm32-emscripten \
+          bash wasm-build/scripts/build-core.sh eh "$GITHUB_WORKSPACE/duckdb-wasm" "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/wasm-playground/public/runtime"
+
+      - name: Add matching browser workers
+        run: bash wasm-build/scripts/prepare-workers.sh wasm-playground
+
+      - name: Verify generated runtime files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s wasm-playground/public/runtime/duckdb-mvp.wasm
+          test -s wasm-playground/public/runtime/duckdb-eh.wasm
+          test -s wasm-playground/public/runtime/duckdb-browser-mvp.worker.js
+          test -s wasm-playground/public/runtime/duckdb-browser-eh.worker.js
+          find wasm-playground/public/runtime -maxdepth 1 -type f -print
+
+      - name: Run app tests and build
+        working-directory: wasm-playground
+        run: |
+          npm test
+          npm run typecheck
+          npm run build
+
+      - name: Install Chromium for browser smoke
+        working-directory: wasm-playground
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser smoke tests
+        working-directory: wasm-playground
+        run: npm run test:e2e
+
+      - name: Upload Pages artifact
+        uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: ducklake-wasm-playground
+          path: wasm-playground/dist
+          retention-days: 30
+
+      - name: Publish to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        working-directory: wasm-playground
+        run: |
+          set -euo pipefail
+          : "${CLOUDFLARE_API_TOKEN:?CF_API_TOKEN is required}"
+          : "${CLOUDFLARE_ACCOUNT_ID:?CF_ACCOUNT_ID is required}"
+          npx --yes wrangler@4.76.0 pages deploy dist \
+            --project-name "$PAGES_PROJECT" \
+            --branch ducklake-2-preview-port

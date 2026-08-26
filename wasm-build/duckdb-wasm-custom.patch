@@ -1,0 +1,83 @@
+diff --git a/lib/cmake/duckdb.cmake b/lib/cmake/duckdb.cmake
+index d6e18a4..caa3c45 100644
+--- a/lib/cmake/duckdb.cmake
++++ b/lib/cmake/duckdb.cmake
+@@ -19,6 +19,19 @@ set(DUCKDB_EXTENSIONS "json;core_functions")
+ # Escape semicolons in DUCKDB_EXTENSIONS before passing to ExternalProject_Add
+ string(REPLACE ";" "$<SEMICOLON>" DUCKDB_EXTENSIONS_PACKED "${DUCKDB_EXTENSIONS}")
+ 
++set(DUCKDB_VCPKG_ARGS)
++if(DEFINED ENV{VCPKG_TOOLCHAIN_PATH} AND EXISTS "$ENV{VCPKG_TOOLCHAIN_PATH}")
++  list(APPEND DUCKDB_VCPKG_ARGS
++    "-DCMAKE_TOOLCHAIN_FILE=$ENV{VCPKG_TOOLCHAIN_PATH}"
++    "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
++  )
++  if(DEFINED ENV{VCPKG_TARGET_TRIPLET})
++    list(APPEND DUCKDB_VCPKG_ARGS "-DVCPKG_TARGET_TRIPLET=$ENV{VCPKG_TARGET_TRIPLET}")
++  endif()
++else()
++  list(APPEND DUCKDB_VCPKG_ARGS "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
++endif()
++
+ set(USE_WASM_THREADS FALSE)
+ if(DUCKDB_PLATFORM STREQUAL "wasm_threads")
+   set(USE_WASM_THREADS TRUE)
+@@ -35,15 +48,16 @@ ExternalProject_Add(
+              -DCMAKE_CXX_FLAGS=${DUCKDB_CXX_FLAGS}
+              -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+              -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+-             -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
++             ${DUCKDB_VCPKG_ARGS}
+              -DCMAKE_MODULE_PATH=${CMAKE_MODULE_PATH}
+              -DCMAKE_BUILD_TYPE=${DUCKDB_BUILD_TYPE}
+              -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
++             -DDUCKDB_EXTENSION_CONFIGS=${DUCKDB_EXTENSION_CONFIGS}
+              -DBUILD_EXTENSIONS=${DUCKDB_EXTENSIONS_PACKED}
+              -DSKIP_EXTENSIONS=jemalloc
+              -DBUILD_SHELL=FALSE
+              -DBUILD_UNITTESTS=FALSE
+-             -DDISABLE_BUILTIN_EXTENSIONS=TRUE
++             -DDISABLE_BUILTIN_EXTENSIONS=FALSE
+              -DUSE_WASM_THREADS=${USE_WASM_THREADS}
+              -DDUCKDB_EXPLICIT_PLATFORM=${DUCKDB_EXPLICIT_PLATFORM}
+              -DSMALLER_BINARY=1
+@@ -62,7 +76,8 @@ ExternalProject_Add(
+     <INSTALL_DIR>/lib/libduckdb_fastpforlib.a
+     <INSTALL_DIR>/lib/libparquet_extension.a
+     <INSTALL_DIR>/lib/libcore_functions_extension.a
+-    <INSTALL_DIR>/lib/libjson_extension.a)
++    <INSTALL_DIR>/lib/libjson_extension.a
++    <INSTALL_DIR>/lib/libducklake_extension.a)
+ 
+ ExternalProject_Get_Property(duckdb_ep install_dir)
+ ExternalProject_Get_Property(duckdb_ep binary_dir)
+@@ -94,6 +109,7 @@ target_link_libraries(
+   INTERFACE ${install_dir}/lib/libduckdb_utf8proc.a
+   INTERFACE ${install_dir}/lib/libduckdb_fastpforlib.a
+   INTERFACE ${install_dir}/lib/libcore_functions_extension.a
++  INTERFACE ${install_dir}/lib/libducklake_extension.a
+   INTERFACE dl)
+ 
+ target_include_directories(
+diff --git a/scripts/wasm_build_lib.sh b/scripts/wasm_build_lib.sh
+index f697bad..14a1ff7 100755
+--- a/scripts/wasm_build_lib.sh
++++ b/scripts/wasm_build_lib.sh
+@@ -61,7 +61,7 @@ emcmake cmake \
+     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+     -DDUCKDB_LOCATION=${DUCKDB_LOCATION} \
+     -DWASM_LINK_FLAGS_EXT="${LINK_FLAGS}" \
+-    -DDUCKDB_EXTENSION_CONFIGS=extension_config_wasm.cmake \
++    -DDUCKDB_EXTENSION_CONFIGS="${DUCKDB_EXTENSION_CONFIGS:-extension_config_wasm.cmake}" \
+     ${ADDITIONAL_FLAGS}
+ 
+ emmake make \
+@@ -80,7 +80,7 @@ emcmake cmake \
+     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+     -DDUCKDB_LOCATION=${DUCKDB_LOCATION} \
+     -DWASM_LINK_FLAGS_EXT="${LINK_FLAGS}" \
+-    -DDUCKDB_EXTENSION_CONFIGS=extension_config_wasm.cmake \
++    -DDUCKDB_EXTENSION_CONFIGS="${DUCKDB_EXTENSION_CONFIGS:-extension_config_wasm.cmake}" \
+     -DUSE_GENERATED_EXPORTED_LIST=1 \
+     ${ADDITIONAL_FLAGS}
+ 

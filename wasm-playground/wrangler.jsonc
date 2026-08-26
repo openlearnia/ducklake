@@ -1,0 +1,6 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "openlearnia-ducklake-wasm-playground",
+  "compatibility_date": "2026-08-26",
+  "pages_build_output_dir": "dist"
+}
