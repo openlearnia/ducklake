@@ -73,7 +73,7 @@ jobs:
 
       - name: Install DuckLake WASM dependency
         shell: bash
-        run: vcpkg install roaring:wasm32-emscripten --clean-after-build
+        run: vcpkg install --classic roaring:wasm32-emscripten --clean-after-build
 
       - name: Install playground dependencies
         working-directory: wasm-playground
