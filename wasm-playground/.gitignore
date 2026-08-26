@@ -1,5 +1,0 @@
-node_modules/
-dist/
-*.tsbuildinfo
-public/runtime/*.wasm
-public/runtime/*.js
