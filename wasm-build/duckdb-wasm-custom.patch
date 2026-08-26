@@ -60,11 +60,15 @@ index d6e18a4..caa3c45 100644
  
  target_include_directories(
 diff --git a/scripts/wasm_build_lib.sh b/scripts/wasm_build_lib.sh
-index f697bad..14a1ff7 100755
+index f697bad..876b0fa 100755
 --- a/scripts/wasm_build_lib.sh
 +++ b/scripts/wasm_build_lib.sh
-@@ -61,7 +61,7 @@ emcmake cmake \
-     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+@@ -57,11 +57,9 @@ emcmake cmake \
+     -S${CPP_SOURCE_DIR} \
+     -B${BUILD_DIR} \
+     -DDUCKDB_WASM_VERSION=${DUCKDB_WASM_VERSION_NAME} \
+-    -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
      -DDUCKDB_LOCATION=${DUCKDB_LOCATION} \
      -DWASM_LINK_FLAGS_EXT="${LINK_FLAGS}" \
 -    -DDUCKDB_EXTENSION_CONFIGS=extension_config_wasm.cmake \
@@ -72,8 +76,12 @@ index f697bad..14a1ff7 100755
      ${ADDITIONAL_FLAGS}
  
  emmake make \
-@@ -80,7 +80,7 @@ emcmake cmake \
-     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+@@ -76,11 +74,9 @@ emcmake cmake \
+     -S${CPP_SOURCE_DIR} \
+     -B${BUILD_DIR} \
+     -DDUCKDB_WASM_VERSION=${DUCKDB_WASM_VERSION_NAME} \
+-    -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
      -DDUCKDB_LOCATION=${DUCKDB_LOCATION} \
      -DWASM_LINK_FLAGS_EXT="${LINK_FLAGS}" \
 -    -DDUCKDB_EXTENSION_CONFIGS=extension_config_wasm.cmake \
