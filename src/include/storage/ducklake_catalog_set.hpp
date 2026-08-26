@@ -35,6 +35,7 @@ public:
 	optional_ptr<CatalogEntry> GetEntryById(TableIndex index);
 	void AddEntry(DuckLakeSchemaEntry &schema, TableIndex id, unique_ptr<CatalogEntry> entry);
 	void AddEntry(DuckLakeSchemaEntry &schema, MacroIndex id, unique_ptr<CatalogEntry> entry);
+	void AddEntry(DuckLakeSchemaEntry &schema, ProcedureIndex id, unique_ptr<CatalogEntry> entry);
 	template <class T>
 	optional_ptr<T> GetEntry(const string &name) {
 		auto entry = GetEntry(name);
@@ -51,7 +52,7 @@ public:
 		return schema_entry_map;
 	}
 	idx_t TotalEntryCount() const {
-		return catalog_entries.size() + table_entry_map.size() + macro_entry_map.size();
+		return catalog_entries.size() + table_entry_map.size() + macro_entry_map.size() + procedure_entry_map.size();
 	}
 
 private:
@@ -59,6 +60,7 @@ private:
 	map<SchemaIndex, reference<DuckLakeSchemaEntry>> schema_entry_map;
 	map<TableIndex, reference<CatalogEntry>> table_entry_map;
 	map<MacroIndex, reference<CatalogEntry>> macro_entry_map;
+	map<ProcedureIndex, reference<CatalogEntry>> procedure_entry_map;
 };
 
 } // namespace duckdb

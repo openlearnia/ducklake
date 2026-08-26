@@ -20,6 +20,7 @@ For example:
 v2.0.0-alpha38615/linux_amd64/ducklake.duckdb_extension
 v2.0.0-alpha38615/linux_amd64/httpfs.duckdb_extension
 v2.0.0-alpha38615/linux_amd64/postgres_scanner.duckdb_extension
+v2.0.0-alpha38615/linux_amd64/quack.duckdb_extension
 ```
 
 ## Create and deploy
@@ -55,5 +56,6 @@ LOAD ducklake;
 HTTPS and S3 repositories require an ABI-matched `httpfs` extension first. Do
 not use the public CDN `httpfs` binary with the OpenLearnia fork.
 
-If the custom binaries are unsigned, clients must explicitly enable unsigned
-extensions. Signing the release artifacts is recommended before production use.
+The OpenLearnia preview runtime trusts the OpenLearnia extension-signing public
+key compiled into the matching DuckDB runtime. The repository publishes signed
+`ducklake`, `httpfs`, `postgres_scanner`, and `quack` binaries for that runtime.

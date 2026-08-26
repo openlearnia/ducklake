@@ -25,6 +25,7 @@ struct TransactionChangeInformation {
 	case_insensitive_map_t<reference_set_t<CatalogEntry>> created_tables;
 	case_insensitive_map_t<reference_set_t<CatalogEntry>> created_scalar_macros;
 	case_insensitive_map_t<reference_set_t<CatalogEntry>> created_table_macros;
+	case_insensitive_map_t<reference_set_t<CatalogEntry>> created_procedures;
 
 	set<TableIndex> altered_tables;
 	set<TableIndex> altered_tables_with_schema_version_changes;
@@ -33,6 +34,7 @@ struct TransactionChangeInformation {
 	set<TableIndex> dropped_views;
 	set<MacroIndex> dropped_scalar_macros;
 	set<MacroIndex> dropped_table_macros;
+	set<ProcedureIndex> dropped_procedures;
 	set<TableIndex> tables_inserted_into;
 	set<TableIndex> tables_deleted_from;
 	set<TableIndex> tables_inserted_inlined;
@@ -49,12 +51,14 @@ struct SnapshotChangeInformation {
 	case_insensitive_map_t<case_insensitive_map_t<string>> created_tables;
 	case_insensitive_map_t<case_insensitive_map_t<string>> created_scalar_macros;
 	case_insensitive_map_t<case_insensitive_map_t<string>> created_table_macros;
+	case_insensitive_map_t<case_insensitive_map_t<string>> created_procedures;
 	set<TableIndex> altered_tables;
 	set<TableIndex> altered_views;
 	set<TableIndex> dropped_tables;
 	set<TableIndex> dropped_views;
 	set<MacroIndex> dropped_scalar_macros;
 	set<MacroIndex> dropped_table_macros;
+	set<ProcedureIndex> dropped_procedures;
 	set<TableIndex> inserted_tables;
 	set<TableIndex> tables_deleted_from;
 	set<TableIndex> tables_compacted;

@@ -10,9 +10,11 @@
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_view_entry.hpp"
 #include "duckdb/parser/parsed_data/create_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_procedure_info.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_macro_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_macro_catalog_entry.hpp"
 #include "storage/ducklake_macro_entry.hpp"
+#include "storage/ducklake_procedure_entry.hpp"
 #include "common/ducklake_util.hpp"
 
 namespace duckdb {
@@ -111,6 +113,7 @@ bool DuckLakeSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 	case CatalogType::TABLE_FUNCTION_ENTRY:
 	case CatalogType::TABLE_MACRO_ENTRY:
 	case CatalogType::MACRO_ENTRY:
+	case CatalogType::PROCEDURE_ENTRY:
 		return true;
 	default:
 		return false;
@@ -119,15 +122,24 @@ bool DuckLakeSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransaction transaction,
                                                                CreateFunctionInfo &info) {
-	unique_ptr<CatalogEntry> macro_entry;
-	auto &create_macro_info = info.Cast<CreateMacroInfo>();
+	unique_ptr<CatalogEntry> entry;
 	switch (info.type) {
-	case CatalogType::MACRO_ENTRY:
-		macro_entry = make_uniq<ScalarMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
+	case CatalogType::MACRO_ENTRY: {
+		auto &create_macro_info = info.Cast<CreateMacroInfo>();
+		entry = make_uniq<ScalarMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
 		break;
-	case CatalogType::TABLE_MACRO_ENTRY:
-		macro_entry = make_uniq<TableMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
+	}
+	case CatalogType::TABLE_MACRO_ENTRY: {
+		auto &create_macro_info = info.Cast<CreateMacroInfo>();
+		entry = make_uniq<TableMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
 		break;
+	}
+	case CatalogType::PROCEDURE_ENTRY: {
+		auto &create_procedure_info = info.Cast<CreateProcedureInfo>();
+		entry = make_uniq<DuckLakeProcedureEntry>(ParentCatalog(), *this, create_procedure_info,
+		                                          ProcedureIndex(DConstants::INVALID_INDEX));
+		break;
+	}
 	default:
 		throw NotImplementedException("DuckLake does not support %s functions", CatalogTypeToString(info.type));
 	}
@@ -136,8 +148,8 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransactio
 		return nullptr;
 	}
 	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
-	auto result = macro_entry.get();
-	duck_transaction.CreateEntry(std::move(macro_entry));
+	auto result = entry.get();
+	duck_transaction.CreateEntry(std::move(entry));
 	return result;
 }
 
@@ -432,6 +444,7 @@ void DuckLakeSchemaEntry::TryDropSchema(DuckLakeTransaction &transaction, bool c
 	auto local_tables = transaction.GetTransactionLocalEntries(CatalogType::TABLE_ENTRY, name.GetIdentifierName());
 	auto local_scalar_macros = transaction.GetTransactionLocalEntries(CatalogType::MACRO_ENTRY, name.GetIdentifierName());
 	auto local_table_macros = transaction.GetTransactionLocalEntries(CatalogType::TABLE_MACRO_ENTRY, name.GetIdentifierName());
+	auto local_procedures = transaction.GetTransactionLocalEntries(CatalogType::PROCEDURE_ENTRY, name.GetIdentifierName());
 	if (!cascade) {
 		// get a list of all dependents
 		vector<reference<CatalogEntry>> dependents;
@@ -505,6 +518,13 @@ void DuckLakeSchemaEntry::TryDropSchema(DuckLakeTransaction &transaction, bool c
 				dependents.push_back(*entry.second);
 			}
 		}
+		for (auto &entry : procedures.GetEntries()) {
+			const auto &dropped_procedures = transaction.GetDroppedProcedures();
+			const auto &procedure = entry.second->Cast<DuckLakeProcedureEntry>();
+			if (dropped_procedures.find(procedure.GetIndex()) == dropped_procedures.end()) {
+				dependents.push_back(*entry.second);
+			}
+		}
 		if (local_scalar_macros) {
 			dependents.reserve(dependents.size() + local_scalar_macros->GetEntries().size());
 			for (auto &entry : local_scalar_macros->GetEntries()) {
@@ -514,6 +534,12 @@ void DuckLakeSchemaEntry::TryDropSchema(DuckLakeTransaction &transaction, bool c
 		if (local_table_macros) {
 			dependents.reserve(dependents.size() + local_table_macros->GetEntries().size());
 			for (auto &entry : local_table_macros->GetEntries()) {
+				dependents.push_back(*entry.second);
+			}
+		}
+		if (local_procedures) {
+			dependents.reserve(dependents.size() + local_procedures->GetEntries().size());
+			for (auto &entry : local_procedures->GetEntries()) {
 				dependents.push_back(*entry.second);
 			}
 		}
@@ -550,6 +576,12 @@ void DuckLakeSchemaEntry::TryDropSchema(DuckLakeTransaction &transaction, bool c
 			local_entries_to_drop.push_back(*entry.second);
 		}
 	}
+	if (local_procedures) {
+		local_entries_to_drop.reserve(local_entries_to_drop.size() + local_procedures->GetEntries().size());
+		for (auto &entry : local_procedures->GetEntries()) {
+			local_entries_to_drop.push_back(*entry.second);
+		}
+	}
 	for (auto &entry : local_entries_to_drop) {
 		transaction.DropEntry(entry.get());
 	}
@@ -560,6 +592,9 @@ void DuckLakeSchemaEntry::TryDropSchema(DuckLakeTransaction &transaction, bool c
 		transaction.DropEntry(*entry.second);
 	}
 	for (auto &entry : table_macros.GetEntries()) {
+		transaction.DropEntry(*entry.second);
+	}
+	for (auto &entry : procedures.GetEntries()) {
 		transaction.DropEntry(*entry.second);
 	}
 }
@@ -575,6 +610,8 @@ DuckLakeCatalogSet &DuckLakeSchemaEntry::GetCatalogSet(CatalogType type) {
 	case CatalogType::TABLE_FUNCTION_ENTRY:
 	case CatalogType::TABLE_MACRO_ENTRY:
 		return table_macros;
+	case CatalogType::PROCEDURE_ENTRY:
+		return procedures;
 	default:
 		throw NotImplementedException("Unsupported catalog type %s for DuckLake", CatalogTypeToString(type));
 	}
@@ -591,6 +628,8 @@ const DuckLakeCatalogSet &DuckLakeSchemaEntry::GetCatalogSet(CatalogType type) c
 	case CatalogType::TABLE_FUNCTION_ENTRY:
 	case CatalogType::TABLE_MACRO_ENTRY:
 		return table_macros;
+	case CatalogType::PROCEDURE_ENTRY:
+		return procedures;
 	default:
 		throw NotImplementedException("Unsupported catalog type %s for DuckLake", CatalogTypeToString(type));
 	}

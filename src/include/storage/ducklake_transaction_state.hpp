@@ -136,6 +136,8 @@ public:
 	                    reference<CatalogEntry> view_entry, NewTableInfo &result,
 	                    TransactionChangeInformation &transaction_changes);
 	NewMacroInfo GetNewMacros(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes);
+	NewProcedureInfo GetNewProcedures(DuckLakeCommitState &commit_state,
+	                                  TransactionChangeInformation &transaction_changes);
 	NewDataInfo GetNewDataFiles(string &batch_query, DuckLakeCommitState &commit_state,
 	                            optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
 	                            const DuckLakeCommitContext &context);
@@ -188,6 +190,8 @@ public:
 	case_insensitive_map_t<unique_ptr<DuckLakeCatalogSet>> new_table_macros;
 	set<MacroIndex> dropped_scalar_macros;
 	set<MacroIndex> dropped_table_macros;
+	case_insensitive_map_t<unique_ptr<DuckLakeCatalogSet>> new_procedures;
+	set<ProcedureIndex> dropped_procedures;
 
 	set<TableIndex> renamed_tables;
 	set<TableIndex> renamed_views;

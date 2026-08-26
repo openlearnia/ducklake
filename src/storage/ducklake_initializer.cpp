@@ -159,11 +159,11 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 	for (auto &tag : metadata.tags) {
 		if (tag.key == "version") {
 			string version = tag.value;
-			if (version != "1.1" && !options.automatic_migration) {
+			if (version != "1.2" && !options.automatic_migration) {
 				// Throw when Loading the DuckLake if a Migration is required and automatic_migration option is false
 				throw InvalidInputException(
 				    "DuckLake catalog version mismatch: catalog version is %s, but the extension requires version "
-				    "1.1. To automatically migrate, set AUTOMATIC_MIGRATION to TRUE when attaching.",
+				    "1.2. To automatically migrate, set AUTOMATIC_MIGRATION to TRUE when attaching.",
 				    version);
 			}
 			if (version == "0.1") {
@@ -194,9 +194,13 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 				metadata_manager.MigrateV05();
 				version = "1.1";
 			}
-			if (version != "1.1") {
+			if (version == "1.1") {
+				metadata_manager.MigrateV06();
+				version = "1.2";
+			}
+			if (version != "1.2") {
 				throw NotImplementedException(
-				    "Only DuckLake versions 0.1, 0.2, 0.3-dev1, 0.3, 0.4-dev1, 0.4, 1.0, 1.1 are supported");
+				    "Only DuckLake versions 0.1, 0.2, 0.3-dev1, 0.3, 0.4-dev1, 0.4, 1.0, 1.1, 1.2 are supported");
 			}
 			// Read-only attaches cannot add compatibility metadata. The history table is
 			// created when the catalog is writable and remains readable from this attach.

@@ -1,4 +1,4 @@
-# Publish a compatibility-locked linux_amd64 DuckDB + DuckLake MV bundle.
+# Publish a compatibility-locked linux_amd64 DuckDB + DuckLake/Quack MV bundle.
 # Parquet-only — does not set DUCKLAKE_VORTEX_EXTENSION_DIR / does not call DuckDB CDN deploy.
 #
 # Grain / VPS download (public, no token) — Release assets preferred:
@@ -82,7 +82,7 @@ jobs:
       # libpq builds PostgreSQL's parser sources from the vendored source tree.
       # The Blacksmith image must provide flex/bison before vcpkg configures it.
       extra_toolchains: parser_tools
-      test_config: '{"test_env_variables":{"ENABLE_POSTGRES_SCANNER":"1","ENABLE_GRAIN_BUNDLE_EXTENSIONS":"1"}}'
+      test_config: '{"test_env_variables":{"ENABLE_POSTGRES_SCANNER":"1","ENABLE_GRAIN_BUNDLE_EXTENSIONS":"1","ENABLE_QUACK":"1"}}'
       reduced_ci_mode: disabled
 
   publish:
@@ -102,6 +102,13 @@ jobs:
           name: duckdb-${{ needs.get-duckdb-version.outputs.duckdb_ref }}-runtime-linux_amd64
           path: duckdb-runtime/
 
+      - name: Checkout extension repository Worker
+        uses: actions/checkout@v4
+        with:
+          path: repository-source
+          sparse-checkout: extension-repository
+          sparse-checkout-cone-mode: true
+
       - name: Stage Grain package
         id: stage
         env:
@@ -110,6 +117,7 @@ jobs:
           GIT_SHA: ${{ github.sha }}
           GIT_REF_NAME: ${{ github.ref_name }}
           GIT_REPO: ${{ github.repository }}
+          DUCKDB_EXTENSION_SIGNING_PK: ${{ secrets.DUCKDB_EXTENSION_SIGNING_PK }}
         run: |
           set -euo pipefail
           mkdir -p grain-pkg
@@ -121,7 +129,7 @@ jobs:
           fi
           cp "$EXT" grain-pkg/ducklake.duckdb_extension
           cp "$EXT" "grain-pkg/ducklake-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
-          for name in httpfs postgres_scanner; do
+          for name in httpfs postgres_scanner quack; do
             extra=$(find dist -type f -name "${name}.duckdb_extension" | head -n1 || true)
             if [[ -z "$extra" ]]; then
               echo "Missing paired ${name} extension" >&2
@@ -131,6 +139,58 @@ jobs:
             cp "$extra" "grain-pkg/${name}.duckdb_extension"
             cp "$extra" "grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
           done
+
+          : "${DUCKDB_EXTENSION_SIGNING_PK:?DUCKDB_EXTENSION_SIGNING_PK secret is required}"
+          SIGNING_KEY_FILE="$(mktemp)"
+          SIGNING_PUBLIC_KEY_FILE="repository-source/extension-repository/openlearnia-extension-signing.pub"
+          SIGNING_WORK_DIR="$(mktemp -d)"
+          cleanup_signing() {
+            rm -f "$SIGNING_KEY_FILE"
+            rm -rf "$SIGNING_WORK_DIR"
+          }
+          trap cleanup_signing EXIT
+          printf '%s\n' "$DUCKDB_EXTENSION_SIGNING_PK" > "$SIGNING_KEY_FILE"
+          test -f "$SIGNING_PUBLIC_KEY_FILE"
+
+          extension_hash() {
+            local input="$1"
+            local hash_concats="$SIGNING_WORK_DIR/hash_concats"
+            local split_prefix="$SIGNING_WORK_DIR/chunk_"
+            : > "$hash_concats"
+            rm -f "$split_prefix"*
+            split -b 1M "$input" "$split_prefix"
+            for chunk in "$split_prefix"*; do
+              openssl dgst -binary -sha256 "$chunk" >> "$hash_concats"
+            done
+            openssl dgst -binary -sha256 "$hash_concats"
+          }
+
+          sign_extension() {
+            local name="$1"
+            local extension="grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
+            local unsigned="$SIGNING_WORK_DIR/${name}.unsigned"
+            local hash="$SIGNING_WORK_DIR/${name}.hash"
+            local signature="$SIGNING_WORK_DIR/${name}.signature"
+            local signed="$SIGNING_WORK_DIR/${name}.signed"
+            cp "$extension" "$unsigned"
+            test "$(stat -c%s "$unsigned")" -gt 256
+            truncate -s -256 "$unsigned"
+            extension_hash "$unsigned" > "$hash"
+            openssl pkeyutl -sign -in "$hash" -inkey "$SIGNING_KEY_FILE" \
+              -pkeyopt digest:sha256 -out "$signature"
+            test "$(stat -c%s "$signature")" -eq 256
+            openssl pkeyutl -verify -pubin -inkey "$SIGNING_PUBLIC_KEY_FILE" \
+              -sigfile "$signature" -in "$hash" -pkeyopt digest:sha256
+            cat "$unsigned" "$signature" > "$signed"
+            mv "$signed" "$extension"
+            cp "$extension" "grain-pkg/${name}.duckdb_extension"
+            echo "signed extension: $name"
+          }
+
+          for name in ducklake httpfs postgres_scanner quack; do
+            sign_extension "$name"
+          done
+
           test -f duckdb-runtime/bin/duckdb
           test -f duckdb-runtime/lib/libduckdb.so
           test -f duckdb-runtime/include/duckdb.h
@@ -156,7 +216,7 @@ jobs:
           package = Path("grain-pkg")
           asset_names = [
               f"{name}-{os.environ['DUCKDB_VERSION']}-linux_amd64.duckdb_extension"
-              for name in ("ducklake", "httpfs", "postgres_scanner")
+              for name in ("ducklake", "httpfs", "postgres_scanner", "quack")
           ] + [os.environ["DUCKDB_ARCHIVE"]]
           checksums = {
               name: hashlib.sha256((package / name).read_bytes()).hexdigest()
@@ -173,6 +233,8 @@ jobs:
               "git_ref": os.environ["GIT_REF_NAME"],
               "platform": "linux_amd64",
               "built_at": os.environ["BUILT_AT"],
+              "signed": True,
+              "signing_public_key": "openlearnia-extension-signing.pub",
               "features": [
                   "materialized_views",
                   "delta_refresh",
@@ -196,6 +258,8 @@ jobs:
                   "duckdb_ref": os.environ["DUCKDB_REF"],
                   "ducklake_ref": os.environ["GIT_SHA"],
                   "platform": "linux_amd64",
+                  "signed": True,
+                  "signing_public_key": "openlearnia-extension-signing.pub",
                   "repository_prefix": f"{os.environ['DUCKDB_VERSION']}/linux_amd64",
                   "runtime": {
                       "file": os.environ["DUCKDB_ARCHIVE"],
@@ -209,7 +273,7 @@ jobs:
                               f"{name}-{os.environ['DUCKDB_VERSION']}-linux_amd64.duckdb_extension"
                           ],
                       }
-                      for name in ("ducklake", "httpfs", "postgres_scanner")
+                      for name in ("ducklake", "httpfs", "postgres_scanner", "quack")
                   },
               },
           }
@@ -241,13 +305,6 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Checkout extension repository Worker
-        uses: actions/checkout@v4
-        with:
-          path: repository-source
-          sparse-checkout: extension-repository
-          sparse-checkout-cone-mode: true
-
       - name: Publish fork-matched extensions to R2 repository
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -271,7 +328,7 @@ jobs:
             --file "$repo_dir/artifacts.json" --remote
           curl --fail --silent --show-error \
             "$EXTENSION_REPOSITORY_URL/artifacts.json" | python3 -m json.tool >/dev/null
-          for name in ducklake httpfs postgres_scanner; do
+          for name in ducklake httpfs postgres_scanner quack; do
             source="grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
             plain="$repo_dir/${name}.duckdb_extension"
             compressed="$repo_dir/${name}.duckdb_extension.gz"
@@ -308,7 +365,7 @@ jobs:
             - Ref: `${{ github.ref_name }}`
             - Features: materialized_views, delta_refresh, join_incremental, staleness
             - Vortex: not bundled
-            - Paired extensions: httpfs, postgres_scanner
+            - Paired extensions: httpfs, postgres_scanner, quack
 
             Grain install:
             ```bash

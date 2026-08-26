@@ -237,11 +237,13 @@ CREATE TABLE {METADATA_CATALOG}.ducklake_schema_versions(begin_snapshot BIGINT, 
 CREATE TABLE {METADATA_CATALOG}.ducklake_macro(schema_id BIGINT, macro_id BIGINT, macro_name VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_macro_impl(macro_id BIGINT, impl_id BIGINT, dialect VARCHAR, sql VARCHAR, type VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_macro_parameters(macro_id BIGINT, impl_id BIGINT,column_id BIGINT, parameter_name VARCHAR, parameter_type VARCHAR, default_value VARCHAR, default_value_type VARCHAR);
+CREATE TABLE {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT);
+CREATE TABLE {METADATA_CATALOG}.ducklake_procedure_parameters(procedure_id BIGINT, parameter_id BIGINT, parameter_name VARCHAR, parameter_type VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_sort_info(sort_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_sort_expression(sort_id BIGINT, table_id BIGINT, sort_key_index BIGINT, expression VARCHAR, dialect VARCHAR, sort_direction VARCHAR, null_order VARCHAR);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot VALUES (0, NOW(), 0, 1, 0);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes VALUES (0, 'created_schema:"main"',  NULL, NULL, NULL);
-INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '1.1'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
+INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '1.2'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
 INSERT INTO {METADATA_CATALOG}.ducklake_schema VALUES (0, UUID(), 0, NULL, 'main', 'main/', true);
 	)",
 	                                       DuckDB::SourceID(), SQLString(data_path), encryption_str);
@@ -377,6 +379,17 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1' WHERE key = 'versi
 	)");
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to migrate DuckLake from v1.0 to v1.1: ");
+	}
+}
+
+void DuckLakeMetadataManager::MigrateV06() {
+	auto result = transaction.Query(R"(
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT);
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_procedure_parameters(procedure_id BIGINT, parameter_id BIGINT, parameter_name VARCHAR, parameter_type VARCHAR);
+UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.2' WHERE key = 'version';
+	)");
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to migrate DuckLake from v1.1 to v1.2: ");
 	}
 }
 
@@ -941,6 +954,42 @@ WHERE  {SNAPSHOT_ID} >= ducklake_macro.begin_snapshot AND ({SNAPSHOT_ID} < duckl
 		auto macro_implementations = row.GetValue<Value>(3);
 		macro_info.implementations = LoadMacroImplementations(macro_implementations);
 		macros.push_back(std::move(macro_info));
+	}
+
+	static const vector<pair<string, string>> PROCEDURE_PARAM_FIELDS = { {"parameter_name", "parameter_name"},
+	                                                                    {"parameter_type", "parameter_type"} };
+	result = query_executor(snapshot, StringUtil::Format(R"(
+SELECT schema_id, ducklake_procedure.procedure_id, procedure_name, language, body, return_type, (
+	SELECT %s
+	FROM {METADATA_CATALOG}.ducklake_procedure_parameters
+	WHERE ducklake_procedure.procedure_id = ducklake_procedure_parameters.procedure_id
+) AS parameters
+FROM {METADATA_CATALOG}.ducklake_procedure
+WHERE {SNAPSHOT_ID} >= ducklake_procedure.begin_snapshot
+  AND ({SNAPSHOT_ID} < ducklake_procedure.end_snapshot OR ducklake_procedure.end_snapshot IS NULL)
+)", ListAggregation(PROCEDURE_PARAM_FIELDS)));
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to get procedure information from DuckLake: ");
+	}
+	for (auto &row : *result) {
+		DuckLakeProcedureInfo procedure_info;
+		procedure_info.schema_id = SchemaIndex(row.GetValue<uint64_t>(0));
+		procedure_info.procedure_id = ProcedureIndex(row.GetValue<uint64_t>(1));
+		procedure_info.procedure_name = row.GetValue<string>(2);
+		procedure_info.language = row.GetValue<string>(3);
+		procedure_info.body = row.GetValue<string>(4);
+		procedure_info.return_type = row.GetValue<string>(5);
+		auto parameters = row.GetValue<Value>(6);
+		if (!parameters.IsNull()) {
+			for (auto &parameter : ListValue::GetChildren(parameters)) {
+				auto &fields = StructValue::GetChildren(parameter);
+				DuckLakeProcedureParameter parameter_info;
+				parameter_info.parameter_name = StringValue::Get(fields[0]);
+				parameter_info.parameter_type = StringValue::Get(fields[1]);
+				procedure_info.parameters.push_back(std::move(parameter_info));
+			}
+		}
+		catalog.procedures.push_back(std::move(procedure_info));
 	}
 
 	// load partition information
@@ -2637,6 +2686,10 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::Query(string &query) {
 string DuckLakeMetadataManager::DropMacros(const set<MacroIndex> &ids) {
 	return FlushDrop("ducklake_macro", "macro_id", ids);
 }
+
+string DuckLakeMetadataManager::DropProcedures(const set<ProcedureIndex> &ids) {
+	return FlushDrop("ducklake_procedure", "procedure_id", ids);
+}
 string DuckLakeMetadataManager::WriteNewSchemas(const vector<DuckLakeSchemaInfo> &new_schemas,
                                                 const vector<DuckLakePath> &resolved_paths) {
 	if (new_schemas.empty()) {
@@ -2915,6 +2968,27 @@ INSERT INTO {METADATA_CATALOG}.ducklake_macro_parameters values(%llu,%llu,%llu,%
 				                       SQLString(param.parameter_type), SQLString(param.default_value.ToString()),
 				                       SQLString(param.default_value_type));
 			}
+		}
+	}
+	return batch_query;
+}
+
+string DuckLakeMetadataManager::WriteNewProcedures(const vector<DuckLakeProcedureInfo> &new_procedures) {
+	string batch_query;
+	for (auto &procedure : new_procedures) {
+		batch_query += StringUtil::Format(R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_procedure values(%llu,%llu,%s,%s,%s,%s,{SNAPSHOT_ID}, NULL);
+)",
+		                                  procedure.schema_id.index, procedure.procedure_id.index,
+		                                  SQLString(procedure.procedure_name), SQLString(procedure.language),
+		                                  SQLString(procedure.body), SQLString(procedure.return_type));
+		for (idx_t parameter_id = 0; parameter_id < procedure.parameters.size(); parameter_id++) {
+			auto &parameter = procedure.parameters[parameter_id];
+			batch_query += StringUtil::Format(R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_procedure_parameters values(%llu,%llu,%s,%s);
+)",
+			                                  procedure.procedure_id.index, parameter_id,
+			                                  SQLString(parameter.parameter_name), SQLString(parameter.parameter_type));
 		}
 	}
 	return batch_query;
@@ -5503,7 +5577,8 @@ WHERE table_id IN (%s);)",
 	}
 
 	// delete any views, schemas, macros, etc that are no longer referenced
-	tables_to_delete_from = {"ducklake_schema", "ducklake_view", "ducklake_tag", "ducklake_macro"};
+	tables_to_delete_from = {"ducklake_schema", "ducklake_view", "ducklake_tag", "ducklake_macro",
+	                         "ducklake_procedure"};
 	for (auto &delete_tbl : tables_to_delete_from) {
 		auto result = transaction.Query(StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.%s
@@ -5515,6 +5590,19 @@ WHERE end_snapshot IS NOT NULL AND NOT EXISTS(
 		                                                   delete_tbl));
 		if (result->HasError()) {
 			result->GetErrorObject().Throw("Failed to delete from " + delete_tbl + " in DuckLake: ");
+		}
+	}
+
+	// clean up parameters for procedures whose snapshot-visible definition expired
+	{
+		auto result = transaction.Query(R"(
+DELETE FROM {METADATA_CATALOG}.ducklake_procedure_parameters tbl
+WHERE NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_procedure p
+    WHERE p.procedure_id = tbl.procedure_id
+);)");
+		if (result->HasError()) {
+			result->GetErrorObject().Throw("Failed to delete orphaned procedure parameters in DuckLake: ");
 		}
 	}
 

@@ -26,10 +26,12 @@
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
+#include "duckdb/parser/parsed_data/create_procedure_info.hpp"
 #include "duckdb/function/macro_function.hpp"
 #include "duckdb/function/scalar_macro_function.hpp"
 #include "duckdb/function/table_macro_function.hpp"
 #include "storage/ducklake_macro_entry.hpp"
+#include "storage/ducklake_procedure_entry.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/printer.hpp"
@@ -665,6 +667,28 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		} else {
 			throw InvalidInputException("Macro type %s is not accepted", macro.implementations.front().type);
 		}
+	}
+
+	for (auto &procedure : catalog.procedures) {
+		auto entry = schema_id_map.find(procedure.schema_id);
+		if (entry == schema_id_map.end()) {
+			throw InvalidInputException(
+			    "Failed to load DuckLake - could not find schema that corresponds to procedure entry \"%s\"",
+			    procedure.procedure_name);
+		}
+		auto &schema_entry = entry->second.get();
+		auto create_procedure = make_uniq<CreateProcedureInfo>();
+		create_procedure->SetQualifiedName(schema_entry.GetQualifiedName(Identifier(procedure.procedure_name)));
+		create_procedure->language = procedure.language;
+		create_procedure->body = procedure.body;
+		create_procedure->return_type = DuckLakeTypes::FromString(procedure.return_type);
+		for (auto &parameter : procedure.parameters) {
+			create_procedure->parameter_names.push_back(parameter.parameter_name);
+			create_procedure->parameter_types.push_back(DuckLakeTypes::FromString(parameter.parameter_type));
+		}
+		auto procedure_entry = make_uniq<DuckLakeProcedureEntry>(*this, schema_entry, *create_procedure,
+		                                                        procedure.procedure_id);
+		schema_set->AddEntry(schema_entry, procedure.procedure_id, std::move(procedure_entry));
 	}
 
 	// load the partition entries
