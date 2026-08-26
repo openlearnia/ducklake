@@ -8,6 +8,7 @@
 #pragma once
 
 #include "common/index.hpp"
+#include "storage/ducklake_metadata_info.hpp"
 #include "duckdb/catalog/catalog_entry/procedure_catalog_entry.hpp"
 
 namespace duckdb {
@@ -23,8 +24,8 @@ public:
 		return index;
 	}
 
-private:
 	ProcedureIndex index;
+	//! definition-contract version of the persisted language/body/parameters
+	uint64_t definition_version = CURRENT_PROCEDURE_DEFINITION_VERSION;
 };
-
 } // namespace duckdb

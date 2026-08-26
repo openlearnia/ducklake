@@ -2,5 +2,18 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "openlearnia-ducklake-wasm-playground",
   "compatibility_date": "2026-08-26",
-  "pages_build_output_dir": "dist"
+  "main": "worker/index.ts",
+  "assets": {
+    "directory": "dist",
+    "binding": "ASSETS"
+  },
+  "r2_buckets": [
+    {
+      "binding": "RUNTIME",
+      "bucket_name": "openlearnia-ducklake-wasm-runtime"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
 }

@@ -688,6 +688,7 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		}
 		auto procedure_entry = make_uniq<DuckLakeProcedureEntry>(*this, schema_entry, *create_procedure,
 		                                                        procedure.procedure_id);
+		procedure_entry->definition_version = procedure.definition_version;
 		schema_set->AddEntry(schema_entry, procedure.procedure_id, std::move(procedure_entry));
 	}
 

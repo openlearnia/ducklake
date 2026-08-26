@@ -26,6 +26,19 @@ namespace duckdb {
 struct DuckLakeVariantStatsInfo;
 
 //===--------------------------------------------------------------------===//
+// Definition versions
+//===--------------------------------------------------------------------===//
+
+//! Definition-contract version stamped on ducklake_materialized_view rows
+//! (ducklake_metadata_manager definition_version column). Version N identifies the
+//! reader/writer contract of the stored sql/dependencies/refresh semantics; readers must
+//! refuse rows with a version newer than they support. NULL storage reads as 1.
+constexpr uint64_t CURRENT_MV_DEFINITION_VERSION = 1;
+//! Definition-contract version stamped on ducklake_procedure rows (language/body/
+//! parameters/return_type contract). NULL storage reads as 1.
+constexpr uint64_t CURRENT_PROCEDURE_DEFINITION_VERSION = 1;
+
+//===--------------------------------------------------------------------===//
 // Compaction Type
 //===--------------------------------------------------------------------===//
 
@@ -142,6 +155,8 @@ struct DuckLakeProcedureInfo {
 	string body;
 	string return_type;
 	vector<DuckLakeProcedureParameter> parameters;
+	//! definition-contract version of the stored language/body/parameters
+	uint64_t definition_version = CURRENT_PROCEDURE_DEFINITION_VERSION;
 };
 
 struct DuckLakeColumnStatsInfo {
@@ -371,6 +386,8 @@ struct DuckLakeMaterializedViewInfo {
 	vector<TableIndex> dependencies;
 	//! staging-only: write last_refreshed_snapshot as the commit snapshot ({SNAPSHOT_ID} placeholder)
 	bool pending_refresh_stamp = false;
+	//! definition-contract version of the stored sql/dependencies
+	uint64_t definition_version = CURRENT_MV_DEFINITION_VERSION;
 };
 
 struct DuckLakeTagInfo {

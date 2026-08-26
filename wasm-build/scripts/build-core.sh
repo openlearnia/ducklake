@@ -36,10 +36,21 @@ apply_patch_once() {
 apply_patch_once "$ducklake_dir/wasm-build/duckdb-wasm-custom.patch"
 
 export DUCKLAKE_SOURCE_DIR="$ducklake_dir"
-export DUCKDB_WASM_LOADABLE_EXTENSIONS=1
+# The playground links DuckLake statically (see extension_config_wasm.cmake). The
+# loadable-extensions path forces MAIN_MODULE=2 dynamic linking, whose generated
+# dylib export list aborts instantiation ("bad export type for 'roaring_bitmap_clear'").
+export DUCKDB_WASM_LOADABLE_EXTENSIONS="${DUCKDB_WASM_LOADABLE_EXTENSIONS:-0}"
+if [[ "$DUCKDB_WASM_LOADABLE_EXTENSIONS" == "1" ]]; then
+  export DUCKDB_WASM_LOADABLE_EXTENSIONS=1
+else
+  unset DUCKDB_WASM_LOADABLE_EXTENSIONS
+fi
 export DUCKDB_EXTENSION_CONFIGS="$ducklake_dir/wasm-build/extension_config_wasm.cmake"
 export DUCKDB_WASM_VERSION="openlearnia-ducklake-playground"
 export USE_GENERATED_EXPORTED_LIST="${USE_GENERATED_EXPORTED_LIST:-no}"
+# Vendored third-party projects (rapidjson et al.) declare cmake_minimum_required(VERSION <3.5),
+# which CMake >= 4 refuses to configure. Opt them back in without patching each one.
+export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
 
 bash "$duckdb_wasm_dir/scripts/wasm_build_lib.sh" relperf "$variant" "$ducklake_dir/duckdb"
 

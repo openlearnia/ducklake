@@ -1,4 +1,4 @@
-import * as duckdb from '@duckdb/duckdb-wasm/dist/duckdb-browser';
+import type * as duckdb from '@duckdb/duckdb-wasm/dist/duckdb-browser';
 
 import { DEMO_SEED_SQL } from '../demo/scenarios';
 import { runtimeBundle } from './runtime';
@@ -62,22 +62,53 @@ export class PlaygroundEngine {
       return;
     }
 
+    // Keep the browser-only worker bundle out of SSR/unit-test module loading.
+    // The runtime is instantiated only from the browser action that needs it.
+    const duckdb = await import('@duckdb/duckdb-wasm/dist/duckdb-browser');
     const paths = runtimeBundle(import.meta.env.BASE_URL);
-    const bundles: duckdb.DuckDBBundles = {
-      asyncDefault: paths.mvp,
-      asyncNext: paths.eh,
-    };
-    const selected = await duckdb.selectBundle(bundles);
+    // Pin the MVP core: selectBundle prefers the EH variant, and the EH pair
+    // currently fails to instantiate inside a dedicated worker while the MVP
+    // pair boots cleanly (verified via an isolated-worker probe).
+    void paths.eh;
+    const selected = { ...paths.mvp };
     const worker = new Worker(selected.mainWorker ?? paths.mvp.mainWorker);
+    // Surface otherwise-silent worker failures during instantiation.
+    const onWorkerFailure = (event: ErrorEvent | MessageEvent): never => {
+      const detail =
+        'message' in event && typeof event.message === 'string'
+          ? event.message
+          : String((event as MessageEvent).data ?? 'unknown');
+      throw new Error('[worker] ' + detail);
+    };
     const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
 
     try {
-      await db.instantiate(selected.mainModule, selected.pthreadWorker);
+      // The harness's instantiate promise can stall silently if the worker dies;
+      // surface worker failures through the same error channel.
+      await Promise.race([
+        db.instantiate(selected.mainModule, null),
+        new Promise<never>((_, reject) => {
+          worker.onerror = (event: ErrorEvent) => {
+            try {
+              onWorkerFailure(event);
+            } catch (error) {
+              reject(error);
+            }
+          };
+          worker.onmessageerror = (event: MessageEvent) => {
+            try {
+              onWorkerFailure(event);
+            } catch (error) {
+              reject(error);
+            }
+          };
+        }),
+      ]);
       const connection = await db.connect();
       await connection.query(DEMO_SEED_SQL);
       this.db = db;
       this.connection = connection;
-      this.selectedVariant = selected.mainModule === paths.eh.mainModule ? 'eh' : 'mvp';
+      this.selectedVariant = 'mvp';
     } catch (error) {
       await db.terminate();
       throw error;

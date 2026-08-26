@@ -94,8 +94,8 @@ jobs:
           VCPKG_TARGET_TRIPLET=wasm32-emscripten \
           bash wasm-build/scripts/build-core.sh eh "$GITHUB_WORKSPACE/duckdb-wasm" "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/wasm-playground/public/runtime"
 
-      - name: Add matching browser workers
-        run: bash wasm-build/scripts/prepare-workers.sh wasm-playground
+      - name: Bundle harness-matched browser workers
+        run: bash wasm-build/scripts/bundle-workers.sh "$GITHUB_WORKSPACE/duckdb-wasm" "$GITHUB_WORKSPACE/wasm-playground"
 
       - name: Verify generated runtime files
         shell: bash
@@ -122,15 +122,30 @@ jobs:
         working-directory: wasm-playground
         run: npm run test:e2e
 
-      - name: Upload Pages artifact
-        uses: actions/upload-artifact@v4
-        with:
-          if-no-files-found: error
-          name: ducklake-wasm-playground
-          path: wasm-playground/dist
-          retention-days: 30
+      - name: Verify runtime cores exceed the static asset cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Sanity check: these files are why the cores ship via R2 - Workers static
+          # assets reject individual files above 25 MiB.
+          for wasm_file in wasm-playground/public/runtime/duckdb-*.wasm; do
+            size=$(stat -c%s "$wasm_file")
+            echo "$wasm_file is $((size / 1024 / 1024)) MiB"
+          done
 
-      - name: Publish to Cloudflare Pages
+      - name: Create R2 bucket if missing
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.76.0 r2 bucket create openlearnia-ducklake-wasm-runtime || true
+
+      - name: Publish runtime cores to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: bash wasm-build/scripts/publish-runtime.sh wasm-playground/public/runtime
+
+      - name: Deploy playground worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -139,6 +154,11 @@ jobs:
           set -euo pipefail
           : "${CLOUDFLARE_API_TOKEN:?CF_API_TOKEN is required}"
           : "${CLOUDFLARE_ACCOUNT_ID:?CF_ACCOUNT_ID is required}"
-          npx --yes wrangler@4.76.0 pages deploy dist \
-            --project-name "$PAGES_PROJECT" \
-            --branch ducklake-2-preview-port
+          # The .wasm cores stay out of the asset bundle - the worker serves them
+          # from R2 through the RUNTIME binding.
+          rm -f dist/runtime/*.wasm
+          if find dist -type f -size +25M | grep -q .; then
+            echo "dist contains files over 25 MiB" >&2
+            exit 1
+          fi
+          npx --yes wrangler@4.76.0 deploy

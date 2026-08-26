@@ -388,9 +388,12 @@ public:
 	virtual void MigrateV04();
 	virtual void MigrateV05();
 	virtual void MigrateV06();
-	virtual void EnsureMaterializedViewRefreshHistoryTable();
+	virtual void MigrateV07();
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
+
+	//! The catalog format version this build writes and requires at attach.
+	static constexpr const char *CATALOG_VERSION = "1.3";
 
 	string LoadPath(string path);
 	string StorePath(string path);

@@ -1,0 +1,136 @@
+# name: test/sql/migration/v12_definition_version.test
+# description: migrating a v1.2 catalog holding materialized views and stored procedures to definition-versioned metadata
+# group: [migration]
+
+require ducklake
+
+require parquet
+
+unzip data/old_ducklake/v12.db.gz __TEST_DIR__/v12.db
+
+# attaching without AUTOMATIC_MIGRATION refuses to touch an old catalog
+statement error
+ATTACH 'ducklake:__TEST_DIR__/v12.db' AS ducklake (DATA_PATH '__TEST_DIR__/v12_definition_version_files', OVERRIDE_DATA_PATH TRUE)
+----
+DuckLake catalog version mismatch
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/v12.db' AS ducklake (DATA_PATH '__TEST_DIR__/v12_definition_version_files', OVERRIDE_DATA_PATH TRUE, AUTOMATIC_MIGRATION TRUE)
+
+# the catalog is upgraded to 1.3 and both object kinds get definition_version backfilled
+query I
+SELECT value FROM __ducklake_metadata_ducklake.ducklake_metadata WHERE key = 'version'
+----
+1.3
+
+query II
+SELECT view_name, definition_version FROM __ducklake_metadata_ducklake.ducklake_materialized_view ORDER BY view_name
+----
+mv_by_region	1
+
+query II
+SELECT procedure_name, definition_version FROM __ducklake_metadata_ducklake.ducklake_procedure ORDER BY procedure_name
+----
+add_one	1
+log_event	1
+
+# the materialized view survives the upgrade (it shipped empty) and stays refreshable
+query III
+SELECT region, n, total FROM ducklake.mv_by_region ORDER BY region
+----
+
+statement ok
+INSERT INTO ducklake.sales VALUES (1, 'east', 100), (2, 'west', 250), (3, 'east', 75);
+
+statement ok
+REFRESH MATERIALIZED VIEW ducklake.mv_by_region;
+
+query III
+SELECT region, n, total FROM ducklake.mv_by_region ORDER BY region
+----
+east	2	175
+west	1	250
+
+statement ok
+INSERT INTO ducklake.sales VALUES (4, 'west', 50);
+
+statement ok
+REFRESH MATERIALIZED VIEW ducklake.mv_by_region;
+
+query III
+SELECT region, n, total FROM ducklake.mv_by_region ORDER BY region
+----
+east	2	175
+west	2	300
+
+# stored procedures survive the upgrade, callable via fully qualified names
+query I
+CALL ducklake.main.add_one(41);
+----
+42
+
+query T
+CALL ducklake.analytics.log_event('ping')
+----
+logged:ping
+
+# re-attach after migration is accepted without AUTOMATIC_MIGRATION
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/v12.db' AS ducklake (DATA_PATH '__TEST_DIR__/v12_definition_version_files', OVERRIDE_DATA_PATH TRUE)
+
+query T
+CALL ducklake.analytics.log_event('ping')
+----
+logged:ping
+
+# a materialized view written by a newer definition contract is refused
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_materialized_view SET definition_version = 99;
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/v12.db' AS ducklake (DATA_PATH '__TEST_DIR__/v12_definition_version_files', OVERRIDE_DATA_PATH TRUE)
+
+statement error
+SELECT * FROM ducklake.mv_by_region
+----
+uses definition version
+
+# same rejection for stored procedures
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_materialized_view SET definition_version = 1;
+
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_procedure SET definition_version = 99;
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/v12.db' AS ducklake (DATA_PATH '__TEST_DIR__/v12_definition_version_files', OVERRIDE_DATA_PATH TRUE)
+
+statement error
+CALL ducklake.main.add_one(41)
+----
+uses definition version
+
+# restoring the version restores full functionality
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_procedure SET definition_version = 1;
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/v12.db' AS ducklake (DATA_PATH '__TEST_DIR__/v12_definition_version_files', OVERRIDE_DATA_PATH TRUE)
+
+query III
+SELECT region, n, total FROM ducklake.mv_by_region ORDER BY region
+----
+east	2	175
+west	2	300

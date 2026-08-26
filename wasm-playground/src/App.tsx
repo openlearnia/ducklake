@@ -25,7 +25,11 @@ export default function App() {
     }).catch((error: unknown) => {
       if (active) {
         setStatus('error');
-        setEngineError(error instanceof Error ? error.message : String(error));
+        setEngineError(
+          error instanceof Error
+            ? `${error.message}\n[stack] ${error.stack ?? 'n/a'}`.slice(0, 1500)
+            : String(error),
+        );
       }
     });
     return () => {

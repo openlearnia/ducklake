@@ -214,7 +214,7 @@ CREATE TABLE {METADATA_CATALOG}.ducklake_snapshot_changes(snapshot_id BIGINT PRI
 CREATE TABLE {METADATA_CATALOG}.ducklake_schema(schema_id BIGINT PRIMARY KEY, schema_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
 CREATE TABLE {METADATA_CATALOG}.ducklake_table(table_id BIGINT, table_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
 CREATE TABLE {METADATA_CATALOG}.ducklake_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, column_aliases VARCHAR);
-CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT);
+CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT, definition_version BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view_dependency(view_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history(view_id BIGINT, refresh_snapshot BIGINT, refresh_time TIMESTAMPTZ, refresh_mode VARCHAR, rows_refreshed BIGINT, refresh_duration_ms BIGINT, rows_written BIGINT, rows_added BIGINT, rows_removed BIGINT, rows_changed BIGINT, source_snapshot BIGINT, source_snapshot_time TIMESTAMPTZ, lag_ms BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_tag(object_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, key VARCHAR, value VARCHAR);
@@ -237,16 +237,16 @@ CREATE TABLE {METADATA_CATALOG}.ducklake_schema_versions(begin_snapshot BIGINT, 
 CREATE TABLE {METADATA_CATALOG}.ducklake_macro(schema_id BIGINT, macro_id BIGINT, macro_name VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_macro_impl(macro_id BIGINT, impl_id BIGINT, dialect VARCHAR, sql VARCHAR, type VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_macro_parameters(macro_id BIGINT, impl_id BIGINT,column_id BIGINT, parameter_name VARCHAR, parameter_type VARCHAR, default_value VARCHAR, default_value_type VARCHAR);
-CREATE TABLE {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT);
+CREATE TABLE {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, definition_version BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_procedure_parameters(procedure_id BIGINT, parameter_id BIGINT, parameter_name VARCHAR, parameter_type VARCHAR);
 CREATE TABLE {METADATA_CATALOG}.ducklake_sort_info(sort_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_sort_expression(sort_id BIGINT, table_id BIGINT, sort_key_index BIGINT, expression VARCHAR, dialect VARCHAR, sort_direction VARCHAR, null_order VARCHAR);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot VALUES (0, NOW(), 0, 1, 0);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes VALUES (0, 'created_schema:"main"',  NULL, NULL, NULL);
-INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '1.2'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
+INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '%s'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
 INSERT INTO {METADATA_CATALOG}.ducklake_schema VALUES (0, UUID(), 0, NULL, 'main', 'main/', true);
 	)",
-	                                       DuckDB::SourceID(), SQLString(data_path), encryption_str);
+	                                       CATALOG_VERSION, DuckDB::SourceID(), SQLString(data_path), encryption_str);
 	auto result = transaction.Query(initialize_query);
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to initialize DuckLake: ");
@@ -393,8 +393,14 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.2' WHERE key = 'versi
 	}
 }
 
-void DuckLakeMetadataManager::EnsureMaterializedViewRefreshHistoryTable() {
-	auto result = transaction.Query(R"(
+void DuckLakeMetadataManager::MigrateV07() {
+	auto result = transaction.Query(StringUtil::Format(R"(
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT, definition_version BIGINT);
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS definition_version BIGINT;
+UPDATE {METADATA_CATALOG}.ducklake_materialized_view SET definition_version = %llu WHERE definition_version IS NULL;
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, definition_version BIGINT);
+ALTER TABLE {METADATA_CATALOG}.ducklake_procedure ADD COLUMN IF NOT EXISTS definition_version BIGINT;
+UPDATE {METADATA_CATALOG}.ducklake_procedure SET definition_version = %llu WHERE definition_version IS NULL;
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view_refresh_history(
     view_id BIGINT,
     refresh_snapshot BIGINT,
@@ -410,7 +416,6 @@ CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view_refresh
     source_snapshot_time TIMESTAMPTZ,
     lag_ms BIGINT
 );
-
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS refresh_duration_ms BIGINT;
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS rows_written BIGINT;
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS rows_added BIGINT;
@@ -419,9 +424,13 @@ ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD CO
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS source_snapshot BIGINT;
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS source_snapshot_time TIMESTAMPTZ;
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history ADD COLUMN IF NOT EXISTS lag_ms BIGINT;
-	)");
+UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '%s' WHERE key = 'version';
+	)",
+	                                                   CURRENT_MV_DEFINITION_VERSION,
+	                                                   CURRENT_PROCEDURE_DEFINITION_VERSION,
+	                                                   CATALOG_VERSION));
 	if (result->HasError()) {
-		result->GetErrorObject().Throw("Failed to create DuckLake materialized view refresh history: ");
+		result->GetErrorObject().Throw("Failed to migrate DuckLake from v1.2 to v1.3: ");
 	}
 }
 
@@ -959,7 +968,8 @@ WHERE  {SNAPSHOT_ID} >= ducklake_macro.begin_snapshot AND ({SNAPSHOT_ID} < duckl
 	static const vector<pair<string, string>> PROCEDURE_PARAM_FIELDS = { {"parameter_name", "parameter_name"},
 	                                                                    {"parameter_type", "parameter_type"} };
 	result = query_executor(snapshot, StringUtil::Format(R"(
-SELECT schema_id, ducklake_procedure.procedure_id, procedure_name, language, body, return_type, (
+SELECT schema_id, ducklake_procedure.procedure_id, procedure_name, language, body,
+       COALESCE(ducklake_procedure.definition_version, 1), return_type, (
 	SELECT %s
 	FROM {METADATA_CATALOG}.ducklake_procedure_parameters
 	WHERE ducklake_procedure.procedure_id = ducklake_procedure_parameters.procedure_id
@@ -978,8 +988,16 @@ WHERE {SNAPSHOT_ID} >= ducklake_procedure.begin_snapshot
 		procedure_info.procedure_name = row.GetValue<string>(2);
 		procedure_info.language = row.GetValue<string>(3);
 		procedure_info.body = row.GetValue<string>(4);
-		procedure_info.return_type = row.GetValue<string>(5);
-		auto parameters = row.GetValue<Value>(6);
+		procedure_info.definition_version = row.GetValue<uint64_t>(5);
+		if (procedure_info.definition_version > CURRENT_PROCEDURE_DEFINITION_VERSION) {
+			throw InvalidInputException(
+			    "Procedure \"%s\" uses definition version %llu - this build supports up to version %llu. "
+			    "Upgrade the ducklake extension to read this catalog.",
+			    procedure_info.procedure_name, procedure_info.definition_version,
+			    CURRENT_PROCEDURE_DEFINITION_VERSION);
+		}
+		procedure_info.return_type = row.GetValue<string>(6);
+		auto parameters = row.GetValue<Value>(7);
 		if (!parameters.IsNull()) {
 			for (auto &parameter : ListValue::GetChildren(parameters)) {
 				auto &fields = StructValue::GetChildren(parameter);
@@ -2977,11 +2995,12 @@ string DuckLakeMetadataManager::WriteNewProcedures(const vector<DuckLakeProcedur
 	string batch_query;
 	for (auto &procedure : new_procedures) {
 		batch_query += StringUtil::Format(R"(
-INSERT INTO {METADATA_CATALOG}.ducklake_procedure values(%llu,%llu,%s,%s,%s,%s,{SNAPSHOT_ID}, NULL);
+INSERT INTO {METADATA_CATALOG}.ducklake_procedure(schema_id, procedure_id, procedure_name, language, body, return_type, begin_snapshot, end_snapshot, definition_version) values(%llu,%llu,%s,%s,%s,%s,{SNAPSHOT_ID}, NULL, %llu);
 )",
 		                                  procedure.schema_id.index, procedure.procedure_id.index,
 		                                  SQLString(procedure.procedure_name), SQLString(procedure.language),
-		                                  SQLString(procedure.body), SQLString(procedure.return_type));
+		                                  SQLString(procedure.body), SQLString(procedure.return_type),
+		                                  procedure.definition_version);
 		for (idx_t parameter_id = 0; parameter_id < procedure.parameters.size(); parameter_id++) {
 			auto &parameter = procedure.parameters[parameter_id];
 			batch_query += StringUtil::Format(R"(
@@ -3065,9 +3084,10 @@ string DuckLakeMetadataManager::WriteNewMaterializedViews(const vector<DuckLakeM
 			last_refreshed = to_string(view.last_refreshed_snapshot.GetIndex());
 		}
 		view_insert_sql +=
-		    StringUtil::Format("(%d, '%s', {SNAPSHOT_ID}, NULL, %d, %s, %s, %s, %d, %s)", view.id.index, view.uuid,
-		                       view.schema_id.index, SQLString(view.name), SQLString(view.dialect), SQLString(view.sql),
-		                       view.backing_table_id.index, last_refreshed);
+		    StringUtil::Format("(%d, '%s', {SNAPSHOT_ID}, NULL, %d, %s, %s, %s, %d, %s, %llu)", view.id.index,
+		                       view.uuid, view.schema_id.index, SQLString(view.name), SQLString(view.dialect),
+		                       SQLString(view.sql), view.backing_table_id.index, last_refreshed,
+		                       view.definition_version);
 		for (auto &dependency : view.dependencies) {
 			if (!dependency_insert_sql.empty()) {
 				dependency_insert_sql += ", ";
@@ -3078,7 +3098,10 @@ string DuckLakeMetadataManager::WriteNewMaterializedViews(const vector<DuckLakeM
 	}
 	string result;
 	if (!view_insert_sql.empty()) {
-		result += "INSERT INTO {METADATA_CATALOG}.ducklake_materialized_view VALUES " + view_insert_sql + ";";
+		result += "INSERT INTO {METADATA_CATALOG}.ducklake_materialized_view(view_id, view_uuid, begin_snapshot, "
+		          "end_snapshot, schema_id, view_name, dialect, sql, backing_table_id, last_refreshed_snapshot, "
+		          "definition_version) VALUES " +
+		          view_insert_sql + ";";
 	}
 	if (!dependency_insert_sql.empty()) {
 		result += "INSERT INTO {METADATA_CATALOG}.ducklake_materialized_view_dependency VALUES " +
@@ -3147,7 +3170,8 @@ string DuckLakeMetadataManager::DropMaterializedViews(const set<TableIndex> &dro
 vector<DuckLakeMaterializedViewInfo> DuckLakeMetadataManager::LoadMaterializedViews(DuckLakeSnapshot snapshot) {
 	vector<DuckLakeMaterializedViewInfo> result;
 	string view_query = R"(
-SELECT view_id, view_uuid, schema_id, view_name, dialect, sql, backing_table_id, last_refreshed_snapshot
+SELECT view_id, view_uuid, schema_id, view_name, dialect, sql, backing_table_id, last_refreshed_snapshot,
+       COALESCE(definition_version, 1)
 FROM {METADATA_CATALOG}.ducklake_materialized_view
 WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
 )";
@@ -3168,6 +3192,13 @@ WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_s
 		info.backing_table_id = TableIndex(row.GetValue<uint64_t>(6));
 		if (!row.IsNull(7)) {
 			info.last_refreshed_snapshot = row.GetValue<uint64_t>(7);
+		}
+		info.definition_version = row.GetValue<uint64_t>(8);
+		if (info.definition_version > CURRENT_MV_DEFINITION_VERSION) {
+			throw InvalidInputException(
+			    "Materialized view \"%s\" uses definition version %llu - this build supports up to version %llu. "
+			    "Upgrade the ducklake extension to read this catalog.",
+			    info.name, info.definition_version, CURRENT_MV_DEFINITION_VERSION);
 		}
 		result.push_back(std::move(info));
 	}
@@ -5577,8 +5608,13 @@ WHERE table_id IN (%s);)",
 	}
 
 	// delete any views, schemas, macros, etc that are no longer referenced
-	tables_to_delete_from = {"ducklake_schema", "ducklake_view", "ducklake_tag", "ducklake_macro",
-	                         "ducklake_procedure"};
+	tables_to_delete_from = {"ducklake_schema",
+	                         "ducklake_view",
+	                         "ducklake_tag",
+	                         "ducklake_macro",
+	                         "ducklake_procedure",
+	                         "ducklake_materialized_view",
+	                         "ducklake_materialized_view_dependency"};
 	for (auto &delete_tbl : tables_to_delete_from) {
 		auto result = transaction.Query(StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.%s

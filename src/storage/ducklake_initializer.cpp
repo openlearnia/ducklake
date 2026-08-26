@@ -158,13 +158,14 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 	auto metadata = metadata_manager.LoadDuckLake();
 	for (auto &tag : metadata.tags) {
 		if (tag.key == "version") {
+			const string required_version = DuckLakeMetadataManager::CATALOG_VERSION;
 			string version = tag.value;
-			if (version != "1.2" && !options.automatic_migration) {
+			if (version != required_version && !options.automatic_migration) {
 				// Throw when Loading the DuckLake if a Migration is required and automatic_migration option is false
 				throw InvalidInputException(
 				    "DuckLake catalog version mismatch: catalog version is %s, but the extension requires version "
-				    "1.2. To automatically migrate, set AUTOMATIC_MIGRATION to TRUE when attaching.",
-				    version);
+				    "%s. To automatically migrate, set AUTOMATIC_MIGRATION to TRUE when attaching.",
+				    version, required_version);
 			}
 			if (version == "0.1") {
 				metadata_manager.MigrateV01();
@@ -198,14 +199,13 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 				metadata_manager.MigrateV06();
 				version = "1.2";
 			}
-			if (version != "1.2") {
+			if (version == "1.2") {
+				metadata_manager.MigrateV07();
+				version = required_version;
+			}
+			if (version != required_version) {
 				throw NotImplementedException(
 				    "Only DuckLake versions 0.1, 0.2, 0.3-dev1, 0.3, 0.4-dev1, 0.4, 1.0, 1.1, 1.2 are supported");
-			}
-			// Read-only attaches cannot add compatibility metadata. The history table is
-			// created when the catalog is writable and remains readable from this attach.
-			if (!catalog.GetAttached().IsReadOnly()) {
-				metadata_manager.EnsureMaterializedViewRefreshHistoryTable();
 			}
 		}
 		if (tag.key == "data_path") {

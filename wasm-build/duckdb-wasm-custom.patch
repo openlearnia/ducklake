@@ -1,5 +1,31 @@
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 636486e4..e9c0b769 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -160,7 +160,10 @@ if (DUCKDB_WASM_LOADABLE_EXTENSIONS)
+     set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s MAIN_MODULE=1 -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt'")
+   endif()
+ else()
+-  set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s FILESYSTEM=0 -s ENVIRONMENT='web,node,worker' -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt'")
++  # DYNCALLS: the QuickJS interpreter dispatches indirect wasm calls whose
++  # signatures static analysis cannot see; without this the glue lacks the
++  # matching dynCall_* wrappers at runtime ("dynCall_iiijj is not defined").
++  set(WASM_LINK_FLAGS "${WASM_LINK_FLAGS} -s FILESYSTEM=0 -s ENVIRONMENT='web,node,worker' -s EXPORTED_FUNCTIONS='@../../../lib/base_exported_list.txt' -s DYNCALLS=1")
+ endif()
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/lib/base_exported_list.txt b/lib/base_exported_list.txt
+--- a/lib/base_exported_list.txt
++++ b/lib/base_exported_list.txt
+@@ -47,4 +47,5 @@
+ _duckdb_web_reset
+ _duckdb_web_tokenize
+ _duckdb_web_tokenize_buffer
+ _duckdb_web_udf_scalar_create
++_setThrew
+
 diff --git a/lib/cmake/duckdb.cmake b/lib/cmake/duckdb.cmake
-index d6e18a4..caa3c45 100644
+index d6e18a49..5da2b2f0 100644
 --- a/lib/cmake/duckdb.cmake
 +++ b/lib/cmake/duckdb.cmake
 @@ -19,6 +19,19 @@ set(DUCKDB_EXTENSIONS "json;core_functions")
@@ -22,7 +48,7 @@ index d6e18a4..caa3c45 100644
  set(USE_WASM_THREADS FALSE)
  if(DUCKDB_PLATFORM STREQUAL "wasm_threads")
    set(USE_WASM_THREADS TRUE)
-@@ -35,15 +48,16 @@ ExternalProject_Add(
+@@ -35,34 +48,25 @@ ExternalProject_Add(
               -DCMAKE_CXX_FLAGS=${DUCKDB_CXX_FLAGS}
               -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
               -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
@@ -41,8 +67,19 @@ index d6e18a4..caa3c45 100644
               -DUSE_WASM_THREADS=${USE_WASM_THREADS}
               -DDUCKDB_EXPLICIT_PLATFORM=${DUCKDB_EXPLICIT_PLATFORM}
               -DSMALLER_BINARY=1
-@@ -62,7 +76,8 @@ ExternalProject_Add(
-     <INSTALL_DIR>/lib/libduckdb_fastpforlib.a
+   BUILD_BYPRODUCTS
+-    <INSTALL_DIR>/lib/libduckdb_re2.a
+-    <INSTALL_DIR>/lib/libduckdb_zstd.a
+     <INSTALL_DIR>/lib/libduckdb_static.a
+-    <INSTALL_DIR>/lib/libduckdb_fmt.a
+-    <INSTALL_DIR>/lib/libduckdb_fsst.a
+-    <INSTALL_DIR>/lib/libduckdb_hyperloglog.a
+-    <INSTALL_DIR>/lib/libduckdb_miniz.a
+-    <INSTALL_DIR>/lib/libduckdb_mbedtls.a
+-    <INSTALL_DIR>/lib/libduckdb_yyjson.a
+-    <INSTALL_DIR>/lib/libduckdb_pg_query.a
+-    <INSTALL_DIR>/lib/libduckdb_utf8proc.a
+-    <INSTALL_DIR>/lib/libduckdb_fastpforlib.a
      <INSTALL_DIR>/lib/libparquet_extension.a
      <INSTALL_DIR>/lib/libcore_functions_extension.a
 -    <INSTALL_DIR>/lib/libjson_extension.a)
@@ -51,16 +88,420 @@ index d6e18a4..caa3c45 100644
  
  ExternalProject_Get_Property(duckdb_ep install_dir)
  ExternalProject_Get_Property(duckdb_ep binary_dir)
-@@ -94,6 +109,7 @@ target_link_libraries(
-   INTERFACE ${install_dir}/lib/libduckdb_utf8proc.a
-   INTERFACE ${install_dir}/lib/libduckdb_fastpforlib.a
+@@ -82,18 +86,8 @@ set_property(TARGET duckdb PROPERTY IMPORTED_LOCATION ${DUCKDB_LIBRARY_PATH})
+ 
+ target_link_libraries(
+   duckdb
+-  INTERFACE ${install_dir}/lib/libduckdb_re2.a
+-  INTERFACE ${install_dir}/lib/libduckdb_zstd.a
+-  INTERFACE ${install_dir}/lib/libduckdb_fmt.a
+-  INTERFACE ${install_dir}/lib/libduckdb_fsst.a
+-  INTERFACE ${install_dir}/lib/libduckdb_hyperloglog.a
+-  INTERFACE ${install_dir}/lib/libduckdb_miniz.a
+-  INTERFACE ${install_dir}/lib/libduckdb_mbedtls.a
+-  INTERFACE ${install_dir}/lib/libduckdb_yyjson.a
+-  INTERFACE ${install_dir}/lib/libduckdb_pg_query.a
+-  INTERFACE ${install_dir}/lib/libduckdb_utf8proc.a
+-  INTERFACE ${install_dir}/lib/libduckdb_fastpforlib.a
    INTERFACE ${install_dir}/lib/libcore_functions_extension.a
 +  INTERFACE ${install_dir}/lib/libducklake_extension.a
    INTERFACE dl)
  
  target_include_directories(
+diff --git a/lib/include/duckdb/web/functions/table_function_relation.h b/lib/include/duckdb/web/functions/table_function_relation.h
+index 8c0af4b7..261d8026 100644
+--- a/lib/include/duckdb/web/functions/table_function_relation.h
++++ b/lib/include/duckdb/web/functions/table_function_relation.h
+@@ -23,7 +23,7 @@ class TableFunctionRelation : public Relation {
+ 
+     const vector<ColumnDefinition> &Columns() override;
+     string ToString(idx_t depth) override;
+-    string GetAlias() override;
++    Identifier GetAlias() override;
+ };
+ 
+ }  // namespace web
+diff --git a/lib/src/arrow_type_mapping.cc b/lib/src/arrow_type_mapping.cc
+index 10c99530..2087440e 100644
+--- a/lib/src/arrow_type_mapping.cc
++++ b/lib/src/arrow_type_mapping.cc
+@@ -8,6 +8,9 @@
+ #include "arrow/type_fwd.h"
+ #include "duckdb/common/types.hpp"
+ #include "duckdb/common/types/vector.hpp"
++#include "duckdb/common/vector/constant_vector.hpp"
++#include "duckdb/common/vector/flat_vector.hpp"
++#include "duckdb/common/vector/string_vector.hpp"
+ #include "duckdb/web/webdb.h"
+ 
+ namespace duckdb {
+@@ -83,7 +86,7 @@ arrow::Result<duckdb::LogicalType> mapArrowTypeToDuckDB(const arrow::DataType& t
+             child_list_t<LogicalType> children;
+             for (auto& field : type.fields()) {
+                 ARROW_ASSIGN_OR_RAISE(auto t, mapArrowTypeToDuckDB(*field->type()));
+-                children.push_back({field->name(), t});
++                children.push_back({duckdb::Identifier(field->name()), t});
+             }
+             return duckdb::LogicalType::STRUCT(children);
+         }
+@@ -91,7 +94,7 @@ arrow::Result<duckdb::LogicalType> mapArrowTypeToDuckDB(const arrow::DataType& t
+             child_list_t<LogicalType> children;
+             for (auto& field : type.fields()) {
+                 ARROW_ASSIGN_OR_RAISE(auto t, mapArrowTypeToDuckDB(*field->type()));
+-                children.push_back({field->name(), t});
++                children.push_back({duckdb::Identifier(field->name()), t});
+             }
+             return duckdb::LogicalType::STRUCT(children);
+         }
+@@ -99,7 +102,7 @@ arrow::Result<duckdb::LogicalType> mapArrowTypeToDuckDB(const arrow::DataType& t
+             child_list_t<LogicalType> children;
+             for (auto& field : type.fields()) {
+                 ARROW_ASSIGN_OR_RAISE(auto t, mapArrowTypeToDuckDB(*field->type()));
+-                children.push_back({field->name(), t});
++                children.push_back({duckdb::Identifier(field->name()), t});
+             }
+             return duckdb::LogicalType::STRUCT(children);
+         }
+@@ -174,7 +177,7 @@ arrow::Status convertArrowArrayToDuckDBVector(arrow::Array& in, duckdb::Vector&
+     switch (in_type->id()) {
+         // Map null
+         case arrow::Type::type::NA:
+-            out.Reference(Value());
++            ConstantVector::Reference(out, Value(), static_cast<count_t>(in.length()));
+             break;
+ 
+         // Arrow bitpacks booleans
+@@ -183,8 +186,9 @@ arrow::Status convertArrowArrayToDuckDBVector(arrow::Array& in, duckdb::Vector&
+             if (out.GetType().id() == LogicalTypeId::BOOLEAN) {
+                 return arrow::Status::ExecutionError("invalid boolean array");
+             }
++            auto* bool_data = FlatVector::GetDataMutable<bool>(out);
+             for (size_t i = 0; i < a.length(); ++i) {
+-                out.GetData()[i] = a.Value(i);
++                bool_data[i] = a.Value(i);
+             }
+         }
+ 
+@@ -204,7 +208,7 @@ arrow::Status convertArrowArrayToDuckDBVector(arrow::Array& in, duckdb::Vector&
+         case arrow::Type::type::TIME32:
+         case arrow::Type::type::TIME64: {
+             auto* data = reinterpret_cast<uint8_t*>(in.data()->buffers[1]->address());
+-            duckdb::FlatVector::SetData(out, data);
++            duckdb::FlatVector::SetData(out, data, static_cast<count_t>(in.length()));
+             break;
+         }
+ 
+@@ -212,10 +216,9 @@ arrow::Status convertArrowArrayToDuckDBVector(arrow::Array& in, duckdb::Vector&
+         case arrow::Type::type::LARGE_STRING:
+         case arrow::Type::type::STRING: {
+             auto& a = *dynamic_cast<const arrow::StringArray*>(&in);
+-            auto strings = FlatVector::GetData<string_t>(out);
+             for (size_t i = 0; i < a.length(); ++i) {
+-                auto s = a.GetView(i);
+-                strings[i] = string_t(s.data(), s.length());
++                auto view = a.GetView(i);
++                StringVector::AddString(out, view.data(), view.length());
+             }
+             break;
+         }
+diff --git a/lib/src/functions/table_function_relation.cc b/lib/src/functions/table_function_relation.cc
+index b6009397..dbf454b9 100644
+--- a/lib/src/functions/table_function_relation.cc
++++ b/lib/src/functions/table_function_relation.cc
+@@ -37,27 +37,27 @@ unique_ptr<TableRef> TableFunctionRelation::GetTableRef() {
+     vector<unique_ptr<ParsedExpression>> children;
+     if (input_relation) {  // input relation becomes first parameter if present, always
+         auto subquery = std::make_unique<duckdb::SubqueryExpression>();
+-        subquery->subquery = duckdb::make_uniq<duckdb::SelectStatement>();
+-        subquery->subquery->node = input_relation->GetQueryNode();
+-        subquery->subquery_type = SubqueryType::SCALAR;
++        subquery->SubqueryMutable() = duckdb::make_uniq<duckdb::SelectStatement>();
++        subquery->SubqueryMutable()->node = input_relation->GetQueryNode();
++        subquery->GetSubqueryTypeMutable() = SubqueryType::SCALAR;
+         children.push_back(std::move(subquery));
+     }
+     for (auto &parameter : unnamed_parameters) {
+         children.push_back(std::make_unique<ConstantExpression>(parameter));
+     }
+     for (auto &[k, v] : named_parameters) {
+-        auto l = duckdb::make_uniq<ColumnRefExpression>(k);
++        auto l = duckdb::make_uniq<ColumnRefExpression>(Identifier(k));
+         auto r = duckdb::make_uniq<ConstantExpression>(v);
+         auto eq = duckdb::make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(l), std::move(r));
+         children.push_back(std::move(eq));
+     }
+     auto table_function = std::make_unique<TableFunctionRef>();
+-    auto function = duckdb::make_uniq<FunctionExpression>(name, std::move(children));
++    auto function = duckdb::make_uniq<FunctionExpression>(Identifier(name), std::move(children));
+     table_function->function = std::move(function);
+     return std::move(table_function);
+ }
+ 
+-string TableFunctionRelation::GetAlias() { return name; }
++Identifier TableFunctionRelation::GetAlias() { return Identifier(name); }
+ 
+ const vector<ColumnDefinition> &TableFunctionRelation::Columns() { return columns; }
+ 
+diff --git a/lib/src/http_wasm.cc b/lib/src/http_wasm.cc
+index cabfec64..e2f4be80 100644
+--- a/lib/src/http_wasm.cc
++++ b/lib/src/http_wasm.cc
+@@ -164,6 +164,9 @@ class HTTPWasmClient : public HTTPClient {
+ 
+         return res;
+     }
++    unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
++        return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
++    }
+     unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
+         unique_ptr<HTTPResponse> res;
+ 
+diff --git a/lib/src/json_dataview.cc b/lib/src/json_dataview.cc
+index ca813cfb..40264e2e 100644
+--- a/lib/src/json_dataview.cc
++++ b/lib/src/json_dataview.cc
+@@ -6,6 +6,10 @@
+ #include <cstdint>
+ #include <duckdb/common/types.hpp>
+ #include <duckdb/common/types/vector.hpp>
++#include <duckdb/common/vector/constant_vector.hpp>
++#include <duckdb/common/vector/flat_vector.hpp>
++#include <duckdb/common/vector/string_vector.hpp>
++#include <duckdb/common/vector/struct_vector.hpp>
+ #include <iostream>
+ #include <memory>
+ #include <optional>
+@@ -103,7 +107,7 @@ arrow::Result<rapidjson::Value> CreateDataView(rapidjson::Document& doc, duckdb:
+             switch (vec_type.id()) {
+                 case LogicalTypeId::INTEGER:
+                 case LogicalTypeId::DOUBLE:
+-                    data_ptrs.push_back(static_cast<double>(reinterpret_cast<uintptr_t>(vec->GetData())));
++                    data_ptrs.push_back(static_cast<double>(reinterpret_cast<uintptr_t>(FlatVector::GetData(*vec))));
+                     desc.AddMember("dataBuffer", rapidjson::Value{static_cast<uint64_t>(data_ptrs.size() - 1)},
+                                    allocator);
+                     break;
+@@ -132,9 +136,9 @@ arrow::Result<rapidjson::Value> CreateDataView(rapidjson::Document& doc, duckdb:
+                         auto c = child_count - 1 - i;
+                         auto& entry = entries[c];
+                         rapidjson::Value desc{rapidjson::kObjectType};
+-                        auto name = StructType::GetChildName(vec_type, c);
++                        auto name = StructType::GetChildName(vec_type, c).GetIdentifierName();
+                         desc.AddMember("name", rapidjson::Value{name, allocator}, allocator);
+-                        pending.push_back({false, entry.get(), std::move(desc), current_idx});
++                        pending.push_back({false, &entry, std::move(desc), current_idx});
+                     }
+                     break;
+                 }
+diff --git a/lib/src/json_typedef.cc b/lib/src/json_typedef.cc
+index 145bce31..67a1f288 100644
+--- a/lib/src/json_typedef.cc
++++ b/lib/src/json_typedef.cc
+@@ -306,7 +306,6 @@ arrow::Result<rapidjson::Value> WriteSQLType(rapidjson::Document& doc, const duc
+         case duckdb::LogicalTypeId::ANY:
+             out.AddMember("sqlType", "any", alloc);
+             break;
+-        case duckdb::LogicalTypeId::USER:
+             out.AddMember("sqlType", "user", alloc);
+             break;
+         case duckdb::LogicalTypeId::BOOLEAN:
+@@ -355,7 +354,7 @@ arrow::Result<rapidjson::Value> WriteSQLType(rapidjson::Document& doc, const duc
+             out.AddMember("sqlType", "struct", alloc);
+             rapidjson::Value children(rapidjson::kArrayType);
+             for (auto& child : duckdb::StructType::GetChildTypes(type)) {
+-                ARROW_ASSIGN_OR_RAISE(auto field, WriteSQLField(doc, child.first, child.second, true));
++                ARROW_ASSIGN_OR_RAISE(auto field, WriteSQLField(doc, child.first.GetIdentifierName(), child.second, true));
+                 children.PushBack(field, alloc);
+             }
+             out.AddMember("fields", children, alloc);
+@@ -393,7 +392,7 @@ arrow::Result<rapidjson::Value> WriteSQLType(rapidjson::Document& doc, const duc
+         case duckdb::LogicalTypeId::BLOB:
+         case duckdb::LogicalTypeId::CHAR:
+         case duckdb::LogicalTypeId::TABLE:
+-        case duckdb::LogicalTypeId::AGGREGATE_STATE:
++        case duckdb::LogicalTypeId::LEGACY_AGGREGATE_STATE:
+         case duckdb::LogicalTypeId::BIT:
+         case duckdb::LogicalTypeId::LAMBDA:
+         case duckdb::LogicalTypeId::STRING_LITERAL:
+diff --git a/lib/src/webdb.cc b/lib/src/webdb.cc
+index 9bdad163..92850683 100644
+--- a/lib/src/webdb.cc
++++ b/lib/src/webdb.cc
+@@ -38,6 +38,7 @@
+ #include "duckdb/common/types/data_chunk.hpp"
+ #include "duckdb/common/types/vector.hpp"
+ #include "duckdb/common/types/vector_buffer.hpp"
++#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+ #include "duckdb/common/virtual_file_system.hpp"
+ #include "duckdb/main/query_result.hpp"
+ #include "duckdb/main/settings.hpp"
+@@ -119,7 +120,11 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::MaterializeQuer
+                              ArrowFormatVersion::V1_0, connection_.context);
+     unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
+     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
+-    ArrowConverter::ToArrowSchema(&raw_schema, result->types, result->names, options);
++    vector<string> result_names;
++    for (auto& name : result->GetNames()) {
++        result_names.push_back(name.GetIdentifierName());
++    }
++    ArrowConverter::ToArrowSchema(&raw_schema, result->GetTypes(), result_names, options);
+     ARROW_ASSIGN_OR_RAISE(auto schema, arrow::ImportSchema(&raw_schema));
+ 
+     // Patch the schema (if necessary)
+@@ -156,7 +161,11 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> WebDB::Connection::StreamQueryResu
+     ClientProperties options("UTC", ArrowOffsetSize::REGULAR, false, false, lossless_conversion,
+                              ArrowFormatVersion::V1_0, connection_.context);
+     options.arrow_offset_size = ArrowOffsetSize::REGULAR;
+-    ArrowConverter::ToArrowSchema(&raw_schema, current_query_result_->types, current_query_result_->names, options);
++    vector<string> current_names;
++    for (auto& name : current_query_result_->GetNames()) {
++        current_names.push_back(name.GetIdentifierName());
++    }
++    ArrowConverter::ToArrowSchema(&raw_schema, current_query_result_->GetTypes(), current_names, options);
+     ARROW_ASSIGN_OR_RAISE(current_schema_, arrow::ImportSchema(&raw_schema));
+     current_schema_patched_ = patchSchema(current_schema_, webdb_.config_->query);
+ 
+@@ -282,7 +291,7 @@ DuckDBWasmResultsWrapper WebDB::Connection::FetchQueryResults() {
+             return DuckDBWasmResultsWrapper{nullptr};
+         }
+ 
+-        if (current_query_result_->type == QueryResultType::STREAM_RESULT) {
++        if (current_query_result_->GetResultType() == QueryResultType::STREAM_RESULT) {
+             auto& stream_result = current_query_result_->Cast<duckdb::StreamQueryResult>();
+ 
+             auto before = std::chrono::steady_clock::now();
+@@ -470,7 +479,10 @@ arrow::Status WebDB::Connection::CreateScalarFunction(std::string_view def_json)
+     };
+ 
+     // Register the vectorized function
+-    connection_.CreateVectorizedFunction(name, vector<LogicalType>{}, ret_type, udf, LogicalType::ANY);
++    duckdb::ScalarFunction scalar_fn(duckdb::Identifier(name), vector<LogicalType>{}, ret_type, udf, nullptr, nullptr,
++                                     nullptr, LogicalType(LogicalTypeId::INVALID));
++    duckdb::CreateScalarFunctionInfo info(scalar_fn);
++    connection_.context->RegisterFunction(info);
+     return arrow::Status::OK();
+ }
+ 
+@@ -481,18 +493,6 @@ extern "C" void duckdb_web_udf_scalar_call(WASMResponse* response, size_t functi
+                                            size_t desc_size, const void* ptrs_buf, size_t ptrs_size);
+ #endif
+ 
+-namespace {
+-
+-class SharedVectorBuffer : public VectorBuffer {
+-   protected:
+-    std::unique_ptr<char[]> data;
+-
+-   public:
+-    explicit SharedVectorBuffer(std::unique_ptr<char[]> data)
+-        : VectorBuffer(VectorBufferType::STANDARD_BUFFER), data(std::move(data)) {}
+-};
+-
+-}  // namespace
+ 
+ typedef vector<unique_ptr<data_t[]>> additional_buffers_t;
+ 
+@@ -560,21 +560,18 @@ arrow::Status WebDB::Connection::CallScalarUDFFunction(UDFFunctionDeclaration& f
+     // basically inverse of what happens above for strings
+     if (out.GetType().id() == LogicalTypeId::VARCHAR) {
+         auto string_ptr_buf = reinterpret_cast<double*>(static_cast<uintptr_t>(res_arr[0]));
+-        auto out_string_ptr = FlatVector::GetData<string_t>(out);
+         auto len_buf = reinterpret_cast<double*>(static_cast<uintptr_t>(res_arr[2]));
+         for (idx_t row_idx = 0; row_idx < chunk.size(); row_idx++) {
+             if (!validity_arr[row_idx]) {
+                 continue;
+             }
+             auto string_ptr = reinterpret_cast<const char*>(static_cast<uintptr_t>(string_ptr_buf[row_idx]));
+-            out_string_ptr[row_idx] = StringVector::AddString(out, string_ptr, len_buf[row_idx]);
++            StringVector::AddString(out, string_ptr, static_cast<size_t>(len_buf[row_idx]));
+         }
+ 
+     } else {
+-        auto res_buf = reinterpret_cast<char*>(static_cast<uintptr_t>(res_arr[0]));
+-        auto shared_buffer = duckdb::make_shared_ptr<SharedVectorBuffer>(std::unique_ptr<char[]>{res_buf});
+-        out.SetAuxiliary(shared_buffer);
+-        duckdb::FlatVector::SetData(out, (data_ptr_t)res_buf);
++        auto res_buf = reinterpret_cast<data_ptr_t>(static_cast<uintptr_t>(res_arr[0]));
++        duckdb::FlatVector::SetData(out, res_buf, count_t(chunk.size()));
+     }
+ 
+     free(validity_arr);
+@@ -620,9 +617,9 @@ arrow::Status WebDB::Connection::InsertArrowFromIPCStream(nonstd::span<const uin
+ 
+         /// Create or insert
+         if (arrow_insert_options_->create_new) {
+-            func->Create(arrow_insert_options_->schema_name, arrow_insert_options_->table_name);
++            func->Create(duckdb::Identifier(arrow_insert_options_->table_name));
+         } else {
+-            func->Insert(arrow_insert_options_->schema_name, arrow_insert_options_->table_name);
++            func->Insert(duckdb::Identifier(arrow_insert_options_->table_name));
+         }
+ 
+         // Reset the ipc stream
+@@ -680,7 +677,7 @@ arrow::Status WebDB::Connection::InsertCSVFromPath(std::string_view path, std::s
+             columns.reserve(options.columns.value().size());
+             for (auto& col : options.columns.value()) {
+                 ARROW_ASSIGN_OR_RAISE(auto type, mapArrowTypeToDuckDB(*col->type()));
+-                columns.push_back(make_pair(col->name(), Value(type.ToString())));
++                columns.push_back(make_pair(duckdb::Identifier(col->name()), Value(type.ToString())));
+             }
+             named_params.insert({"columns", Value::STRUCT(std::move(columns))});
+         }
+@@ -692,9 +689,9 @@ arrow::Status WebDB::Connection::InsertCSVFromPath(std::string_view path, std::s
+ 
+         /// Create or insert
+         if (options.create_new) {
+-            func->Create(options.schema_name, options.table_name);
++            func->Create(duckdb::Identifier(options.table_name));
+         } else {
+-            func->Insert(options.schema_name, options.table_name);
++            func->Insert(duckdb::Identifier(options.table_name));
+         }
+ 
+     } catch (const std::exception& e) {
+@@ -741,9 +738,9 @@ arrow::Status WebDB::Connection::InsertJSONFromPath(std::string_view path, std::
+ 
+         /// Create or insert
+         if (options.create_new) {
+-            func->Create(schema_name, options.table_name);
++            func->Create(duckdb::Identifier(options.table_name));
+         } else {
+-            func->Insert(schema_name, options.table_name);
++            func->Insert(duckdb::Identifier(schema_name), duckdb::Identifier(options.table_name));
+         }
+ 
+     } catch (const std::exception& e) {
+@@ -964,14 +961,15 @@ arrow::Status WebDB::Open(std::string_view args_json) {
+ 
+         duckdb::DBConfig db_config;
+         db_config.file_system = std::move(make_uniq<VirtualFileSystem>(std::move(buffered_fs)));
+-        db_config.options.allow_unsigned_extensions = config_->allow_unsigned_extensions;
++        db_config.SetOption("allow_unsigned_extensions",
++                          duckdb::Value::BOOLEAN(config_->allow_unsigned_extensions));
+         db_config.SetOption("arrow_lossless_conversion", config_->arrow_lossless_conversion);
+         db_config.options.maximum_threads = config_->maximum_threads;
+         db_config.options.use_temporary_directory = false;
+         db_config.options.access_mode = access_mode;
+-        db_config.options.duckdb_api = "wasm";
++        db_config.SetOption("duckdb_api", duckdb::Value("wasm"));
+         db_config.options.custom_user_agent = config_->custom_user_agent;
+-        db_config.options.use_direct_io = config_->use_direct_io;
++        db_config.SetOption("use_direct_io", duckdb::Value::BOOLEAN(config_->use_direct_io));
+         auto db = make_shared_ptr<duckdb::DuckDB>(config_->path, &db_config);
+ #ifndef WASM_LOADABLE_EXTENSIONS
+         duckdb_web_parquet_init(db.get());
+@@ -982,8 +980,8 @@ arrow::Status WebDB::Open(std::string_view args_json) {
+         RegisterCustomExtensionOptions(db);
+ 
+         auto& config = duckdb::DBConfig::GetConfig(*db->instance);
+-        if (!config.http_util || config.http_util->GetName() != string("WasmHTTPUtils")) {
+-            config.http_util = make_shared_ptr<HTTPWasmUtil>();
++        if (&config.GetHTTPUtil() == nullptr || config.GetHTTPUtil().GetName() != string("WasmHTTPUtils")) {
++            config.SetHTTPUtil(make_shared_ptr<HTTPWasmUtil>());
+         }
+ 
+         if (!config.encryption_util) {
 diff --git a/scripts/wasm_build_lib.sh b/scripts/wasm_build_lib.sh
-index f697bad..876b0fa 100755
+index f697badf..876b0fac 100755
 --- a/scripts/wasm_build_lib.sh
 +++ b/scripts/wasm_build_lib.sh
 @@ -57,11 +57,9 @@ emcmake cmake \
