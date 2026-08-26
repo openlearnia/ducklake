@@ -39,6 +39,7 @@ export DUCKLAKE_SOURCE_DIR="$ducklake_dir"
 export DUCKDB_WASM_LOADABLE_EXTENSIONS=1
 export DUCKDB_EXTENSION_CONFIGS="$ducklake_dir/wasm-build/extension_config_wasm.cmake"
 export DUCKDB_WASM_VERSION="openlearnia-ducklake-playground"
+export USE_GENERATED_EXPORTED_LIST="${USE_GENERATED_EXPORTED_LIST:-no}"
 
 bash "$duckdb_wasm_dir/scripts/wasm_build_lib.sh" relperf "$variant" "$ducklake_dir/duckdb"
 
