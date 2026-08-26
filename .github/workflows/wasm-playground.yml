@@ -46,6 +46,7 @@ jobs:
           ref: ${{ env.DUCKDB_WASM_REF }}
           path: duckdb-wasm
           fetch-depth: 1
+          submodules: recursive
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
