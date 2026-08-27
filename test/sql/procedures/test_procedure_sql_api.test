@@ -1,0 +1,65 @@
+# name: test/sql/procedures/test_procedure_sql_api.test
+# description: persisted DuckLake JavaScript procedures can execute SQL
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/test_procedure_sql_api.db
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{TEST_DIR}/test_procedure_sql_api');
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE procedure_values(value INTEGER);
+
+statement ok
+CREATE PROCEDURE append_and_count(value INTEGER)
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+  duckdb.execute('INSERT INTO ducklake.main.procedure_values VALUES ($1)', [value]);
+  const rows = duckdb.query('SELECT count(*) AS row_count FROM ducklake.main.procedure_values');
+  return rows[0].row_count;
+$$;
+
+query I
+CALL append_and_count(7);
+----
+1
+
+query I
+CALL append_and_count(9);
+----
+2
+
+query I
+SELECT sum(value) FROM procedure_values;
+----
+16
+
+statement ok
+USE memory;
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{TEST_DIR}/test_procedure_sql_api');
+
+statement ok
+USE ducklake
+
+query I
+CALL append_and_count(11);
+----
+3
+
+query I
+SELECT count(*) FROM procedure_values;
+----
+3
