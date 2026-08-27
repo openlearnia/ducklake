@@ -25,6 +25,8 @@ on:
     paths:
       - "src/**"
       - "test/sql/materialized_view/**"
+      - "test/sql/procedures/**"
+      - "duckdb"
       - "extension_config.cmake"
       - ".github/duckdb-version"
       - ".github/duckdb-ref"
