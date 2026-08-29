@@ -22,8 +22,8 @@ CREATE PROCEDURE append_and_count(value INTEGER)
 RETURNS INTEGER
 LANGUAGE JAVASCRIPT
 AS $$
-  duckdb.execute('INSERT INTO ducklake.main.procedure_values VALUES ($1)', [value]);
-  const rows = duckdb.query('SELECT count(*) AS row_count FROM ducklake.main.procedure_values');
+  await duckdb.execute('INSERT INTO ducklake.main.procedure_values VALUES ($1)', [value]);
+  const rows = await duckdb.query('SELECT count(*) AS row_count FROM ducklake.main.procedure_values');
   return rows[0].row_count;
 $$;
 
@@ -42,6 +42,84 @@ SELECT sum(value) FROM procedure_values;
 ----
 16
 
+# Promise.all submits work in order while retaining one serialized invocation connection.
+
+statement ok
+CREATE PROCEDURE async_append_batch(value INTEGER)
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+  const results = await Promise.all([
+    duckdb.execute('INSERT INTO ducklake.main.procedure_values VALUES ($1)', [value]),
+    duckdb.execute('INSERT INTO ducklake.main.procedure_values VALUES ($1)', [value + 1]),
+    duckdb.query('SELECT count(*) AS row_count FROM ducklake.main.procedure_values')
+  ]);
+  return results[2][0].row_count;
+$$;
+
+query I
+CALL async_append_batch(13);
+----
+4
+
+query I
+SELECT sum(value) FROM procedure_values;
+----
+43
+
+# Explicit transaction callbacks commit all DuckLake writes together.
+
+statement ok
+CREATE PROCEDURE append_transactionally(value INTEGER)
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+  await duckdb.transaction(async () => {
+    await duckdb.execute('INSERT INTO ducklake.main.procedure_values VALUES ($1)', [value]);
+    await Promise.resolve();
+    await duckdb.execute('INSERT INTO ducklake.main.procedure_values VALUES ($1)', [value + 1]);
+  });
+  return (await duckdb.query('SELECT count(*) AS row_count FROM ducklake.main.procedure_values'))[0].row_count;
+$$;
+
+query I
+CALL append_transactionally(20);
+----
+6
+
+query I
+SELECT sum(value) FROM procedure_values;
+----
+84
+
+# A callback failure rolls back all writes in the DuckLake transaction.
+
+statement ok
+CREATE PROCEDURE rollback_transaction(value INTEGER)
+RETURNS VARCHAR
+LANGUAGE JAVASCRIPT
+AS $$
+  try {
+    await duckdb.transaction(async () => {
+      await duckdb.execute('INSERT INTO ducklake.main.procedure_values VALUES ($1)', [value]);
+      throw new Error('abort transaction');
+    });
+  } catch (e) {
+    return e.message;
+  }
+  return 'no error';
+$$;
+
+query T
+CALL rollback_transaction(99);
+----
+abort transaction
+
+query I
+SELECT count(*) FROM procedure_values;
+----
+6
+
 statement ok
 USE memory;
 
@@ -57,9 +135,9 @@ USE ducklake
 query I
 CALL append_and_count(11);
 ----
-3
+7
 
 query I
 SELECT count(*) FROM procedure_values;
 ----
-3
+7

@@ -1,85 +1,130 @@
 # SQL access from JavaScript stored procedures
 
-`CREATE PROCEDURE ... LANGUAGE JAVASCRIPT` bodies execute inside an embedded
-[quickjs-ng](https://github.com/quickjs-ng/quickjs) sandbox. Historically that sandbox was
-isolated: procedures could only compute over their scalar arguments and could never touch
-the database. This document describes the SQL API injected into every JavaScript procedure.
+`CREATE PROCEDURE ... LANGUAGE JAVASCRIPT` bodies run inside an embedded
+[quickjs-ng](https://github.com/quickjs-ng/quickjs) sandbox. Every invocation receives a
+fresh `duckdb` object backed by a private DuckDB connection.
 
-## The `duckdb` global
+## Promise-based API
 
-Every procedure invocation receives a fresh `duckdb` object with two methods:
+`execute`, `query`, and `transaction` always return Promises. Use `await` (or compose the
+Promises with `Promise.all`) for every SQL operation:
 
 ```sql
 CREATE PROCEDURE add_stock(item VARCHAR, amount INTEGER)
 RETURNS INTEGER
 LANGUAGE JAVASCRIPT
 AS $$
-  // 1. run DDL/DML, or any statement; parameters bind positionally ($1, $2, ...)
-  duckdb.execute('INSERT INTO inventory VALUES ($1, $2)', [item, amount]);
-
-  // 2. run a read and get the rows back as an array of row objects
-  const rows = duckdb.query('SELECT count(*) AS n FROM inventory');
+  await duckdb.execute('INSERT INTO inventory VALUES ($1, $2)', [item, amount]);
+  const rows = await duckdb.query('SELECT count(*) AS n FROM inventory');
   return Number(rows[0].n);
 $$;
 
-CALL add_stock('cherry', 3);   -- → 3
+CALL add_stock('cherry', 3); -- -> 3
 ```
 
-| Method | Accepts | Returns |
-| --- | --- | --- |
-| `duckdb.execute(sql[, params])` | one or more statements | `undefined`; throws on error |
-| `duckdb.query(sql[, params])` | a statement producing rows | `Array<Object>` — one `{columnName: value, ...}` per row |
+The procedure body itself is compiled as an `async` function, so ordinary JavaScript
+microtasks and `await Promise.resolve(...)` work as expected. A procedure that only computes
+and returns a scalar remains valid; its scalar is the fulfilled value of the implicit root
+Promise.
 
-Both accept an optional `Array` of bind values (booleans, numbers, bigints, strings,
-`null`). Values cast like ordinary prepared-statement parameters (e.g. the string
-`'2026-01-15'` binds into a `DATE` parameter). Anything non-scalar passed as a parameter,
-or anything other than `Array`/`undefined`/`null` as the second argument, raises a
-`TypeError`. Both raise on failure with the original DuckDB error message, so SQL errors
-are catchable in plain `try/catch`.
+| Method | Accepts | Fulfilled value |
+| --- | --- | --- |
+| `duckdb.execute(sql[, params])` | one or more statements | `undefined` |
+| `duckdb.query(sql[, params])` | a statement producing rows | `Array<Object>` |
+| `duckdb.transaction(callback)` | synchronous or async callback | callback's value, after commit |
+
+Parameter values may be booleans, numbers, bigints, strings, or `null`. Values are bound like
+ordinary prepared-statement parameters. Argument shape/conversion errors throw synchronously;
+SQL and result-conversion failures reject the returned Promise with an `Error` whose message
+retains DuckDB's error text.
+
+This is a Promise-only surface. Existing procedures written for the old synchronous helpers
+must add `await` before every `duckdb.execute`, `duckdb.query`, and `duckdb.transaction` call.
+
+## Concurrency and operation lifetime
+
+Each invocation owns one connection and a serialized SQL-operation queue. The queue executes at
+most one statement at a time on that connection, while separate procedure invocations can run
+concurrently. Therefore `Promise.all` is safe for batching, but statements submitted by one
+procedure still settle in submission order:
+
+```js
+const [, , rows] = await Promise.all([
+  duckdb.execute('INSERT INTO events VALUES (1)'),
+  duckdb.execute('INSERT INTO events VALUES (2)'),
+  duckdb.query('SELECT count(*) AS n FROM events')
+]);
+return rows[0].n; // 2
+```
+
+The host waits for the root procedure Promise and for every queued operation before returning
+from `CALL`. An operation may therefore be intentionally un-awaited when only its side effect
+matters, although awaiting it is recommended so errors can be handled explicitly. SQL errors
+reject their own Promise; a rejected operation inside an explicit transaction also makes that
+transaction rollback-only, even when JavaScript catches the rejection.
+
+Statements run on the private connection, not the caller's connection. Caller-local settings
+and uncommitted changes are not visible. Outside an explicit transaction, each operation is
+independently auto-committed; later operations in the same procedure see earlier committed
+writes.
+
+## Transactions across `await`
+
+`duckdb.transaction` owns the transaction boundary and keeps it open while the callback is
+suspended at `await`:
+
+```sql
+CREATE PROCEDURE transfer(from_id INTEGER, to_id INTEGER, amount INTEGER)
+RETURNS VARCHAR
+LANGUAGE JAVASCRIPT
+AS $$
+  await duckdb.transaction(async () => {
+    await duckdb.execute(
+      'UPDATE accounts SET balance = balance - $1 WHERE id = $2', [amount, from_id]);
+    await Promise.resolve();
+    await duckdb.execute(
+      'UPDATE accounts SET balance = balance + $1 WHERE id = $2', [amount, to_id]);
+  });
+  return 'transferred';
+$$;
+```
+
+The callback may return normally or reject. All callback-submitted SQL is drained before the
+transaction commits, including operations accidentally left un-awaited. The transaction rolls
+back when the callback rejects, any SQL operation fails, result conversion fails, or commit
+fails. Nested `duckdb.transaction` calls are rejected. Raw `BEGIN`, `START TRANSACTION`,
+`COMMIT`, `ROLLBACK`, `ABORT`, and `END` statements (including later statements in a multi-
+statement `execute`) are rejected because the callback owns transaction control.
 
 ## Value conversion
 
-* **Result columns → JavaScript:** `BOOLEAN` → boolean; integer families up to `BIGINT`
-  and unsigned ints ≤ 32-bit → number; `FLOAT`, `DOUBLE`, `DECIMAL`, `HUGEINT`,
-  `UBIGINT` → double (may lose precision); everything else (`VARCHAR`, `DATE`,
-  `TIMESTAMP`, enums, blobs, lists, structs, …) → its string representation.
-  Duplicate column names: the last column wins.
-* **Parameters → SQL:** numbers that are exact integers within `int64` range bind as
-  `BIGINT`, other numbers as `DOUBLE`, bigints as `UBIGINT`; casting to the statement's
-  expected type happens server-side during binding.
+* `BOOLEAN` becomes a JavaScript boolean.
+* Integer types through `BIGINT` and unsigned integers through 32-bit become JavaScript
+  numbers.
+* `FLOAT`, `DOUBLE`, `DECIMAL`, `HUGEINT`, and `UBIGINT` become doubles and may lose precision.
+* Other result types (`VARCHAR`, dates, timestamps, blobs, lists, structs, and so on) use their
+  string representation.
+* Query results are arrays of objects keyed by column name; duplicate names use the last value.
+* `null` SQL cells become JavaScript `null`.
 
-## Execution semantics (read before relying on side effects)
+## Limits and implementation
 
-1. **Dedicated connection.** Statements run on a private connection opened against the
-   same database instance as the calling session — never on the caller's connection. A
-   procedure can therefore always execute, even mid-query of the outer statement.
-   Consequences:
-   * Session-scoped state of the caller (`SET` options, open transactions) does **not**
-     apply. Each helper call runs in its own auto-commit transaction.
-   * Writes commit immediately: a later `duckdb.query` in the same body sees earlier
-     writes; so does the caller after the procedure returns.
-   * Uncommitted changes from the caller's transaction are **not** visible inside the
-     procedure, and vice versa until they commit.
-2. **Recursion limit.** Because procedures can run SQL (and SQL can `CALL` procedures),
-   runaway recursion would exhaust the C++ stack. Nesting more than 16 procedure frames
-   on one thread throws *"JavaScript procedure nesting limit exceeded"*. Raise it via
-   `kMaxProcedureNesting` in `physical_call_procedure.cpp`.
-3. **Resource limits per invocation.** Each `CALL` gets a fresh JS runtime with a 64 MiB
-   heap cap and 8 MB stack cap (unchanged from the pre-SQL behavior). Query results are
-   fully materialized C++-side before conversion, so result sets are bounded by database
-   memory, not the JS heap cap.
+Every `CALL` gets a fresh QuickJS runtime with a 64 MiB heap limit and an 8 MiB stack limit.
+Query results are materialized before conversion. A nesting guard rejects more than 16 nested
+JavaScript procedure calls, including calls made through SQL.
 
-## Implementation notes
+The implementation is in
+`ducklake/duckdb/src/execution/operator/helper/physical_call_procedure.cpp`:
 
-Everything lives in
-`src/execution/operator/helper/physical_call_procedure.cpp`:
+* `RegisterSqlApi` installs the Promise-based helpers.
+* A per-invocation worker serializes DuckDB operations and publishes completion records.
+* The QuickJS owner thread pumps Promise jobs, settles SQL Promises, and advances the
+  transaction state machine.
+* Runtime and connection cleanup waits for the worker and all completion records.
 
-* `RegisterSqlApi` installs the global before the body compiles; both functions share
-  `JsCallSqlApi`, switching on the function's magic value (`0` = execute, `1` = query).
-* The nested `Connection` for the invocation is held by `ProcedureSqlApi` and reached
-  from callbacks through QuickJS' runtime opaque pointer.
-* All C++ exceptions are converted to JavaScript errors at the callback boundary —
-  no exception may unwind through quickjs's C frames.
+Coverage is provided by:
 
-Tests: `test/sql/catalog/procedure.test` (persistence/CALL semantics) and
-`test/sql/catalog/procedure_sql_api.test` (SQL API).
+* `ducklake/duckdb/test/sql/catalog/procedure_sql_api.test` (native async, batching,
+  transactions, rollback, validation, cleanup, and recursion cases).
+* `ducklake/duckdb/test/sql/catalog/procedure.test` (baseline procedure behavior).
+* `ducklake/test/sql/procedures/test_procedure_sql_api.test` (persisted DuckLake procedures).
