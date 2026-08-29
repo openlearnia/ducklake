@@ -29,7 +29,7 @@ on:
       - "duckdb"
       - "extension_config.cmake"
       - ".github/duckdb-version"
-      - ".github/duckdb-ref"
+      - ".github/scripts/validate_paired_release.py"
       - ".github/workflows/GrainExtensionPublish.yml"
       - ".github/workflows/_grain_extension_distribution.yml"
 
@@ -55,16 +55,22 @@ jobs:
           sparse-checkout: .github
       - id: version
         run: |
+          set -euo pipefail
+          duckdb_ref="$(git ls-tree HEAD duckdb | awk '{print $3}')"
+          if [[ ! "$duckdb_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "duckdb gitlink is not a full lowercase commit SHA: $duckdb_ref" >&2
+            exit 1
+          fi
           echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
-          echo "duckdb_ref=$(cat .github/duckdb-ref)" >> "$GITHUB_OUTPUT"
+          echo "duckdb_ref=$duckdb_ref" >> "$GITHUB_OUTPUT"
 
   build-linux-amd64:
     name: Build linux_amd64 ducklake
     needs: get-duckdb-version
     uses: ./.github/workflows/_grain_extension_distribution.yml
     with:
-      # The extension must compile against the exact OpenLearnia DuckDB commit
-      # that adds the MV parser contract, not a stock DuckDB release tag.
+      # The extension compiles against the exact DuckDB gitlink recorded by this
+      # parent commit, not a separately maintained release pin.
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}
       override_git_describe: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       override_duckdb_repository: https://github.com/openlearnia/duckdb.git

@@ -9,7 +9,6 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 CALLER = ROOT / ".github/workflows/GrainExtensionPublish.yml"
 REUSABLE = ROOT / ".github/workflows/_grain_extension_distribution.yml"
-REF_FILE = ROOT / ".github/duckdb-ref"
 
 
 def fail(message: str) -> None:
@@ -17,12 +16,15 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-if not REF_FILE.is_file():
-    fail(".github/duckdb-ref is missing")
-
-duckdb_ref = REF_FILE.read_text().strip()
+gitlink_line = subprocess.check_output(
+    ["git", "-C", str(ROOT), "ls-tree", "HEAD", "duckdb"], text=True
+).strip()
+gitlink_parts = gitlink_line.split()
+if len(gitlink_parts) < 3 or gitlink_parts[0] != "160000" or gitlink_parts[1] != "commit":
+    fail("duckdb must be a git submodule gitlink in the parent commit")
+duckdb_ref = gitlink_parts[2]
 if not re.fullmatch(r"[0-9a-f]{40}", duckdb_ref):
-    fail(".github/duckdb-ref must contain one full lowercase commit SHA")
+    fail("duckdb gitlink must contain one full lowercase commit SHA")
 
 submodule_ref = subprocess.check_output(
     ["git", "-C", str(ROOT / "duckdb"), "rev-parse", "HEAD"], text=True
@@ -34,6 +36,7 @@ caller = CALLER.read_text()
 reusable = REUSABLE.read_text()
 required_caller_fragments = (
     "override_duckdb_repository: https://github.com/openlearnia/duckdb.git",
+    "git ls-tree HEAD duckdb",
     "duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_ref }}",
     "upload_duckdb_binaries: true",
     "chmod +x duckdb-runtime/bin/duckdb",
