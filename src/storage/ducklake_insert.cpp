@@ -78,17 +78,28 @@ unique_ptr<GlobalSinkState> DuckLakeInsert::GetGlobalSinkState(ClientContext &co
 //===--------------------------------------------------------------------===//
 DuckLakeColumnStats DuckLakeInsert::ParseColumnStats(const LogicalType &type, const vector<Value> &col_stats) {
 	DuckLakeColumnStats column_stats(type);
+	// min/max may be accompanied by exactness flags (DuckDB 2.0 stats). The
+	// DuckLake metadata has no notion of inexact min/max, so buffer the values
+	// and only record them when the writer reports them as exact.
+	string min_value;
+	string max_value;
+	bool has_min_value = false;
+	bool has_max_value = false;
+	bool min_is_exact = true;
+	bool max_is_exact = true;
 	for (idx_t stats_idx = 0; stats_idx < col_stats.size(); stats_idx++) {
 		auto &stats_children = StructValue::GetChildren(col_stats[stats_idx]);
 		auto &stats_name = StringValue::Get(stats_children[0]);
 		if (stats_name == "min") {
-			D_ASSERT(!column_stats.has_min);
-			column_stats.min = StringValue::Get(stats_children[1]);
-			column_stats.has_min = true;
+			min_value = StringValue::Get(stats_children[1]);
+			has_min_value = true;
 		} else if (stats_name == "max") {
-			D_ASSERT(!column_stats.has_max);
-			column_stats.max = StringValue::Get(stats_children[1]);
-			column_stats.has_max = true;
+			max_value = StringValue::Get(stats_children[1]);
+			has_max_value = true;
+		} else if (stats_name == "min_is_exact") {
+			min_is_exact = StringValue::Get(stats_children[1]) == "true";
+		} else if (stats_name == "max_is_exact") {
+			max_is_exact = StringValue::Get(stats_children[1]) == "true";
 		} else if (stats_name == "null_count") {
 			D_ASSERT(!column_stats.has_null_count);
 			column_stats.has_null_count = true;
@@ -108,6 +119,14 @@ DuckLakeColumnStats DuckLakeInsert::ParseColumnStats(const LogicalType &type, co
 		} else {
 			throw NotImplementedException("Unsupported stats type \"%s\" in DuckLakeInsert::Sink()", stats_name);
 		}
+	}
+	if (has_min_value && min_is_exact) {
+		column_stats.min = min_value;
+		column_stats.has_min = true;
+	}
+	if (has_max_value && max_is_exact) {
+		column_stats.max = max_value;
+		column_stats.has_max = true;
 	}
 	return column_stats;
 }

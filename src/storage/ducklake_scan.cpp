@@ -246,7 +246,7 @@ TableFunction DuckLakeFunctions::GetDuckLakeScanFunction(DatabaseInstance &insta
 	auto scan_entry = loader.TryGetTableFunction(scan_name);
 	if (scan_entry) {
 		auto &scan = scan_entry->Cast<TableFunctionCatalogEntry>();
-		function = scan.functions.GetFunctionByOffset(0);
+		function = *scan.functions.GetFunctionByOffset(0);
 		function.get_multi_file_reader = DuckLakeMultiFileReader::CreateInstance;
 	}
 

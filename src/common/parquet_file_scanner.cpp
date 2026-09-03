@@ -23,7 +23,7 @@ ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFil
 	auto &instance = DatabaseInstance::GetDatabase(context);
 	ExtensionLoader loader(instance, "ducklake");
 	auto &scan_entry = loader.GetTableFunction(Identifier(scan_function_name));
-	parquet_scan = scan_entry.functions.functions[0];
+	parquet_scan = *scan_entry.functions.functions[0];
 
 	// Prepare the inputs for the bind
 	vector<Value> children;

@@ -32,7 +32,9 @@ endif()
 if($ENV{ENABLE_GRAIN_BUNDLE_EXTENSIONS})
     duckdb_extension_load(httpfs
             GIT_URL https://github.com/duckdb/duckdb-httpfs
-            GIT_TAG c942cee64bb1bc848168d4ad74fcd9eff2c616e7
+            # Upstream pin (SigV4 moved into core); matches the duckdb
+            # submodule's .github/config/extensions/httpfs.cmake.
+            GIT_TAG fafb14f2c899ddfd1998f8adf2e07fbbfd28b3fd
             APPLY_PATCHES
     )
 endif()
