@@ -91,7 +91,7 @@ on:
         type: boolean
         default: true
       # Upload the DuckDB CLI, shared library, and C header built from the same
-      # source checkout as the extension. Linux amd64 only for the paired release.
+      # source checkout as the extension. Linux amd64/arm64 for the paired release.
       upload_duckdb_binaries:
         required: false
         type: boolean
@@ -501,7 +501,7 @@ jobs:
           make test_${{ inputs.build_type }}
 
       - name: Stage pinned DuckDB runtime
-        if: ${{ inputs.upload_duckdb_binaries && matrix.duckdb_arch == 'linux_amd64' }}
+        if: ${{ inputs.upload_duckdb_binaries && (matrix.duckdb_arch == 'linux_amd64' || matrix.duckdb_arch == 'linux_arm64') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -528,7 +528,7 @@ jobs:
             > paired-duckdb/SHA256SUMS
 
       - name: Upload pinned DuckDB runtime
-        if: ${{ inputs.upload_duckdb_binaries && matrix.duckdb_arch == 'linux_amd64' }}
+        if: ${{ inputs.upload_duckdb_binaries && (matrix.duckdb_arch == 'linux_amd64' || matrix.duckdb_arch == 'linux_arm64') }}
         uses: actions/upload-artifact@v4
         with:
           if-no-files-found: error

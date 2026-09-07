@@ -1,8 +1,8 @@
-# Publish a compatibility-locked linux_amd64 DuckDB + DuckLake/Quack MV bundle.
+# Publish a compatibility-locked linux_amd64 + linux_arm64 DuckDB + DuckLake/Quack MV bundle.
 # Parquet-only — does not set DUCKLAKE_VORTEX_EXTENSION_DIR / does not call DuckDB CDN deploy.
 #
 # Grain / VPS download (public, no token) — Release assets preferred:
-#   https://github.com/openlearnia/ducklake/releases/download/grain-ext-<duckdb-version>-<sha>/ducklake-<duckdb-version>-linux_amd64.duckdb_extension
+#   https://github.com/openlearnia/ducklake/releases/download/grain-ext-<duckdb-version>-<sha>/ducklake-<duckdb-version>-<arch>.duckdb_extension
 # Actions artifact (auth required even on public repos):
 #   gh run download <run_id> -n ducklake-linux_amd64-<duckdb-version> -R openlearnia/ducklake
 #
@@ -65,7 +65,7 @@ jobs:
           echo "duckdb_ref=$duckdb_ref" >> "$GITHUB_OUTPUT"
 
   build-linux-amd64:
-    name: Build linux_amd64 ducklake
+    name: Build ducklake (linux_amd64 + linux_arm64)
     needs: get-duckdb-version
     uses: ./.github/workflows/_grain_extension_distribution.yml
     with:
@@ -80,9 +80,10 @@ jobs:
       # path on Blacksmith's release triplet.
       vcpkg_commit: 127402f1c75bb3d5ff6bce04b285faa4930a5aca
       extension_name: ducklake
-      # Focused: Grain lab VPS only. Keep arm64/osx/windows/wasm out of this oven.
+      # Focused: Grain lab VPS linux targets. arm64 builds on GitHub-hosted
+      # ubuntu-24.04-arm (public repo); keep osx/windows/wasm/musl out of this oven.
       exclude_archs: >-
-        linux_arm64;linux_amd64_musl;osx_amd64;osx_arm64;windows_amd64;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
+        linux_amd64_musl;osx_amd64;osx_arm64;windows_amd64;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
       skip_tests: false
       build_duckdb_shell: true
       upload_duckdb_binaries: true
@@ -98,17 +99,29 @@ jobs:
     needs: [get-duckdb-version, build-linux-amd64]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - name: Download distribution artifact
+      - name: Download distribution artifacts (amd64)
         uses: actions/download-artifact@v4
         with:
           name: ducklake-${{ needs.get-duckdb-version.outputs.duckdb_ref }}-extension-linux_amd64
-          path: dist/
+          path: dist/linux_amd64/
 
-      - name: Download pinned DuckDB runtime
+      - name: Download distribution artifacts (arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: ducklake-${{ needs.get-duckdb-version.outputs.duckdb_ref }}-extension-linux_arm64
+          path: dist/linux_arm64/
+
+      - name: Download pinned DuckDB runtime (amd64)
         uses: actions/download-artifact@v4
         with:
           name: duckdb-${{ needs.get-duckdb-version.outputs.duckdb_ref }}-runtime-linux_amd64
-          path: duckdb-runtime/
+          path: duckdb-runtime-linux_amd64/
+
+      - name: Download pinned DuckDB runtime (arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: duckdb-${{ needs.get-duckdb-version.outputs.duckdb_ref }}-runtime-linux_arm64
+          path: duckdb-runtime-linux_arm64/
 
       - name: Checkout extension repository Worker
         uses: actions/checkout@v4
@@ -128,24 +141,26 @@ jobs:
           DUCKDB_EXTENSION_SIGNING_PK: ${{ secrets.DUCKDB_EXTENSION_SIGNING_PK }}
         run: |
           set -euo pipefail
+          PLATFORMS=(linux_amd64 linux_arm64)
           mkdir -p grain-pkg
-          EXT=$(find dist -type f -name 'ducklake.duckdb_extension' | head -n1)
-          if [[ -z "$EXT" ]]; then
-            echo "ducklake.duckdb_extension not found under dist/" >&2
-            find dist -type f | head -50 >&2
-            exit 1
-          fi
-          cp "$EXT" grain-pkg/ducklake.duckdb_extension
-          cp "$EXT" "grain-pkg/ducklake-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
-          for name in httpfs postgres_scanner quack; do
-            extra=$(find dist -type f -name "${name}.duckdb_extension" | head -n1 || true)
-            if [[ -z "$extra" ]]; then
-              echo "Missing paired ${name} extension" >&2
-              find dist -type f | sort >&2
+
+          for ARCH in "${PLATFORMS[@]}"; do
+            EXT=$(find "dist/${ARCH}" -type f -name 'ducklake.duckdb_extension' | head -n1)
+            if [[ -z "$EXT" ]]; then
+              echo "ducklake.duckdb_extension not found under dist/${ARCH}/" >&2
+              find "dist/${ARCH}" -type f | head -50 >&2
               exit 1
             fi
-            cp "$extra" "grain-pkg/${name}.duckdb_extension"
-            cp "$extra" "grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
+            cp "$EXT" "grain-pkg/ducklake-${DUCKDB_VERSION}-${ARCH}.duckdb_extension"
+            for name in httpfs postgres_scanner quack; do
+              extra=$(find "dist/${ARCH}" -type f -name "${name}.duckdb_extension" | head -n1 || true)
+              if [[ -z "$extra" ]]; then
+                echo "Missing paired ${name} extension for ${ARCH}" >&2
+                find "dist/${ARCH}" -type f | sort >&2
+                exit 1
+              fi
+              cp "$extra" "grain-pkg/${name}-${DUCKDB_VERSION}-${ARCH}.duckdb_extension"
+            done
           done
 
           : "${DUCKDB_EXTENSION_SIGNING_PK:?DUCKDB_EXTENSION_SIGNING_PK secret is required}"
@@ -175,11 +190,12 @@ jobs:
 
           sign_extension() {
             local name="$1"
-            local extension="grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
-            local unsigned="$SIGNING_WORK_DIR/${name}.unsigned"
-            local hash="$SIGNING_WORK_DIR/${name}.hash"
-            local signature="$SIGNING_WORK_DIR/${name}.signature"
-            local signed="$SIGNING_WORK_DIR/${name}.signed"
+            local arch="$2"
+            local extension="grain-pkg/${name}-${DUCKDB_VERSION}-${arch}.duckdb_extension"
+            local unsigned="$SIGNING_WORK_DIR/${name}.${arch}.unsigned"
+            local hash="$SIGNING_WORK_DIR/${name}.${arch}.hash"
+            local signature="$SIGNING_WORK_DIR/${name}.${arch}.signature"
+            local signed="$SIGNING_WORK_DIR/${name}.${arch}.signed"
             cp "$extension" "$unsigned"
             test "$(stat -c%s "$unsigned")" -gt 256
             truncate -s -256 "$unsigned"
@@ -191,30 +207,41 @@ jobs:
               -sigfile "$signature" -in "$hash" -pkeyopt digest:sha256
             cat "$unsigned" "$signature" > "$signed"
             mv "$signed" "$extension"
-            cp "$extension" "grain-pkg/${name}.duckdb_extension"
-            echo "signed extension: $name"
+            if [[ "$arch" == "linux_amd64" ]]; then
+              # Platform-less copies keep the original Grain amd64 contract.
+              cp "$extension" "grain-pkg/${name}.duckdb_extension"
+            fi
+            echo "signed extension: ${name} (${arch})"
           }
 
-          for name in ducklake httpfs postgres_scanner quack; do
-            sign_extension "$name"
+          for ARCH in "${PLATFORMS[@]}"; do
+            for name in ducklake httpfs postgres_scanner quack; do
+              sign_extension "$name" "$ARCH"
+            done
           done
 
-          test -f duckdb-runtime/bin/duckdb
-          test -f duckdb-runtime/lib/libduckdb.so
-          test -f duckdb-runtime/include/duckdb.h
-          test -f duckdb-runtime/VERSION
-          RUNTIME_VERSION="$(tr -d '\r\n' < duckdb-runtime/VERSION)"
-          if [[ "$RUNTIME_VERSION" != "$DUCKDB_VERSION" ]]; then
-            echo "Paired runtime VERSION is $RUNTIME_VERSION, expected $DUCKDB_VERSION" >&2
-            exit 1
-          fi
-          chmod +x duckdb-runtime/bin/duckdb
+          for ARCH in "${PLATFORMS[@]}"; do
+            RUNTIME_DIR="duckdb-runtime-${ARCH}"
+            test -f "${RUNTIME_DIR}/bin/duckdb"
+            test -f "${RUNTIME_DIR}/lib/libduckdb.so"
+            test -f "${RUNTIME_DIR}/include/duckdb.h"
+            test -f "${RUNTIME_DIR}/VERSION"
+            RUNTIME_VERSION="$(tr -d '\r\n' < "${RUNTIME_DIR}/VERSION")"
+            if [[ "$RUNTIME_VERSION" != "$DUCKDB_VERSION" ]]; then
+              echo "Paired ${ARCH} runtime VERSION is $RUNTIME_VERSION, expected $DUCKDB_VERSION" >&2
+              exit 1
+            fi
+            chmod +x "${RUNTIME_DIR}/bin/duckdb"
+          done
+
           SHORT_SHA="${GIT_SHA::7}"
           SHORT_DUCKDB_REF="${DUCKDB_REF::10}"
           BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          DUCKDB_ARCHIVE="duckdb-${DUCKDB_VERSION}-${SHORT_DUCKDB_REF}-linux_amd64.tar.gz"
-          tar -C duckdb-runtime -czf "grain-pkg/${DUCKDB_ARCHIVE}" bin lib include VERSION
-          export BUILT_AT DUCKDB_ARCHIVE RUNTIME_VERSION
+          for ARCH in "${PLATFORMS[@]}"; do
+            ARCHIVE="duckdb-${DUCKDB_VERSION}-${SHORT_DUCKDB_REF}-${ARCH}.tar.gz"
+            tar -C "duckdb-runtime-${ARCH}" -czf "grain-pkg/${ARCHIVE}" bin lib include VERSION
+          done
+          export BUILT_AT SHORT_DUCKDB_REF RUNTIME_VERSION
           python3 - <<'PY'
           import hashlib
           import json
@@ -222,17 +249,42 @@ jobs:
           from pathlib import Path
 
           package = Path("grain-pkg")
+          version = os.environ["DUCKDB_VERSION"]
+          short_ref = os.environ["SHORT_DUCKDB_REF"]
+          platforms = ["linux_amd64", "linux_arm64"]
+          names = ("ducklake", "httpfs", "postgres_scanner", "quack")
+
           asset_names = [
-              f"{name}-{os.environ['DUCKDB_VERSION']}-linux_amd64.duckdb_extension"
-              for name in ("ducklake", "httpfs", "postgres_scanner", "quack")
-          ] + [os.environ["DUCKDB_ARCHIVE"]]
+              f"{name}-{version}-{arch}.duckdb_extension"
+              for arch in platforms
+              for name in names
+          ] + [f"duckdb-{version}-{short_ref}-{arch}.tar.gz" for arch in platforms]
           checksums = {
-              name: hashlib.sha256((package / name).read_bytes()).hexdigest()
-              for name in asset_names
+              asset: hashlib.sha256((package / asset).read_bytes()).hexdigest()
+              for asset in asset_names
           }
+
+          platform_sections = {}
+          for arch in platforms:
+              platform_sections[arch] = {
+                  "repository_prefix": f"{version}/{arch}",
+                  "runtime": {
+                      "file": f"duckdb-{version}-{short_ref}-{arch}.tar.gz",
+                      "sha256": checksums[f"duckdb-{version}-{short_ref}-{arch}.tar.gz"],
+                  },
+                  "extensions": {
+                      name: {
+                          "file": f"{name}.duckdb_extension",
+                          "gzip_file": f"{name}.duckdb_extension.gz",
+                          "sha256": checksums[f"{name}-{version}-{arch}.duckdb_extension"],
+                      }
+                      for name in names
+                  },
+              }
+
           build_info = {
               "bundle": "duckdb-ducklake-materialized-views",
-              "duckdb_version": os.environ["DUCKDB_VERSION"],
+              "duckdb_version": version,
               "runtime_version": os.environ["RUNTIME_VERSION"],
               "duckdb_repository": "openlearnia/duckdb",
               "duckdb_ref": os.environ["DUCKDB_REF"],
@@ -240,6 +292,7 @@ jobs:
               "ducklake_ref": os.environ["GIT_SHA"],
               "git_ref": os.environ["GIT_REF_NAME"],
               "platform": "linux_amd64",
+              "platforms": platforms,
               "built_at": os.environ["BUILT_AT"],
               "signed": True,
               "signing_public_key": "openlearnia-extension-signing.pub",
@@ -256,34 +309,24 @@ jobs:
           }
           (package / "build-info.json").write_text(json.dumps(build_info, indent=2) + "\n")
           (package / "SHA256SUMS").write_text(
-              "".join(f"{digest}  {name}\n" for name, digest in checksums.items())
+              "".join(f"{digest}  {asset}\n" for asset, digest in checksums.items())
           )
           manifest = {
-              "schema_version": 1,
+              "schema_version": 2,
               "generated_at": os.environ["BUILT_AT"],
+              # `latest` keeps the original linux_amd64 shape for existing Grain consumers.
               "latest": {
-                  "duckdb_version": os.environ["DUCKDB_VERSION"],
+                  "duckdb_version": version,
                   "duckdb_ref": os.environ["DUCKDB_REF"],
                   "ducklake_ref": os.environ["GIT_SHA"],
                   "platform": "linux_amd64",
                   "signed": True,
                   "signing_public_key": "openlearnia-extension-signing.pub",
-                  "repository_prefix": f"{os.environ['DUCKDB_VERSION']}/linux_amd64",
-                  "runtime": {
-                      "file": os.environ["DUCKDB_ARCHIVE"],
-                      "sha256": checksums[os.environ["DUCKDB_ARCHIVE"]],
-                  },
-                  "extensions": {
-                      name: {
-                          "file": f"{name}.duckdb_extension",
-                          "gzip_file": f"{name}.duckdb_extension.gz",
-                          "sha256": checksums[
-                              f"{name}-{os.environ['DUCKDB_VERSION']}-linux_amd64.duckdb_extension"
-                          ],
-                      }
-                      for name in ("ducklake", "httpfs", "postgres_scanner", "quack")
-                  },
+                  "repository_prefix": f"{version}/linux_amd64",
+                  "runtime": platform_sections["linux_amd64"]["runtime"],
+                  "extensions": platform_sections["linux_amd64"]["extensions"],
               },
+              "platforms": platform_sections,
           }
           (package / "artifacts.json").write_text(json.dumps(manifest, indent=2) + "\n")
           PY
@@ -293,8 +336,8 @@ jobs:
           {
             echo "### Grain DuckLake extension"
             echo ""
-            echo "- Artifact: \`ducklake-linux_amd64-${DUCKDB_VERSION}\`"
-            echo "- Platform: \`linux_amd64\`"
+            echo "- Artifact: \`ducklake-linux_amd64-${DUCKDB_VERSION}\` (contains both platforms)"
+            echo "- Platforms: \`linux_amd64\`, \`linux_arm64\`"
             echo "- DuckDB: \`${DUCKDB_VERSION}\`"
             echo "- DuckDB commit: \`${DUCKDB_REF}\`"
             echo "- SHA: \`${GIT_SHA}\`"
@@ -336,19 +379,21 @@ jobs:
             --file "$repo_dir/artifacts.json" --remote
           curl --fail --silent --show-error \
             "$EXTENSION_REPOSITORY_URL/artifacts.json" | python3 -m json.tool >/dev/null
-          for name in ducklake httpfs postgres_scanner quack; do
-            source="grain-pkg/${name}-${DUCKDB_VERSION}-linux_amd64.duckdb_extension"
-            plain="$repo_dir/${name}.duckdb_extension"
-            compressed="$repo_dir/${name}.duckdb_extension.gz"
-            cp "$source" "$plain"
-            gzip -1 -c "$plain" > "$compressed"
-            for suffix in duckdb_extension duckdb_extension.gz; do
-              key="openlearnia-duckdb-extensions/${DUCKDB_VERSION}/linux_amd64/${name}.${suffix}"
-              file="$repo_dir/${name}.${suffix}"
-              npx --yes wrangler@4.76.0 r2 object put "$key" --file "$file" --remote
+          for ARCH in linux_amd64 linux_arm64; do
+            for name in ducklake httpfs postgres_scanner quack; do
+              source="grain-pkg/${name}-${DUCKDB_VERSION}-${ARCH}.duckdb_extension"
+              plain="$repo_dir/${name}.duckdb_extension"
+              compressed="$repo_dir/${name}.duckdb_extension.gz"
+              cp "$source" "$plain"
+              gzip -1 -c "$plain" > "$compressed"
+              for suffix in duckdb_extension duckdb_extension.gz; do
+                key="openlearnia-duckdb-extensions/${DUCKDB_VERSION}/${ARCH}/${name}.${suffix}"
+                file="$repo_dir/${name}.${suffix}"
+                npx --yes wrangler@4.76.0 r2 object put "$key" --file "$file" --remote
+              done
+              curl --fail --silent --show-error --head \
+                "$EXTENSION_REPOSITORY_URL/${DUCKDB_VERSION}/${ARCH}/${name}.duckdb_extension"
             done
-            curl --fail --silent --show-error --head \
-              "$EXTENSION_REPOSITORY_URL/${DUCKDB_VERSION}/linux_amd64/${name}.duckdb_extension"
           done
 
       - name: Create GitHub Release
@@ -365,12 +410,13 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Grain DuckLake ${{ needs.get-duckdb-version.outputs.duckdb_version }} (${{ steps.stage.outputs.short_sha }})
           body: |
-            Compatibility-locked linux_amd64 DuckDB runtime and DuckLake extension with materialized views.
+            Compatibility-locked linux_amd64 + linux_arm64 DuckDB runtime and DuckLake extension with materialized views.
 
             - DuckDB ABI: `${{ needs.get-duckdb-version.outputs.duckdb_version }}`
             - DuckDB commit: `${{ needs.get-duckdb-version.outputs.duckdb_ref }}`
             - Commit: `${{ github.sha }}`
             - Ref: `${{ github.ref_name }}`
+            - Platforms: linux_amd64, linux_arm64
             - Features: materialized_views, delta_refresh, join_incremental, staleness
             - Vortex: not bundled
             - Paired extensions: httpfs, postgres_scanner, quack
@@ -378,7 +424,8 @@ jobs:
             Grain install:
             ```bash
             gh release download ${{ steps.stage.outputs.release_tag }} -R ${{ github.repository }} \
-              -p 'duckdb-*-linux_amd64.tar.gz' -p 'ducklake-*-linux_amd64.duckdb_extension' \
+              -p 'duckdb-*-linux_amd64.tar.gz' -p 'duckdb-*-linux_arm64.tar.gz' \
+              -p 'ducklake-*-linux_amd64.duckdb_extension' -p 'ducklake-*-linux_arm64.duckdb_extension' \
               -p build-info.json -p SHA256SUMS
             # or
             gh run download -n ducklake-linux_amd64-${{ needs.get-duckdb-version.outputs.duckdb_version }} -R ${{ github.repository }}
@@ -386,7 +433,9 @@ jobs:
             Then set `GRAIN_DUCKLAKE_EXTENSION_PATH=/opt/grain/extensions/ducklake.duckdb_extension`.
           files: |
             grain-pkg/*-${{ needs.get-duckdb-version.outputs.duckdb_version }}-linux_amd64.duckdb_extension
+            grain-pkg/*-${{ needs.get-duckdb-version.outputs.duckdb_version }}-linux_arm64.duckdb_extension
             grain-pkg/duckdb-*-linux_amd64.tar.gz
+            grain-pkg/duckdb-*-linux_arm64.tar.gz
             grain-pkg/build-info.json
             grain-pkg/artifacts.json
             grain-pkg/SHA256SUMS
