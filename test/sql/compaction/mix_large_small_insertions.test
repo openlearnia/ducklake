@@ -15,8 +15,12 @@ statement ok
 ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_compaction_mix_files', METADATA_CATALOG 'metadata')
 
 # set target file size very small
+# (openlearnia fork: upstream uses '2KB', which splits the merge into two
+# commands when 1-row parquet files are ~700 bytes as written by the v2.0.0
+# cyanoptera core - '4KB' keeps all five small files in one merge run on
+# both upstream and the fork)
 statement ok
-CALL ducklake.set_option('target_file_size', '2KB');
+CALL ducklake.set_option('target_file_size', '4KB');
 
 # snapshot 1
 statement ok
