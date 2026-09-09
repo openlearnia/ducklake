@@ -18,13 +18,13 @@ statement ok
 ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/postgres_catalog_multi_statement')
 
 statement ok
-CREATE TABLE ducklake.main.events(id INTEGER, label VARCHAR)
+CREATE TABLE ducklake.main.events(id INTEGER, label VARCHAR, error_message VARCHAR)
 
 statement ok
-INSERT INTO ducklake.main.events VALUES (1, 'ok'), (2, 'ducklake')
+INSERT INTO ducklake.main.events VALUES (1, 'ok', NULL), (2, 'ducklake', 'complete')
 
-query II
+query III
 SELECT * FROM ducklake.main.events ORDER BY id
 ----
-1	ok
-2	ducklake
+1	ok	NULL
+2	ducklake	complete

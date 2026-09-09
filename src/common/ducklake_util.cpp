@@ -278,7 +278,11 @@ string ToByteaHexLiteral(const string &raw_bytes) {
 string DuckLakeUtil::ValueToSQL(DuckLakeMetadataManager &metadata_manager, ClientContext &context, const Value &val) {
 	// FIXME: this should be upstreamed
 	if (val.IsNull()) {
-		return val.ToSQLString();
+		// The destination table supplies the physical type for NULL values. Using
+		// the DuckDB logical type here can produce an incompatible cast for
+		// backends that store unsupported types differently (for example,
+		// PostgreSQL VARCHAR is stored as BYTEA in inlined tables).
+		return "NULL";
 	}
 	if (val.type().HasAlias()) {
 		// extension type: cast to string
