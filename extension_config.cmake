@@ -49,7 +49,7 @@ if($ENV{ENABLE_QUACK})
             # openlearnia fork: b2f2d10 ported to the cyanoptera v2.0.0-alpha
             # core APIs (Identifier/QualifiedName), RPC behavior unchanged.
             GIT_URL https://github.com/openlearnia/duckdb-quack.git
-            GIT_TAG 200c76caed49b8b983c7ae885a5031e26754eb6f
+            GIT_TAG 1ab6d9383fda8317cb4659d7644c178821c6db49
             SUBMODULES "extension-ci-tools"
             APPLY_PATCHES
     )
