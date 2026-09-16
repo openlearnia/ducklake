@@ -51,6 +51,8 @@ if($ENV{ENABLE_QUACK})
             GIT_URL https://github.com/openlearnia/duckdb-quack.git
             GIT_TAG 1ab6d9383fda8317cb4659d7644c178821c6db49
             SUBMODULES "extension-ci-tools"
-            APPLY_PATCHES
+            # core-side patches moved into the fork (SetFallible owned by
+            # quack) — no APPLY_PATCHES: apply_extension_patches.py fails
+            # hard when .github/patches/extensions/quack/ does not exist
     )
 endif()
