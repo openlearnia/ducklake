@@ -49,7 +49,7 @@ if($ENV{ENABLE_QUACK})
             # openlearnia fork: b2f2d10 ported to the cyanoptera v2.0.0-alpha
             # core APIs (Identifier/QualifiedName), RPC behavior unchanged.
             GIT_URL https://github.com/openlearnia/duckdb-quack.git
-            GIT_TAG 1ab6d9383fda8317cb4659d7644c178821c6db49
+            GIT_TAG 5f26fe3460d7ace98f631786924d3d57fa08d72b
             SUBMODULES "extension-ci-tools"
             # core-side patches moved into the fork (SetFallible owned by
             # quack) — no APPLY_PATCHES: apply_extension_patches.py fails
