@@ -7,6 +7,7 @@
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_delete_filter.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 
 namespace duckdb {
 
@@ -37,6 +38,7 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 		auto transaction = read_info.GetTransaction();
 		auto &metadata_manager = transaction->GetMetadataManager();
 		auto &ducklake_catalog = transaction->GetCatalog();
+		auto col_names = metadata_manager.InlinedColNames();
 		// push the projections directly into the read
 		vector<string> columns_to_read;
 		vector<LogicalType> expected_types;
@@ -49,26 +51,26 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 				switch (identifier) {
 				case MultiFileReader::ORDINAL_FIELD_ID:
 				case MultiFileReader::ROW_ID_FIELD_ID:
-					virtual_column = "row_id";
+					virtual_column = col_names.row_id;
 					break;
 				case MultiFileReader::LAST_UPDATED_SEQUENCE_NUMBER_ID:
 					if (read_info.scan_type == DuckLakeScanType::SCAN_DELETIONS) {
 						// when scanning deletions end_snapshot is the snapshot marker
-						virtual_column = "end_snapshot";
+						virtual_column = col_names.end_snapshot;
 					} else {
-						virtual_column = "begin_snapshot";
+						virtual_column = col_names.begin_snapshot;
 					}
 					break;
 				default:
 					break;
 				}
 				if (!virtual_column.empty()) {
-					columns_to_read.push_back(KeywordHelper::WriteOptionallyQuoted(virtual_column));
+					columns_to_read.push_back(SQLIdentifier::ToString(virtual_column));
 					expected_types.push_back(LogicalType::BIGINT);
 					continue;
 				}
 			}
-			string projected_column = KeywordHelper::WriteOptionallyQuoted(columns[index].name.GetIdentifierName());
+			string projected_column = SQLIdentifier::ToString(columns[index].name.GetIdentifierName());
 			auto &metadata_type = ducklake_catalog.MetadataType();
 			bool needs_cast = !metadata_type.empty() && metadata_type != "duckdb" && metadata_type != "quack" &&
 			                  metadata_type != "quack_scanner";
@@ -89,13 +91,13 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 				scan_column_ids.push_back(i);
 				virtual_columns.push_back(InlinedVirtualColumn::NONE);
 			}
-			columns_to_read.push_back(KeywordHelper::WriteOptionallyQuoted("row_id"));
+			columns_to_read.push_back(SQLIdentifier::ToString(col_names.row_id));
 			expected_types.push_back(LogicalType::BIGINT);
 			virtual_columns.emplace_back(InlinedVirtualColumn::COLUMN_EMPTY);
 		}
 		if (columns_to_read.empty()) {
 			// COUNT(*) - read row_id but don't emit
-			columns_to_read.push_back(KeywordHelper::WriteOptionallyQuoted("row_id"));
+			columns_to_read.push_back(SQLIdentifier::ToString(col_names.row_id));
 			expected_types.push_back(LogicalType::BIGINT);
 			virtual_columns.emplace_back(InlinedVirtualColumn::COLUMN_EMPTY);
 		}
@@ -124,7 +126,7 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 		default:
 			throw InternalException("Unknown DuckLake scan type");
 		}
-		data = metadata_manager.TransformInlinedData(*query_result, expected_types);
+		data = metadata_manager.TransformInlinedData(*query_result, expected_types, table_name);
 		if (!virtual_columns.empty()) {
 			auto scan_types = data->data->Types();
 			scan_chunk.Initialize(context, scan_types);
@@ -177,7 +179,11 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 		data->data->InitializeScan(state, scan_column_ids);
 	}
 	for (auto &entry : expression_map) {
-		expression_executors[entry.first] = make_uniq<ExpressionExecutor>(context, *entry.second.expression);
+		auto &column_index = column_indexes[entry.first];
+		auto column_id = column_index.GetPrimaryIndex();
+		auto &expression_data = entry.second;
+		auto &expression = *expression_data.expression;
+		expression_executors[column_id] = make_uniq<ExpressionExecutor>(context, expression);
 	}
 	return true;
 }
@@ -199,7 +205,7 @@ bool DuckLakeInlinedDataReader::TryEvaluateExpression(ClientContext &context, id
 	expr_input.Initialize(Allocator::Get(context), {input_type});
 	expr_input.Reset();
 	expr_input.data[0].Reference(input_vector);
-	expr_input.SetCardinality(scan_chunk.size());
+	expr_input.SetChildCardinality(scan_chunk.size());
 	expr_it->second->ExecuteExpression(expr_input, output_vector);
 	return true;
 }
@@ -265,11 +271,12 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 						ordinal_data[r] = NumericCast<int64_t>(file_row_number + r);
 					}
 				}
+				FlatVector::SetSize(ordinal_vector, scan_chunk.size());
 				if (TryEvaluateExpression(context, c, ordinal_vector, LogicalType::BIGINT, chunk.data[c])) {
 					continue;
 				}
-			auto row_id_data = FlatVector::GetDataMutable<int64_t>(chunk.data[c]);
-				for (idx_t r = 0; r < scan_chunk.size(); r++) {
+					auto row_id_data = FlatVector::GetDataMutable<int64_t>(chunk.data[c]);
+					for (idx_t r = 0; r < scan_chunk.size(); r++) {
 					row_id_data[r] = ordinal_data[r];
 				}
 				continue;
@@ -278,7 +285,7 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 				break;
 			}
 		}
-		chunk.SetCardinality(scan_chunk.size());
+		chunk.SetChildCardinality(scan_chunk.size());
 	} else {
 		data->data->Scan(state, chunk);
 	}
@@ -294,16 +301,16 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 		}
 		if (filters) {
 			for (auto &entry : *filters) {
-				if (entry.Filter().filter_type == TableFilterType::LEGACY_OPTIONAL_FILTER) {
+				auto &filter = entry.Filter();
+				if (ExpressionFilter::IsRootOptionalFilter(filter)) {
 					continue;
 				}
-				auto column_id = entry.GetIndex();
+				auto column_id = entry.GetIndex().GetIndex();
 				auto &vec = chunk.data[column_id];
 
 				UnifiedVectorFormat vdata;
-				vec.ToUnifiedFormat(chunk.size(), vdata);
+				vec.ToUnifiedFormat(vdata);
 
-				auto &filter = entry.Filter();
 				auto filter_state = TableFilterState::Initialize(context, filter);
 
 				approved_tuple_count = ColumnSegment::FilterSelection(sel, vec, vdata, filter, *filter_state,

@@ -11,20 +11,16 @@ static void Murmur3ScalarFunction(DataChunk &args, ExpressionState &state, Vecto
 	auto count = args.size();
 
 	UnifiedVectorFormat input_data;
-	input.ToUnifiedFormat(count, input_data);
+	input.ToUnifiedFormat(input_data);
 
-	// DuckDB 2.0 no longer permits FlatVector accessors on a CONSTANT_VECTOR.
-	// Produce a flat result while filling it; consumers can constant-fold it
-	// normally if all arguments are constant.
-	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetDataMutable<int32_t>(result);
-	auto &result_validity = FlatVector::ValidityMutable(result);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
 
 	auto &type = input.GetType();
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = input_data.sel->get_index(i);
 		if (!input_data.validity.RowIsValid(idx)) {
-			result_validity.SetInvalid(i);
+			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 
@@ -96,6 +92,9 @@ static void Murmur3ScalarFunction(DataChunk &args, ExpressionState &state, Vecto
 			break;
 		}
 		}
+	}
+	if (args.AllConstant()) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	}
 }
 

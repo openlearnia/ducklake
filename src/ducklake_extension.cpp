@@ -1,8 +1,10 @@
 #include "ducklake_extension.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "storage/ducklake_storage.hpp"
+#include "common/ducklake_version.hpp"
 #include "storage/ducklake_scan.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "storage/ducklake_secret.hpp"
@@ -52,6 +54,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("ducklake_default_data_file_format",
 	                          "Default managed data-file format for new empty DuckLake tables (parquet or vortex)",
 	                          LogicalType::VARCHAR, Value("parquet"), set_default_data_file_format, SetScope::GLOBAL);
+	config.AddExtensionOption("ducklake_default_version", "Default DuckLake version for new catalogs",
+	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::GLOBAL);
 	auto set_target_file_size = [](ClientContext &, SetScope, Value &parameter) {
 		if (!parameter.IsNull() && !parameter.ToString().empty()) {
 			DBConfig::ParseMemoryLimit(parameter.ToString());

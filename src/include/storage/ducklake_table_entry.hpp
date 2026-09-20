@@ -9,11 +9,14 @@
 #pragma once
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "storage/ducklake_stats.hpp"
 #include "storage/ducklake_partition_data.hpp"
 #include "storage/ducklake_sort_data.hpp"
 #include "common/index.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "storage/ducklake_field_data.hpp"
 #include "common/local_change.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
@@ -32,6 +35,9 @@ struct ColumnChangeInfo {
 	void DropField(const DuckLakeFieldId &field_id);
 };
 
+//! Returns the first GEOMETRY or VARIANT field at or below this one, whose bounds cannot be skipped
+optional_ptr<const DuckLakeFieldId> FindStatsUnsupportedField(const DuckLakeFieldId &field_id);
+
 class DuckLakeTableEntry : public TableCatalogEntry {
 public:
 	DuckLakeTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, TableIndex table_id,
@@ -40,6 +46,8 @@ public:
 	                   LocalChange local_change);
 
 public:
+	const ColumnList &GetColumns() const override;
+
 	TableIndex GetTableId() const {
 		return table_id;
 	}
@@ -72,6 +80,10 @@ public:
 	const DuckLakeFieldData &GetFieldData() const {
 		return *field_data;
 	}
+	//! Field indexes whose min/max bounds are not recorded, including children of a skipped field
+	unordered_set<idx_t> GetSkippedStatsFields() const;
+	//! Refuses a field added below a skipped column whose statistics cannot be skipped
+	void ValidateAddedFieldsCanSkipStats(const DuckLakeFieldId &parent_id, const DuckLakeFieldId &new_field_id) const;
 	const ColumnChangeInfo &GetChangedFields() const {
 		return *changed_fields;
 	}
@@ -84,10 +96,10 @@ public:
 	//! Returns the field id of a column by a column path.
 	// If name_offset is provided and column_names points to a field **within** the variant, the variant column is
 	// returned and the offset in the column_names vector where the variant is located
-	const DuckLakeFieldId &GetFieldId(const vector<string> &column_names,
+	const DuckLakeFieldId &GetFieldId(const vector<Identifier> &column_names,
 	                                  optional_ptr<optional_idx> name_offset = nullptr) const;
 	//! Returns the field id of a column by a column path if it exists (and nullptr otherwise)
-	optional_ptr<const DuckLakeFieldId> TryGetFieldId(const vector<string> &column_names,
+	optional_ptr<const DuckLakeFieldId> TryGetFieldId(const vector<Identifier> &column_names,
 	                                                  optional_ptr<optional_idx> name_offset = nullptr) const;
 	//! Returns the field id of a column by a field index
 	optional_ptr<const DuckLakeFieldId> GetFieldId(FieldIndex field_index) const;
@@ -133,8 +145,19 @@ public:
 	virtual_column_map_t GetVirtualColumns() const override;
 	vector<column_t> GetRowIdColumns() const override;
 
-	//! Validates that all column references in sort expressions exist in the table
-	static void ValidateSortExpressionColumns(DuckLakeTableEntry &table, const vector<OrderByNode> &orders);
+	//! Validate that every sort-expression column reference exists in the column list.
+	static void ValidateSortExpressionColumns(const ColumnList &columns, const vector<OrderByNode> &orders);
+
+	//! Build a DuckLakePartition from raw partition expressions (allocates a transaction-local id).
+	static unique_ptr<DuckLakePartition> BuildPartitionData(DuckLakeTransaction &transaction, const ColumnList &columns,
+	                                                        DuckLakeFieldData &field_data,
+	                                                        const vector<unique_ptr<ParsedExpression>> &partition_keys);
+	//! Build a DuckLakeSort from a vector of OrderByNode (allocates a transaction-local id).
+	static unique_ptr<DuckLakeSort> BuildSortData(DuckLakeTransaction &transaction, const ColumnList &columns,
+	                                              const vector<OrderByNode> &orders);
+	//! Build a DuckLakeSort from bare SORTED BY expressions (wraps each ASC/ORDER_DEFAULT).
+	static unique_ptr<DuckLakeSort> BuildSortData(DuckLakeTransaction &transaction, const ColumnList &columns,
+	                                              const vector<unique_ptr<ParsedExpression>> &sort_keys);
 
 private:
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, RenameTableInfo &info);
@@ -177,6 +200,9 @@ public:
 	DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info, unique_ptr<DuckLakePartition> partition_data);
 	// ! Create a DuckLakeTableEntry from a SET SORT KEY
 	DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info, unique_ptr<DuckLakeSort> sort_data);
+
+protected:
+	ColumnList columns;
 
 private:
 	TableIndex table_id;

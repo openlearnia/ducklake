@@ -9,6 +9,8 @@
 #pragma once
 
 #include "functions/ducklake_table_functions.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/planner/logical_operator.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_schema_entry.hpp"
@@ -65,10 +67,10 @@ public:
 	}
 	vector<ColumnBinding> GetColumnBindings() override {
 		vector<ColumnBinding> result;
-				result.emplace_back(table_index, ProjectionIndex(0));
-				result.emplace_back(table_index, ProjectionIndex(1));
-				result.emplace_back(table_index, ProjectionIndex(2));
-				result.emplace_back(table_index, ProjectionIndex(3));
+		result.emplace_back(table_index, ProjectionIndex(0));
+		result.emplace_back(table_index, ProjectionIndex(1));
+		result.emplace_back(table_index, ProjectionIndex(2));
+		result.emplace_back(table_index, ProjectionIndex(3));
 		return result;
 	}
 
@@ -83,24 +85,32 @@ public:
 class DuckLakeCompactor {
 public:
 	DuckLakeCompactor(ClientContext &context, DuckLakeCatalog &catalog, DuckLakeTransaction &transaction,
-	                  Binder &binder, TableIndex table_id, DuckLakeMergeAdjacentOptions options);
+	                  Binder &binder, TableIndex table_id, uint64_t max_files, DuckLakeMergeAdjacentOptions options);
 	DuckLakeCompactor(ClientContext &context, DuckLakeCatalog &catalog, DuckLakeTransaction &transaction,
-	                  Binder &binder, TableIndex table_id, double delete_threshold);
+	                  Binder &binder, TableIndex table_id, uint64_t max_files, double delete_threshold);
 	void GenerateCompactions(DuckLakeTableEntry &table, vector<unique_ptr<LogicalOperator>> &compactions);
-	unique_ptr<LogicalOperator> GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry> source_files);
+	unique_ptr<LogicalOperator> GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry> source_files,
+	                                                      bool bind_to_latest_schema = false);
 	static unique_ptr<LogicalOperator> InsertSort(Binder &binder, unique_ptr<LogicalOperator> &plan,
 	                                              DuckLakeTableEntry &table, optional_ptr<DuckLakeSort> sort_data,
 	                                              bool add_tiebreakers = false);
 	static vector<OrderByNode> ParseSortOrders(const DuckLakeSort &sort_data);
-	static vector<BoundOrderByNode> BindSortOrders(Binder &binder, DuckLakeTableEntry &table, TableIndex table_index,
+	//! Bind ORDER BY expressions against a column list + table name (works before a table entry exists).
+	static vector<BoundOrderByNode> BindSortOrders(Binder &binder, const ColumnList &columns,
+	                                               const Identifier &table_name, TableIndex table_index,
 	                                               vector<OrderByNode> &pre_bound_orders);
 
 private:
+	optional_ptr<DuckLakeTableEntry> ResolvePartitionSpecTable(DuckLakeTableEntry &table,
+	                                                           const DuckLakeCompactionFileEntry &source_file,
+	                                                           idx_t partition_id);
+
 	ClientContext &context;
 	DuckLakeCatalog &catalog;
 	DuckLakeTransaction &transaction;
 	Binder &binder;
 	TableIndex table_id;
+	uint64_t max_files;
 	double delete_threshold = 0.95;
 	DuckLakeMergeAdjacentOptions options;
 

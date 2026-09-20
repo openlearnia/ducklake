@@ -2,6 +2,7 @@
 #include "common/ducklake_util.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/materialized_query_result.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_staged_commit.hpp"
 #include "storage/ducklake_transaction.hpp"
@@ -14,6 +15,7 @@ QuackMetadataManager::QuackMetadataManager(DuckLakeTransaction &transaction) : D
 
 unique_ptr<QueryResult> QuackMetadataManager::Query(string &query) {
 	auto &ducklake_catalog = transaction.GetCatalog();
+	lock_guard<std::recursive_mutex> guard(ducklake_catalog.GetMetadataQueryLock());
 	auto schema_identifier = DuckLakeUtil::SQLIdentifierToString(ducklake_catalog.MetadataSchemaName());
 	query = StringUtil::Replace(query, "{METADATA_CATALOG}", schema_identifier);
 	SubstituteCatalogPlaceholders(query);
@@ -46,7 +48,7 @@ unique_ptr<QueryResult> QuackMetadataManager::AttachMetadata(const string &attac
 		}
 		result = fresh_conn.Query(query);
 	}
-	return result;
+	return std::move(result);
 }
 
 unique_ptr<QueryResult> QuackMetadataManager::Query(DuckLakeSnapshot snapshot, string &query) {
@@ -64,6 +66,7 @@ string QuackMetadataManager::MetadataExistsQuery() const {
 }
 
 void QuackMetadataManager::ClearCache() {
+	lock_guard<std::recursive_mutex> guard(transaction.GetCatalog().GetMetadataQueryLock());
 	string clear = "CALL quack_clear_cache();";
 	transaction.ExecuteRaw(clear);
 }

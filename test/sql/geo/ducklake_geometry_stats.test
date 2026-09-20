@@ -8,12 +8,12 @@ require ducklake
 
 require parquet
 
-test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
 
-test-env DATA_PATH __TEST_DIR__
+test-env DATA_PATH {TEST_DIR}
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_files', METADATA_CATALOG 'ducklake_meta')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_files', METADATA_CATALOG 'ducklake_meta')
 
 statement ok
 USE ducklake;
@@ -74,4 +74,5 @@ query I
 select stats(g) from t1 limit 1;
 ----
 {'extent': {'m_max': 10.0, 'm_min': 1.0, 'x_max': 4.0, 'x_min': -2.0, 'y_max': 4.0, 'y_min': -2.0, 'z_max': 3.0, 'z_min': -10.0}, 'has_empty_geom': true, 'has_empty_part': true, 'has_no_null': true, 'has_non_empty_geom': true, 'has_non_empty_part': true, 'has_null': false}
+
 

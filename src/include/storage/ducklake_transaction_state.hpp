@@ -30,6 +30,10 @@ struct DuckLakeCommitContext {
 	std::function<DuckLakeSnapshot()> get_snapshot;
 	//! Executes the batched snapshot/changes SQL against the metadata DB.
 	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string &)> execute_commit_batch;
+	//! Classifies metadata-catalog errors that are safe to retry.
+	std::function<bool(const string &)> is_retryable_metadata_error = [](const string &) {
+		return false;
+	};
 	//! Optional hooks below default to a no-op/constant; callers override only the ones they need.
 	//! Clears the metadata manager cache if a clear was pending.
 	std::function<void()> flush_cache_if_pending = []() {
@@ -64,17 +68,22 @@ struct DuckLakeCommitContext {
 	std::function<string(DuckLakeSnapshot &, const vector<DuckLakeInlinedDataInfo> &, const vector<DuckLakeTableInfo> &,
 	                     const vector<DuckLakeTableInfo> &)>
 	    write_inlined_data;
+	//! Emits the SQL that creates+populates per-table inlined file-deletion tables (ducklake_inlined_delete_<id>)
+	//! and marks the metadata-manager cache for clearing when a new such table is created.
+	std::function<string(const vector<DuckLakeInlinedFileDeletionInfo> &)> write_inlined_file_deletes =
+	    [](const vector<DuckLakeInlinedFileDeletionInfo> &) {
+		    return string();
+	    };
 	//! Returns the current global table stats for a single table id (first-attempt path).
 	std::function<shared_ptr<DuckLakeTableStats>(TableIndex)> get_table_stats;
 	//! Top-level columns of a table at the commit snapshot — needed by stats-refresh to iterate
 	//! columns and look up types when merging per-file stats.
-	std::function<vector<DuckLakeColumnSchemaEntry>(TableIndex)> get_table_column_schema =
-	    [](TableIndex) {
-		    return vector<DuckLakeColumnSchemaEntry>{};
-	    };
+	std::function<vector<DuckLakeColumnSchemaEntry>(TableIndex)> get_table_column_schema = [](TableIndex) {
+		return vector<DuckLakeColumnSchemaEntry> {};
+	};
 	//! Names of the inlined-data tables associated with a table id at the commit snapshot.
 	std::function<vector<string>(TableIndex)> get_inlined_table_names = [](TableIndex) {
-		return vector<string>{};
+		return vector<string> {};
 	};
 	//! Net (delete-adjusted) row count of a table's regular data files.
 	std::function<idx_t(TableIndex)> get_net_data_file_row_count = [](TableIndex) {
@@ -93,10 +102,22 @@ struct DuckLakeCommitContext {
 	std::function<void(idx_t)> set_catalog_version;
 	//! Records the committed snapshot id on the catalog.
 	std::function<void(idx_t)> set_committed_snapshot_id;
+	//! Invalidates the cached stats entry for a table after a stats-affecting file drop.
+	std::function<void(idx_t, TableIndex)> invalidate_table_stats_cache = [](idx_t, TableIndex) {
+	};
+	//! Reports a failure after the metadata commit is already durable.
+	std::function<void(const string &)> report_post_commit_error = [](const string &) {
+	};
 	//! Author / message / extra info for the snapshot row.
 	DuckLakeSnapshotCommit commit_info;
 	//! When true, Commit() skips the post-commit DropEmptySupersededInlinedTables cleanup.
 	bool skip_drop_empty_inlined = false;
+	//! Whether the metadata schema has the >= 1.1-dev1 additions.
+	bool supports_v1_1_metadata = false;
+	//! Column names of the inlined data tables under this catalog version.
+	DuckLakeInlinedColNames InlinedColNames() const {
+		return DuckLakeInlinedColNames(supports_v1_1_metadata);
+	}
 };
 
 //! Holds the per-transaction mutable change state (new/dropped/renamed catalog entries, local file
@@ -113,7 +134,8 @@ public:
 
 	SnapshotAndStats CheckForConflicts(DuckLakeSnapshot transaction_snapshot,
 	                                   const TransactionChangeInformation &changes,
-	                                   const std::function<unique_ptr<QueryResult>(string)> &executor);
+	                                   const std::function<unique_ptr<QueryResult>(string)> &executor,
+	                                   bool supports_v1_1_metadata);
 	void CheckForConflicts(const TransactionChangeInformation &changes, const SnapshotChangeInformation &other_changes,
 	                       DuckLakeSnapshot transaction_snapshot,
 	                       const std::function<unique_ptr<QueryResult>(string)> &executor) const;
@@ -125,7 +147,8 @@ public:
 	                            const DuckLakeSnapshotCommit &commit_info) const;
 
 	string CommitChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes,
-	                     optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats, const DuckLakeCommitContext &context);
+	                     optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats, const DuckLakeCommitContext &context,
+	                     map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
 
 	vector<DuckLakeSchemaInfo> GetNewSchemas(DuckLakeCommitState &commit_state);
 	NewTableInfo GetNewTables(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes);
@@ -140,7 +163,14 @@ public:
 	                                  TransactionChangeInformation &transaction_changes);
 	NewDataInfo GetNewDataFiles(string &batch_query, DuckLakeCommitState &commit_state,
 	                            optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
-	                            const DuckLakeCommitContext &context);
+	                            const DuckLakeCommitContext &context,
+	                            map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
+	//! Decrement table-level stats for files dropped this commit; returns true if live rows remain.
+	static bool ApplyDroppedFileStats(TableIndex table_id, DuckLakeNewGlobalStats &new_stats,
+	                                  map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
+	string UpdateStatsForDroppedFiles(optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+	                                  const DuckLakeCommitContext &context,
+	                                  map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
 	CompactionInformation GetCompactionChanges(DuckLakeCommitState &commit_state, CompactionType type);
 	//! After a REWRITE_DELETES compaction, recompute EXACT global stats for `table_id` from the post-rewrite file set
 	//! (+ committed inlined data) and append the UpdateGlobalTableStats SQL to `batch_query`. No-op (leaving the
@@ -203,7 +233,9 @@ public:
 	//! persisted materialized views dropped in this transaction
 	set<TableIndex> dropped_materialized_views;
 	unordered_map<string, DataFileIndex> dropped_files;
+	map<TableIndex, DroppedDataFileStats> dropped_file_stats;
 	set<TableIndex> tables_deleted_from;
+	set<TableIndex> tables_delete_attempted;
 	unique_ptr<DuckLakeCatalogSet> new_schemas;
 	map<SchemaIndex, reference<DuckLakeSchemaEntry>> dropped_schemas;
 	LocalTableChanges local_changes;

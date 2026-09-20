@@ -11,6 +11,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/table_index.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/table_index.hpp"
 
 namespace duckdb {
 
@@ -48,6 +49,11 @@ struct SchemaIndex {
 		return index >= DuckLakeConstants::TRANSACTION_LOCAL_ID_START;
 	}
 };
+
+inline bool IsTransactionLocal(const TableIndex &idx) {
+	D_ASSERT(idx.IsValid());
+	return idx.index >= DuckLakeConstants::TRANSACTION_LOCAL_ID_START;
+}
 
 struct MacroIndex {
 	MacroIndex() : index(DConstants::INVALID_INDEX) {

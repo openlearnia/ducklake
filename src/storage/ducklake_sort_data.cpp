@@ -22,7 +22,7 @@ string DuckLakeSort::BuildSortOrderSQL(const DuckLakeSort &sort_data, const Colu
 	for (idx_t i = 0; i < column_count; i++) {
 		auto &current_name = current_columns.GetColumn(PhysicalIndex(i)).Name();
 		auto &inlined_name = inlined_columns.GetColumn(PhysicalIndex(i)).Name();
-		if (current_name != inlined_name) {
+		if (current_name.GetIdentifierName() != inlined_name.GetIdentifierName()) {
 			rename_map[current_name.GetIdentifierName()] = inlined_name.GetIdentifierName();
 		}
 	}

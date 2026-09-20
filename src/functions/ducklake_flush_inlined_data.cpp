@@ -1,4 +1,10 @@
 #include "functions/ducklake_table_functions.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_schema_entry.hpp"
@@ -87,10 +93,10 @@ SourceResultType DuckLakeFlushData::GetDataInternal(ExecutionContext &context, D
 	source_state.returned_result = true;
 
 	auto &gstate = this->sink_state->Cast<DuckLakeInsertGlobalState>();
-	chunk.SetCardinality(1);
-	chunk.SetValue(0, 0, Value(table.schema.name));
-	chunk.SetValue(1, 0, Value(table.name));
-	chunk.SetValue(2, 0, Value::BIGINT(static_cast<int64_t>(gstate.rows_flushed)));
+	chunk.data[0].Append(Value(table.schema.name.GetIdentifierName()));
+	chunk.data[1].Append(Value(table.name.GetIdentifierName()));
+	chunk.data[2].Append(Value::BIGINT(static_cast<int64_t>(gstate.rows_flushed)));
+	chunk.SetChildCardinality(1);
 	return SourceResultType::FINISHED;
 }
 
@@ -116,11 +122,21 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
                                              OperatorSinkFinalizeInput &input) const {
 	auto &global_state = input.global_state.Cast<DuckLakeInsertGlobalState>();
 	auto &transaction = DuckLakeTransaction::Get(context, global_state.table.catalog);
+	auto &metadata_manager = transaction.GetMetadataManager();
 	auto snapshot = transaction.GetSnapshot();
 
 	if (!global_state.written_files.empty()) {
 		DeletesPerFile deletes_per_file;
 		auto partition_sql_exprs = table.GetPartitionSQLExpressions();
+
+		// When the table has sort metadata, the file is written in sorted order.
+		// The ORDER BY must match the actual file order so delete positions are correct.
+		auto col_names = metadata_manager.InlinedColNames();
+		string order_by =
+		    StringUtil::Format("%s ASC NULLS LAST, %s ASC NULLS LAST", col_names.row_id, col_names.begin_snapshot);
+		if (!sort_order_sql.empty()) {
+			order_by = sort_order_sql + ", " + order_by;
+		}
 
 		// Track cumulative row offset per partition so each file knows its range
 		unordered_map<string, idx_t> partition_row_offsets;
@@ -141,25 +157,21 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 
 			// Query deleted rows within this file's row range, filtered to its partition
 			string extra_filter = partition_filter.empty() ? "" : " AND " + partition_filter;
-			// When the table has sort metadata, the file is written in sorted order.
-			// The ORDER BY must match the actual file order so delete positions are correct.
-			string order_by = "row_id ASC NULLS LAST, begin_snapshot ASC NULLS LAST";
-			if (!sort_order_sql.empty()) {
-				order_by = sort_order_sql + ", row_id ASC NULLS LAST, begin_snapshot ASC NULLS LAST";
-			}
-			auto deleted_rows_result =
-			    transaction.Query(snapshot, StringUtil::Format(R"(
+			auto deleted_rows_result = metadata_manager.Query(
+			    snapshot,
+			    StringUtil::Format(R"(
 				WITH all_rows AS (
-					SELECT end_snapshot, ROW_NUMBER() OVER (ORDER BY %s) - 1 AS output_position
+					SELECT %s AS end_snapshot, ROW_NUMBER() OVER (ORDER BY %s) - 1 AS output_position
 					FROM {METADATA_CATALOG}.%s
-					WHERE {SNAPSHOT_ID} >= begin_snapshot%s
+					WHERE {SNAPSHOT_ID} >= %s%s
 				)
 				SELECT end_snapshot, output_position
 				FROM all_rows
 				WHERE end_snapshot IS NOT NULL
 				AND output_position >= %d AND output_position < %d;)",
-			                                                   order_by, inlined_table.table_name, extra_filter,
-			                                                   file_offset, file_offset + file.row_count));
+			                       col_names.end_snapshot, order_by, inlined_table.table_name, col_names.begin_snapshot,
+			                       extra_filter, file_offset, file_offset + file.row_count));
+			metadata_manager.CheckInlinedDataReadError(*deleted_rows_result, inlined_table.table_name);
 
 			for (auto &row : *deleted_rows_result) {
 				auto end_snap = row.GetValue<int64_t>(0);
@@ -176,6 +188,9 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 			auto data_file_format = global_state.table.catalog.Cast<DuckLakeCatalog>().GetDataFileFormat(
 			    context, global_state.table);
 
+			auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
+			auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
+			bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId());
 			for (auto &file_entry : deletes_per_file) {
 				// write single file, begin_snapshot is the minimum snapshot
 				WriteDeleteFileWithSnapshotsInput file_input {context,
@@ -187,7 +202,8 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 				                                              file_entry.second,
 				                                              DeleteFileSource::FLUSH,
 				                                              data_file_format};
-				delete_files.push_back(DuckLakeDeleteFileWriter::WriteDeleteFileWithSnapshots(context, file_input));
+				auto delete_file = DuckLakeDeleteFileWriter::Write(context, file_input, use_deletion_vectors);
+				delete_files.push_back(std::move(delete_file));
 			}
 			AttachDeleteFilesToWrittenFiles(delete_files, global_state.written_files);
 		}
@@ -356,8 +372,8 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	// and instead pull the latest sort setting
 	// First, see if there are transaction local changes to the table
 	// Then fall back to latest snapshot if no local changes
-	auto latest_entry = transaction.GetTransactionLocalEntry(CatalogType::TABLE_ENTRY,
-	                                                         table.schema.name.GetIdentifierName(), table.name.GetIdentifierName());
+	auto latest_entry = transaction.GetTransactionLocalEntry(
+	    CatalogType::TABLE_ENTRY, table.schema.name.GetIdentifierName(), table.name.GetIdentifierName());
 	if (!latest_entry) {
 		auto latest_snapshot = transaction.GetSnapshot();
 		latest_entry = catalog.GetEntryById(transaction, latest_snapshot, table_id);
@@ -407,9 +423,7 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	copy->write_partition_columns = copy_options.write_partition_columns;
 	copy->write_empty_file = copy_options.write_empty_file;
 	copy->partition_columns = std::move(copy_options.partition_columns);
-	for (auto &name : copy_options.names) {
-		copy->names.emplace_back(name);
-	}
+	copy->names = copy_options.names;
 	copy->expected_types = std::move(copy_options.expected_types);
 
 	copy->hive_file_pattern =
@@ -458,7 +472,7 @@ static void FlushInlinedFileDeletions(ClientContext &context, DuckLakeCatalog &c
 	}
 
 	// Query the inlined deletions with file paths and existing delete file info
-	auto deletions_result = transaction.Query(snapshot, StringUtil::Format(R"(
+	auto deletions_result = metadata_manager.Query(snapshot, StringUtil::Format(R"(
 SELECT del.file_id, data.path, data.path_is_relative, del.row_id, del.begin_snapshot,
        existing_del.delete_file_id, existing_del.path as del_path, existing_del.path_is_relative as del_path_is_relative,
        existing_del.begin_snapshot as del_begin_snapshot, existing_del.encryption_key as del_encryption_key,
@@ -471,7 +485,7 @@ LEFT JOIN (
           AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
 ) existing_del ON del.file_id = existing_del.data_file_id
 	)",
-	                                                                       inlined_table_name, table_id.index));
+	                                                                            inlined_table_name, table_id.index));
 	if (deletions_result->HasError()) {
 		deletions_result->GetErrorObject().Throw("Failed to query inlined file deletions for flush: ");
 	}
@@ -542,6 +556,8 @@ LEFT JOIN (
 		encryption_key = catalog.GenerateEncryptionKey(context);
 	}
 
+	auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
+	bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId());
 	for (auto &entry : files_to_flush) {
 		auto file_id = entry.first;
 		auto &file_info = entry.second;
@@ -583,9 +599,9 @@ LEFT JOIN (
 		                                              encryption_key,
 		                                              file_info.file_path,
 		                                              deletions_to_write,
-		                                              DeleteFileSource::FLUSH,
-		                                              data_file_format};
-		auto delete_file = DuckLakeDeleteFileWriter::WriteDeleteFileWithSnapshots(context, file_input);
+			                                              DeleteFileSource::FLUSH,
+			                                              data_file_format};
+		auto delete_file = DuckLakeDeleteFileWriter::Write(context, file_input, use_deletion_vectors);
 		delete_file.data_file_id = DataFileIndex(file_id);
 		delete_file.max_snapshot = file_info.max_snapshot;
 
@@ -605,7 +621,7 @@ LEFT JOIN (
 
 	// Delete the flushed inlined deletions
 	auto delete_result =
-	    transaction.Query(snapshot, StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s", inlined_table_name));
+	    metadata_manager.Execute(snapshot, StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s", inlined_table_name));
 	if (delete_result->HasError()) {
 		delete_result->GetErrorObject().Throw("Failed to delete inlined file deletions after flush: ");
 	}
@@ -647,7 +663,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 			schemas = ducklake_catalog.GetSchemas(context);
 		} else {
 			// specific schema - fetch it
-				schemas.push_back(ducklake_catalog.GetSchema(context, Identifier(schema)));
+			schemas.push_back(ducklake_catalog.GetSchema(context, Identifier(schema)));
 		}
 
 		// - scan all tables from the relevant schemas
@@ -661,9 +677,9 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 		}
 	} else {
 		// specific table - fetch the table
-		auto table_catalog_entry =
-		    ducklake_catalog.GetEntry<TableCatalogEntry>(context, Identifier(schema), Identifier(table),
-		                                                OnEntryNotFound::THROW_EXCEPTION);
+		auto table_catalog_entry = ducklake_catalog.GetEntry<TableCatalogEntry>(
+		    context, QualifiedName(ducklake_catalog.GetName(), Identifier(schema), Identifier(table)),
+		    OnEntryNotFound::THROW_EXCEPTION);
 		auto &dl_schema = table_catalog_entry->schema.Cast<DuckLakeSchemaEntry>();
 		schema_table_map[dl_schema.Cast<DuckLakeSchemaEntry>().GetSchemaId().index].push_back(
 		    table_catalog_entry.get()->Cast<DuckLakeTableEntry>());
@@ -737,13 +753,14 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 
 	// Create SUM(rows_flushed) aggregate
 	auto &system_catalog = Catalog::GetSystemCatalog(context);
-	auto &sum_entry = system_catalog.GetEntry<AggregateFunctionCatalogEntry>(context, DEFAULT_SCHEMA, "sum");
+	auto &sum_entry = system_catalog.GetEntry<AggregateFunctionCatalogEntry>(
+	    context, QualifiedName(system_catalog.GetName(), Identifier::DefaultSchema(), "sum"));
 
 	vector<unique_ptr<Expression>> sum_args;
 	sum_args.push_back(make_uniq<BoundColumnRefExpression>(child->types[2], child_bindings[2]));
 
 	// Pick the right sum overload
-		auto sum_func = sum_entry.functions.GetFunctionByArguments(context, {sum_args[0]->GetReturnType()});
+	auto sum_func = sum_entry.functions.GetFunctionByArguments(context, {sum_args[0]->GetReturnType()});
 	FunctionBinder function_binder(context);
 	auto sum_aggregate =
 	    function_binder.BindAggregateFunction(sum_func,            // The SUM(BIGINT) -> HUGEINT function
@@ -753,8 +770,8 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	    );
 
 	// Create LogicalAggregate with GROUP BY schema_name, table_name and SUM(rows_flushed)
-	TableIndex group_index = input.binder->GenerateTableIndex();
-	TableIndex aggregate_index = input.binder->GenerateTableIndex();
+	auto group_index = input.binder->GenerateTableIndex();
+	auto aggregate_index = input.binder->GenerateTableIndex();
 
 	vector<unique_ptr<Expression>> aggregates;
 	aggregates.push_back(std::move(sum_aggregate));
@@ -771,7 +788,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	// Note: SUM(BIGINT) returns HUGEINT. We must use the its output type for the 0 constant
 	unique_ptr<Expression> zero_const = make_uniq<BoundConstantExpression>(Value::Numeric(aggregate->types[2], 0));
 	unique_ptr<Expression> filter_expr = BoundComparisonExpression::Create(
-		ExpressionType::COMPARE_GREATERTHAN, std::move(sum_col_ref), std::move(zero_const));
+	    ExpressionType::COMPARE_GREATERTHAN, std::move(sum_col_ref), std::move(zero_const));
 
 	auto filter = make_uniq<LogicalFilter>(std::move(filter_expr));
 	filter->children.push_back(std::move(aggregate));
@@ -787,7 +804,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	auto projection = make_uniq<LogicalProjection>(bind_index, std::move(proj_exprs));
 	projection->children.push_back(std::move(filter));
 
-	return projection;
+	return std::move(projection);
 }
 
 DuckLakeFlushInlinedDataFunction::DuckLakeFlushInlinedDataFunction()

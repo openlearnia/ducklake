@@ -10,10 +10,13 @@
 
 #include "ducklake_macro_entry.hpp"
 #include "ducklake_procedure_entry.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/main/database.hpp"
 #include "common/ducklake_data_file.hpp"
 #include "common/ducklake_snapshot.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/types/value_map.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/transaction/transaction.hpp"
 #include "storage/ducklake_catalog_set.hpp"
@@ -25,6 +28,7 @@ struct NewMacroInfo;
 struct NewProcedureInfo;
 class DuckLakeCatalog;
 class DuckLakeCatalogSet;
+class DuckLakeInitializer;
 class DuckLakeMetadataManager;
 class DuckLakeSchemaEntry;
 class DuckLakeTableEntry;
@@ -40,13 +44,26 @@ struct NewNameMapInfo;
 struct CompactionInformation;
 struct DuckLakePath;
 struct DuckLakeCommitState;
+struct DuckLakeSchemaCacheEntry;
+class DuckLakeSchemaPinState;
 class DuckLakeFieldId;
 class LocalTableChangeIterationHelper;
 class DuckLakeTransactionState;
 
+//! Marks connections DuckLake opens internally
+class DuckLakeInternalConnectionState : public ClientContextState {
+public:
+	static constexpr const char *KEY = "ducklake_internal_connection";
+};
+
 struct FlushedInlinedTableInfo {
 	DuckLakeInlinedTableInfo inlined_table;
 	idx_t flush_snapshot_id;
+};
+
+struct DroppedDataFileStats {
+	idx_t row_count = 0;
+	idx_t file_size_bytes = 0;
 };
 
 struct LocalTableDataChanges {
@@ -167,6 +184,7 @@ struct DuckLakeRetryConfig {
 
 class DuckLakeTransaction : public Transaction, public enable_shared_from_this<DuckLakeTransaction> {
 	friend class DuckLakeTransactionState;
+	friend class DuckLakeInitializer;
 
 public:
 	DuckLakeTransaction(DuckLakeCatalog &ducklake_catalog, TransactionManager &manager, ClientContext &context);
@@ -193,6 +211,11 @@ public:
 	//! Execute SQL on the metadata connection without placeholder substitution or metadata-manager wrapping.
 	unique_ptr<QueryResult> ExecuteRaw(string query);
 	Connection &GetConnection();
+
+	//! Keep a schema cache entry alive for as long as this transaction lives. Transaction-local catalog entries hold
+	//! bare references into the cached catalog set, and those references are read again at commit time, so the entry
+	//! must not be evicted from the ObjectCache in between.
+	void PinSchemaCacheEntry(shared_ptr<DuckLakeSchemaCacheEntry> entry);
 
 	DuckLakeSnapshot GetSnapshot();
 	DuckLakeSnapshot GetSnapshot(optional_ptr<BoundAtClause> at_clause,
@@ -224,7 +247,9 @@ public:
 	void AddCompaction(TableIndex table_id, DuckLakeCompactionEntry entry);
 
 	MappingIndex AddNameMap(unique_ptr<DuckLakeNameMap> name_map);
-	const DuckLakeNameMap &GetMappingById(MappingIndex mapping_id);
+	shared_ptr<const DuckLakeNameMap> GetMappingById(MappingIndex mapping_id);
+	//! Queue a name map cache invalidation that should only be applied after this transaction commits.
+	void DeferNameMapCacheInvalidation(MappingIndex mapping_id);
 
 	void AppendInlinedData(TableIndex table_id, unique_ptr<DuckLakeInlinedData> collection);
 	void SetRequiresNewInlinedTable(bool requires_new);
@@ -255,7 +280,9 @@ public:
 	void DropScalarMacro(DuckLakeScalarMacroEntry &macro);
 	void DropTableMacro(DuckLakeTableMacroEntry &macro);
 	void DropProcedure(DuckLakeProcedureEntry &procedure);
-	void DropFile(TableIndex table_id, DataFileIndex data_file_id, string path);
+	void DropFile(TableIndex table_id, DataFileIndex data_file_id, string path, idx_t row_count, idx_t file_size_bytes);
+	//! Record that a delete predicate was evaluated against a table, even if no rows matched
+	void MarkDeleteAttempted(TableIndex table_id);
 
 	void DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
 	void DeleteInlinedData(const DuckLakeInlinedTableInfo &inlined_table);
@@ -273,7 +300,7 @@ public:
 
 	void SetCommitMessage(const DuckLakeSnapshotCommit &option);
 
-	string GetDefaultSchemaName();
+	Identifier GetDefaultSchemaName();
 
 	bool HasLocalDeletes(TableIndex table_id) const;
 	bool HasLocalDeleteForFile(TableIndex table_id, const string &path) const;
@@ -286,6 +313,7 @@ public:
 	bool HasDroppedFiles() const;
 	const unordered_map<string, DataFileIndex> &GetDroppedFiles() const;
 	const set<TableIndex> &GetTablesDeletedFrom() const;
+	const set<TableIndex> &GetTablesDeleteAttempted() const;
 	const vector<FlushedInlinedTableInfo> &GetFlushedInlinedTables() const;
 	const DuckLakeNameMapSet &GetNewNameMaps() const {
 		return new_name_maps;
@@ -333,6 +361,9 @@ public:
 
 private:
 	void FlushChanges();
+	void FlushNameMapCacheInvalidations();
+	//! Puts back the config options this transaction replaced in the catalog
+	void UndoConfigOptions();
 	static DuckLakePartitionInfo GetNewPartitionKey(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
 	static DuckLakeSortInfo GetNewSortKey(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
 	static DuckLakeTableInfo GetNewTable(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
@@ -346,6 +377,9 @@ private:
 	void AlterEntryInternal(DuckLakeViewEntry &old_entry, unique_ptr<CatalogEntry> new_entry);
 	case_insensitive_map_t<unique_ptr<DuckLakeCatalogSet>> &GetNewMacroMap(CatalogType type);
 
+	// Invoked at transaction completion, invalidates all schema cache entries referenced by this transaction.
+	void ClearSchemaCachePins();
+
 private:
 	DuckLakeCatalog &ducklake_catalog;
 	DatabaseInstance &db;
@@ -358,6 +392,9 @@ private:
 	idx_t local_catalog_id;
 	//! Set when this transaction inlines into a table that does not yet have an inlined-data table
 	atomic<bool> requires_new_inlined_table {false};
+	//! Schema cache entries referenced by this transaction's catalog entries. These pins keep transaction-local
+	//! parent references valid even if another transaction invalidates the global object-cache entry.
+	unique_ptr<DuckLakeSchemaPinState> schema_pins;
 	//! Per-transaction mutable change state (new/dropped/renamed entries, local file changes, flushed
 	//! inlined tables) and the Commit loop. Owns the data formerly held directly on the transaction.
 	unique_ptr<DuckLakeTransactionState> state;
@@ -365,6 +402,10 @@ private:
 	value_map_t<DuckLakeSnapshot> snapshot_cache;
 	//! New set of transaction-local name maps
 	DuckLakeNameMapSet new_name_maps;
+	//! Name maps deleted by direct metadata operations, applied to the catalog cache on commit
+	vector<MappingIndex> pending_name_map_cache_invalidations;
+	//! Previous values of config options set by this transaction, for rollback
+	vector<DuckLakeConfigOptionUndo> config_option_undo;
 
 	atomic<idx_t> catalog_version;
 };

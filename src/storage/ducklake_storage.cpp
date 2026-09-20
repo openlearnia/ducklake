@@ -1,6 +1,7 @@
 #include "duckdb.hpp"
-#include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
 
 #include "storage/ducklake_storage.hpp"
 #include "storage/ducklake_catalog.hpp"
@@ -16,7 +17,7 @@ static void HandleDuckLakeOption(DuckLakeOptions &options, const string &option,
 	} else if (lcase == "override_data_path") {
 		options.override_data_path = value.GetValue<bool>();
 	} else if (lcase == "metadata_schema") {
-		options.metadata_schema = value.ToString();
+		options.metadata_schema = Identifier(value.ToString());
 	} else if (lcase == "metadata_catalog") {
 		options.metadata_database = value.ToString();
 	} else if (lcase == "metadata_path") {
@@ -66,6 +67,12 @@ static void HandleDuckLakeOption(DuckLakeOptions &options, const string &option,
 		options.automatic_migration = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
 	} else if (lcase == "busy_timeout") {
 		options.busy_timeout = UBigIntValue::Get(value.DefaultCastAs(LogicalType::UBIGINT));
+	} else if (lcase == "ducklake_version") {
+		auto version = DuckLakeVersionFromString(value.ToString());
+		if (version < DuckLakeVersion::V1_0) {
+			throw InvalidInputException("ducklake_version must be >= '1.0', got '%s'", value.ToString());
+		}
+		options.ducklake_version = version;
 	} else {
 		throw NotImplementedException("Unsupported option %s for DuckLake", option);
 	}
@@ -81,19 +88,25 @@ static unique_ptr<Catalog> DuckLakeAttach(optional_ptr<StorageExtensionInfo> sto
 		secret = DuckLakeSecret::GetSecret(context, DuckLakeSecret::DEFAULT_SECRET);
 		if (!secret) {
 			throw InvalidInputException(
-			    "Default secret was not found - either specify a path to attach to directly, or create the secret");
-		}
-	} else if (DuckLakeSecret::PathIsSecret(info.path)) {
-		// if the path is a plain name - load the secret name
-		secret = DuckLakeSecret::GetSecret(context, info.path);
-		if (!secret) {
-			throw InvalidInputException(
-			    "Secret \"%s\" was not found - if this was meant to be a path to a DuckDB file, use duckdb:%s instead",
-			    info.path, info.path);
+			    "Default secret was not found. Either:\n"
+			    "	- Specify a path to attach to directly,\n"
+			    "	- Create a new (default) secret,\n"
+			    "	- Or reattach using a named secret (e.g `ATTACH 'ducklake:my_named_secret' AS my_ducklake;`),\n"
+			    "For more information, see https://ducklake.select/docs/stable/duckdb/usage/connecting#secrets");
 		}
 	} else {
-		// otherwise set the remainder of the path as the metadata path
-		options.metadata_path = info.path;
+		// Secret names can be quoted identifiers, so first try an exact lookup before treating path-like names as
+		// paths.
+		secret = DuckLakeSecret::GetSecret(context, info.path);
+		if (!secret) {
+			if (DuckLakeSecret::PathIsSecret(info.path)) {
+				throw InvalidInputException("Secret \"%s\" was not found - if this was meant to be a path to a DuckDB "
+				                            "file, use duckdb:%s instead",
+				                            info.path, info.path);
+			}
+			// otherwise set the remainder of the path as the metadata path
+			options.metadata_path = info.path;
+		}
 	}
 	if (secret) {
 		// if we have a secret - handle the options

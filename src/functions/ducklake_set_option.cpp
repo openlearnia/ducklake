@@ -1,10 +1,13 @@
 #include "functions/ducklake_table_functions.hpp"
 #include "common/ducklake_util.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_schema_entry.hpp"
-#include "duckdb/main/config.hpp"
+#include "storage/ducklake_partition_data.hpp"
 
 namespace duckdb {
 // -------------------------------------------------------------------------//
@@ -13,11 +16,12 @@ namespace duckdb {
 
 static void ValidateTableScope(ClientContext &context, Catalog &catalog, const string &schema_name,
                                const string &table_name) {
-	auto table_catalog_entry =
-	    catalog.GetEntry<TableCatalogEntry>(context, Identifier(schema_name), Identifier(table_name),
-	                                        OnEntryNotFound::THROW_EXCEPTION);
+	auto table_catalog_entry = catalog.GetEntry<TableCatalogEntry>(
+	    context, Identifier(schema_name), Identifier(table_name), OnEntryNotFound::THROW_EXCEPTION);
 	auto &ducklake_table = table_catalog_entry->Cast<DuckLakeTableEntry>();
-	DuckLakeUtil::ValidateNoInlinedSystemColumns(ducklake_table.GetColumns(), ducklake_table.name.GetIdentifierName());
+	DuckLakeUtil::ValidateCanEnableInlining(ducklake_table.GetColumns(),
+	                                        catalog.Cast<DuckLakeCatalog>().SupportsV1_1Metadata(),
+	                                        ducklake_table.name.GetIdentifierName());
 }
 
 static void ValidateTablesInSchema(ClientContext &context, DuckLakeCatalog &duck_catalog,
@@ -30,14 +34,15 @@ static void ValidateTablesInSchema(ClientContext &context, DuckLakeCatalog &duck
 		    std::stoull(override_val) == 0) {
 			return;
 		}
-		DuckLakeUtil::ValidateNoInlinedSystemColumns(ducklake_table.GetColumns(), ducklake_table.name.GetIdentifierName());
+		DuckLakeUtil::ValidateCanEnableInlining(ducklake_table.GetColumns(), duck_catalog.SupportsV1_1Metadata(),
+		                                        ducklake_table.name.GetIdentifierName());
 	});
 }
 
 static void ValidateSchemaScope(ClientContext &context, Catalog &catalog, const string &schema_name) {
 	auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
-	auto &schema_catalog_entry = catalog.GetSchema(context, Identifier(schema_name));
-	ValidateTablesInSchema(context, duck_catalog, schema_catalog_entry.Cast<DuckLakeSchemaEntry>(), SchemaIndex());
+	auto schema_catalog_entry = catalog.GetSchema(context, Identifier(schema_name), OnEntryNotFound::THROW_EXCEPTION);
+	ValidateTablesInSchema(context, duck_catalog, schema_catalog_entry->Cast<DuckLakeSchemaEntry>(), SchemaIndex());
 }
 
 static void ValidateGlobalScope(ClientContext &context, Catalog &catalog) {
@@ -62,6 +67,71 @@ static void ValidateNoReservedInliningColumns(ClientContext &context, Catalog &c
 	} else {
 		ValidateGlobalScope(context, catalog);
 	}
+}
+
+//! Geometry and variant bounds live outside min/max, so they cannot be skipped
+static void ValidateStatsCanBeSkipped(const DuckLakeTableEntry &table, const DuckLakeFieldId &field_id) {
+	auto unsupported = FindStatsUnsupportedField(field_id);
+	if (unsupported) {
+		if (RefersToSameObject(*unsupported, field_id)) {
+			throw NotImplementedException("Statistics cannot be skipped for %s columns", field_id.Type().ToString());
+		}
+		throw NotImplementedException(
+		    "Statistics cannot be skipped for column \"%s\" - it contains a %s field (\"%s\")", field_id.Name(),
+		    unsupported->Type().ToString(), unsupported->Name());
+	}
+	auto partition_data = table.GetPartitionData();
+	if (!partition_data) {
+		return;
+	}
+	for (auto &field : partition_data->fields) {
+		if (field.field_id == field_id.GetFieldIndex()) {
+			throw InvalidInputException("Statistics cannot be skipped for partition column \"%s\"", field_id.Name());
+		}
+	}
+}
+
+//! Resolves a column name, or a LIST of them, to the field ids the option stores - ids are used
+//! because they survive a rename
+static string ResolveSkippedStatsColumns(DuckLakeTableEntry &table, const Value &val) {
+	// a NULL, an empty string and an empty list all name no columns, which clears the option
+	if (val.IsNull()) {
+		return string();
+	}
+	vector<string> column_names;
+	if (val.type().id() == LogicalTypeId::LIST) {
+		auto &children = ListValue::GetChildren(val);
+		column_names.reserve(children.size());
+		for (auto &child : children) {
+			if (!child.IsNull()) {
+				column_names.push_back(child.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+			}
+		}
+	} else {
+		auto column_name = val.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
+		if (!column_name.empty()) {
+			column_names.push_back(std::move(column_name));
+		}
+	}
+	vector<string> field_ids;
+	field_ids.reserve(column_names.size());
+	unordered_set<idx_t> seen;
+	seen.reserve(column_names.size());
+	for (auto &column_name : column_names) {
+		// unused - passing it makes GetByNames return a VARIANT root instead of throwing
+		optional_idx name_offset;
+		auto field_id = table.TryGetFieldId(StringsToIdentifiers({column_name}), &name_offset);
+		if (!field_id) {
+			throw BinderException("Column \"%s\" does not exist in table \"%s\"", column_name,
+			                      table.name.GetIdentifierName());
+		}
+		ValidateStatsCanBeSkipped(table, *field_id);
+		auto field_index = field_id->GetFieldIndex().index;
+		if (seen.insert(field_index).second) {
+			field_ids.push_back(to_string(field_index));
+		}
+	}
+	return StringUtil::Join(field_ids, ",");
 }
 
 // ------------------------------------------------------------------------//
@@ -171,6 +241,8 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 		value = val.CastAs(context, LogicalType::BOOLEAN).GetValue<bool>() ? "true" : "false";
 	} else if (option == "sort_on_insert") {
 		value = val.CastAs(context, LogicalType::BOOLEAN).GetValue<bool>() ? "true" : "false";
+	} else if (option == "skip_stats_columns") {
+		// resolved to field ids below, once the table scope is known
 	} else {
 		throw NotImplementedException("Unsupported option %s", option);
 	}
@@ -186,14 +258,21 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 	if (table_entry != input.named_parameters.end() && !table_entry->second.IsNull()) {
 		table = StringValue::Get(table_entry->second);
 	}
+	if ((!table.empty() || !schema.empty()) && (option == "expire_older_than" || option == "delete_older_than")) {
+		throw InvalidInputException("The '%s' option can only be set globally, not for a specific schema or table",
+		                            option);
+	}
+	if (option == "skip_stats_columns" && table.empty()) {
+		throw InvalidInputException("The '%s' option can only be set for a specific table - pass table_name", option);
+	}
 	if (!table.empty()) {
 		// find the scope
-		auto table_catalog_entry =
-		    catalog.GetEntry<TableCatalogEntry>(context, Identifier(schema), Identifier(table),
-		                                        OnEntryNotFound::THROW_EXCEPTION);
+		auto table_catalog_entry = catalog.GetEntry<TableCatalogEntry>(
+		    context, QualifiedName(catalog.GetName(), Identifier(schema), Identifier(table)),
+		    OnEntryNotFound::THROW_EXCEPTION);
 		auto &ducklake_table = table_catalog_entry->Cast<DuckLakeTableEntry>();
 		config_option.table_id = ducklake_table.GetTableId();
-		if (config_option.table_id.IsTransactionLocal()) {
+		if (IsTransactionLocal(config_option.table_id)) {
 			throw NotImplementedException("Settings cannot be set for transaction-local tables");
 		}
 		if (option == "data_file_format") {
@@ -212,10 +291,13 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 				    table, frozen_format, value);
 			}
 		}
+		if (option == "skip_stats_columns") {
+			value = ResolveSkippedStatsColumns(ducklake_table, val);
+		}
 	} else if (!schema.empty()) {
 		// find the scope
-		auto &schema_catalog_entry = catalog.GetSchema(context, Identifier(schema));
-		auto &ducklake_schema = schema_catalog_entry.Cast<DuckLakeSchemaEntry>();
+		auto schema_catalog_entry = catalog.GetSchema(context, Identifier(schema), OnEntryNotFound::THROW_EXCEPTION);
+		auto &ducklake_schema = schema_catalog_entry->Cast<DuckLakeSchemaEntry>();
 		config_option.schema_id = ducklake_schema.GetSchemaId();
 		if (config_option.schema_id.IsTransactionLocal()) {
 			throw NotImplementedException("Settings cannot be set for transaction-local schemas");

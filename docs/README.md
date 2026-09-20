@@ -9,9 +9,6 @@
 
 # DuckDB DuckLake Extension
 
-> While we tested the DuckLake extension extensively, it is currently experimental as demonstrated by its version number 0.x.
-> If you encounter any problems, please file a [new issue](https://github.com/duckdb/ducklake/issues).
-
 DuckLake is an open Lakehouse format that is built on SQL and Parquet. DuckLake stores metadata in a [catalog database](https://ducklake.select/docs/stable/duckdb/usage/choosing_a_catalog_database), and stores data in Parquet files. The DuckLake extension allows DuckDB to directly read and write data from DuckLake.
 
 See the [DuckLake website](https://ducklake.select) for more information.
@@ -113,4 +110,30 @@ make
 To run, run the bundled `duckdb` shell:
 ```
  ./build/release/duckdb
+```
+
+## Contributing
+
+We are happy to welcome external contributions to our DuckLake extension. Our active development branch is currently `main`, and all contributions should target that branch.
+
+## Testing
+
+```bash
+# run all DuckLake extension tests
+./build/release/test/unittest
+# run a single test file
+./build/release/test/unittest test/sql/transaction/create_conflict.test
+# run tests matching a pattern
+./build/release/test/unittest "test/sql/partitioning/*"
+
+# run DuckDB core tests using DuckLake as storage backend
+./build/release/test/unittest --test-config test/configs/attach_ducklake.json --test-dir duckdb
+
+# run DuckLake tests using PostgreSQL as catalog database (requires running PostgreSQL)
+./build/release/test/unittest --test-config test/configs/postgres.json
+# run DuckLake tests using SQLite as catalog database
+./build/release/test/unittest --test-config test/configs/sqlite.json
+
+# run tests with deletion vectors enabled
+./build/release/test/unittest --test-config test/configs/deletion_vectors.json
 ```

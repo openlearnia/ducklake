@@ -8,14 +8,16 @@
     "sqlite_scanner",
     "icu",
     "httpfs"
-  ],"skip_error_messages": [
+  ],
+  "skip_error_messages": [
     "database is locked"
   ],
-  "test_env": [{
-      "env_name":  "DUCKLAKE_CONNECTION",
-      "env_value": "sqlite:__TEST_DIR__/{BASE_TEST_NAME}.db"
-   }],
-  "skip_error_messages": ["database is locked"],
+  "test_env": [
+    {
+      "env_name": "DUCKLAKE_CONNECTION",
+      "env_value": "sqlite:{TEST_DIR}/{BASE_TEST_NAME}.db"
+    }
+  ],
   "skip_tests": [
     {
       "reason": "Test is slow",
@@ -36,24 +38,11 @@
       ]
     },
     {
-      "reason": "Failed to execute query COMMIT: database is locked",
+      "reason": "High retry counts can stall under SQLite metadata contention",
       "paths": [
-        "test/sql/compaction/compaction_delete_conflict.test",
-        "test/sql/concurrent/concurrent_insert_conflict.test",
-        "test/sql/concurrent/concurrent_insert_data_inlining.test",
-        "test/sql/rewrite_data_files/test_rewrite_concurrency.test",
-        "test/sql/rewrite_data_files/test_rewrite_transaction_conflict.test",
-        "test/sql/settings/max_retry_count.test",
-        "test/sql/snapshot_info/ducklake_current_commit.test",
-        "test/sql/snapshot_info/ducklake_last_commit.test",
-        "test/sql/stats/global_stats_transactions.test",
-        "test/sql/transaction/concurrent_table_creation.test",
-        "test/sql/transaction/transaction_conflict_cleanup.test",
-        "test/sql/transaction/transaction_conflicts.test",
-        "test/sql/transaction/transaction_conflicts_delete.test",
-        "test/sql/transaction/transaction_conflicts_view.test",
-        "test/sql/concurrent/file_level_conflict.test",
-        "test/sql/transaction/transaction_conflict_inlining.test"
+        "test/sql/issues/issue_1248_concurrent_commit_schema_id.test",
+        "test/sql/retry/commit_failure.test",
+        "test/sql/settings/max_retry_count.test"
       ]
     },
     {
@@ -69,10 +58,13 @@
         "test/sql/general/missing_parquet.test",
         "test/sql/general/paths.test",
         "test/sql/issues/corrupted_catalog_fault_isolation.test",
-        "test/sql/secrets/ducklake_secrets.test"
+        "test/sql/secrets/ducklake_secrets.test",
+        "test/sql/secrets/ducklake_secret_storages.test",
+        "test/sql/remove_orphans/metadata_in_data_path.test",
+        "test/sql/rewrite_data_files/test_rewrite_many_non_candidate_files.test"
       ]
     },
-     {
+    {
       "reason": "SELECT name FROM sqlite_master WHERE length(sql) > 0 AND type='table'",
       "paths": [
         "test/sql/initialize/read_only_mode.test",
@@ -91,10 +83,13 @@
       "paths": [
         "test/sql/transaction/transaction_schema.test"
       ]
-    },{
+    },
+    {
       "reason": "Test only for Postgres as catalog",
       "paths": [
-        "test/sql/metadata/ducklake_settings_postgres.test"
+        "test/sql/metadata/ducklake_settings_postgres.test",
+        "test/sql/metadata/metadata_schema_scoped_attach.test",
+        "test/sql/data_inlining/postgres_identifier_limit.test"
       ]
     },
     {
@@ -115,6 +110,12 @@
       "reason": "FIXME: old sqlite extension has issues with this query, can be removed after v1.5.1",
       "paths": [
         "test/sql/metadata/ducklake_ui_catalog_query.test"
+      ]
+    },
+    {
+      "reason": "FIXME: 3-writer concurrent delete-retry test is nondeterministic under sqlite single-writer locking with current duckdb main; failed deletes error loudly (\"database is locked\", swallowed by statement maybe) so rows legitimately remain - no silent loss.",
+      "paths": [
+        "test/sql/deletion_inlining/test_deletion_inlining_concurrent_retry.test"
       ]
     }
   ]

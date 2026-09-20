@@ -1,4 +1,5 @@
 #include "functions/ducklake_table_functions.hpp"
+#include "duckdb/catalog/catalog.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
@@ -39,6 +40,7 @@ static constexpr DuckLakeOptionMetadata DUCKLAKE_OPTIONS[] = {
     {"write_deletion_vectors", "[EXPERIMENTAL - do not use outside testing] Whether to write Iceberg V3 deletion "
                                "vectors (puffin) instead of positional delete files (parquet)"},
     {"sort_on_insert", "Whether to sort data on INSERT according to SET SORTED BY (default: true)"},
+    {"skip_stats_columns", "Columns for which min/max bounds are not recorded (counts are still recorded)"},
 };
 
 struct DuckLakeOptionsData : public TableFunctionData {
@@ -154,20 +156,21 @@ void DuckLakeOptionsExecute(ClientContext &context, TableFunctionInput &data_p, 
 	auto &state = data_p.global_state->Cast<DuckLakeOptionsState>();
 
 	if (state.offset >= state.options.size()) {
+		output.SetChildCardinality(0);
 		return;
 	}
 
 	idx_t count = 0;
 	while (state.offset < state.options.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &option = state.options[state.offset++];
-		output.SetValue(0, count, Value(option.option_name));
-		output.SetValue(1, count, option.description);
-		output.SetValue(2, count, Value(option.value));
-		output.SetValue(3, count, Value(option.scope));
-		output.SetValue(4, count, option.scope_entry.empty() ? Value() : Value(option.scope_entry));
+		output.data[0].Append(Value(option.option_name));
+		output.data[1].Append(option.description);
+		output.data[2].Append(Value(option.value));
+		output.data[3].Append(Value(option.scope));
+		output.data[4].Append(option.scope_entry.empty() ? Value() : Value(option.scope_entry));
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 DuckLakeOptionsFunction::DuckLakeOptionsFunction()

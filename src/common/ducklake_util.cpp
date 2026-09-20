@@ -1,15 +1,27 @@
 #include "common/ducklake_util.hpp"
+#include "duckdb/parser/expression/cast_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
-#include "duckdb/planner/filter/optional_filter.hpp"
-#include "duckdb/planner/filter/dynamic_filter.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
+#include "duckdb/function/scalar/struct_utils.hpp"
 #include "duckdb/function/scalar/variant_utils.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "storage/ducklake_catalog.hpp"
+#include "duckdb/main/database.hpp"
 
 #include <cmath>
 
@@ -43,7 +55,7 @@ string DuckLakeUtil::ToQuotedList(const vector<string> &input, char list_separat
 		if (!result.empty()) {
 			result += list_separator;
 		}
-		result += KeywordHelper::WriteQuoted(str, '"');
+		result += SQLQuotedIdentifier::ToString(str);
 	}
 	return result;
 }
@@ -84,6 +96,10 @@ ParsedCatalogEntry DuckLakeUtil::ParseCatalogEntry(const string &input) {
 
 string DuckLakeUtil::SQLIdentifierToString(const string &text) {
 	return "\"" + StringUtil::Replace(text, "\"", "\"\"") + "\"";
+}
+
+string DuckLakeUtil::SQLIdentifierToString(const Identifier &identifier) {
+	return SQLQuotedIdentifier::ToString(identifier.GetIdentifierName());
 }
 
 string DuckLakeUtil::SQLLiteralToString(const string &text) {
@@ -161,9 +177,9 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 	case LogicalTypeId::ENUM:
 		return EscapeVarcharForSQL(value.ToString());
 	case LogicalTypeId::VARIANT: {
-		Vector tmp(value, count_t(idx_t(1)));
+		Vector tmp(value, count_t(1));
 		RecursiveUnifiedVectorFormat format;
-		Vector::RecursiveToUnifiedFormat(tmp, 1, format);
+		Vector::RecursiveToUnifiedFormat(tmp, format);
 		UnifiedVariantVectorData vector_data(format);
 		auto val = VariantUtils::ConvertVariantToValue(vector_data, 0, 0);
 		if (!use_native_type) {
@@ -173,6 +189,10 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 		return ToSQLString(metadata_manager, val);
 	}
 	case LogicalTypeId::STRUCT: {
+		if (!metadata_manager.TypeIsNativelySupported(value.type())) {
+			// Stored as VARCHAR text - use ToString() which produces parseable format
+			return value.ToString();
+		}
 		auto &child_types = StructType::GetChildTypes(value.type());
 		auto &struct_values = StructValue::GetChildren(value);
 		if (struct_values.empty()) {
@@ -186,8 +206,8 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 			if (is_unnamed) {
 				ret += ToSQLString(metadata_manager, child);
 			} else {
-				ret += "'" + StringUtil::Replace(name.GetIdentifierName(), "'", "''") + "': " +
-				       ToSQLString(metadata_manager, child);
+				ret += "'" + StringUtil::Replace(name.GetIdentifierName(), "'", "''") +
+				       "': " + ToSQLString(metadata_manager, child);
 			}
 			if (i < struct_values.size() - 1) {
 				ret += ", ";
@@ -278,11 +298,7 @@ string ToByteaHexLiteral(const string &raw_bytes) {
 string DuckLakeUtil::ValueToSQL(DuckLakeMetadataManager &metadata_manager, ClientContext &context, const Value &val) {
 	// FIXME: this should be upstreamed
 	if (val.IsNull()) {
-		// The destination table supplies the physical type for NULL values. Using
-		// the DuckDB logical type here can produce an incompatible cast for
-		// backends that store unsupported types differently (for example,
-		// PostgreSQL VARCHAR is stored as BYTEA in inlined tables).
-		return "NULL";
+		return val.ToString();
 	}
 	if (val.type().HasAlias()) {
 		// extension type: cast to string
@@ -332,37 +348,185 @@ string DuckLakeUtil::JoinPath(FileSystem &fs, const string &a, const string &b) 
 	}
 }
 
-LegacyDynamicFilter *DuckLakeUtil::GetOptionalDynamicFilter(const TableFilter &filter) {
-	if (filter.filter_type != TableFilterType::LEGACY_OPTIONAL_FILTER) {
+shared_ptr<DynamicFilterData> DuckLakeUtil::GetOptionalDynamicFilterData(const TableFilter &filter) {
+	auto dynamic_filter_data = ExpressionFilter::GetRootOptionalDynamicFilterData(filter);
+	if (dynamic_filter_data) {
+		return dynamic_filter_data;
+	}
+
+	auto &expression_filter =
+	    ExpressionFilter::GetExpressionFilter(filter, "DuckLakeUtil::GetOptionalDynamicFilterData");
+	if (expression_filter.expr->GetExpressionClass() != ExpressionClass::BOUND_CONJUNCTION) {
 		return nullptr;
 	}
-	auto &optional = filter.Cast<LegacyOptionalFilter>();
-	if (!optional.child_filter || optional.child_filter->filter_type != TableFilterType::LEGACY_DYNAMIC_FILTER) {
+	auto &conjunction = expression_filter.expr->Cast<BoundConjunctionExpression>();
+	if (conjunction.GetExpressionType() != ExpressionType::CONJUNCTION_AND) {
 		return nullptr;
 	}
-	auto &dynamic = optional.child_filter->Cast<LegacyDynamicFilter>();
-	if (!dynamic.filter_data) {
-		return nullptr;
+	for (auto &child : conjunction.GetChildren()) {
+		ExpressionFilter child_filter(child->Copy());
+		dynamic_filter_data = GetOptionalDynamicFilterData(child_filter);
+		if (dynamic_filter_data) {
+			return dynamic_filter_data;
+		}
 	}
-	return &dynamic;
+	return nullptr;
 }
 
-bool DuckLakeUtil::IsInlinedSystemColumn(const string &name) {
-	return StringUtil::CIEquals(name, "row_id") || StringUtil::CIEquals(name, "begin_snapshot") ||
-	       StringUtil::CIEquals(name, "end_snapshot") || StringUtil::CIEquals(name, "_ducklake_internal_snapshot_id") ||
-	       StringUtil::CIEquals(name, "_ducklake_internal_row_id");
-}
+unique_ptr<Expression> DuckLakeUtil::MergeFilterExpressions(unique_ptr<Expression> left, unique_ptr<Expression> right) {
+	vector<unique_ptr<Expression>> conjuncts;
+	conjuncts.push_back(std::move(left));
+	conjuncts.push_back(std::move(right));
+	LogicalFilter::SplitPredicates(conjuncts);
 
-void DuckLakeUtil::ValidateNoInlinedSystemColumns(const ColumnList &columns, const string &table_name) {
-	for (auto &col : columns.Logical()) {
-		if (IsInlinedSystemColumn(col.Name().GetIdentifierName())) {
-			if (table_name.empty()) {
-				throw BinderException(
-				    "Column name \"%s\" is reserved by DuckLake for internal use when data inlining is enabled. If "
-				    "you must use this column name, disable inlining by calling "
-				    "ducklake_set_option('data_inlining_row_limit', 0).",
-				    col.Name().GetIdentifierName());
+	vector<unique_ptr<Expression>> merged;
+	for (auto &conjunct : conjuncts) {
+		bool is_duplicate = false;
+		for (auto &existing : merged) {
+			if (existing->Equals(*conjunct)) {
+				is_duplicate = true;
+				break;
 			}
+		}
+		if (!is_duplicate) {
+			merged.push_back(std::move(conjunct));
+		}
+	}
+	if (merged.size() == 1) {
+		return std::move(merged[0]);
+	}
+	auto result = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
+	for (auto &conjunct : merged) {
+		result->GetChildrenMutable().push_back(std::move(conjunct));
+	}
+	return std::move(result);
+}
+
+//! Resolve which child of the input struct a struct_extract reads, rejecting a position the type cannot hold
+static bool TryResolveStructExtractChild(const Expression &expr, idx_t &position) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return false;
+	}
+	auto &func = expr.Cast<BoundFunctionExpression>();
+	if (func.GetChildren().empty()) {
+		return false;
+	}
+	// stats are stored against a named field, so an unnamed struct (TUPLE) has nothing to resolve against
+	auto &input_type = func.GetChildren()[0]->GetReturnType();
+	if (input_type.id() != LogicalTypeId::STRUCT) {
+		return false;
+	}
+	if (!TryGetStructExtractChildIndex(func, position)) {
+		return false;
+	}
+	return position < StructType::GetChildCount(input_type);
+}
+
+bool DuckLakeUtil::IsStructExtract(const Expression &expr) {
+	idx_t position;
+	return TryResolveStructExtractChild(expr, position);
+}
+
+//! Walk to the sub-expressions a filter reads a column through, without descending into them
+static void FindFilterSubject(const Expression &expr, optional_ptr<const Expression> &subject, bool &conflict) {
+	if (conflict) {
+		return;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF ||
+	    expr.GetExpressionClass() == ExpressionClass::BOUND_REF || DuckLakeUtil::IsStructExtract(expr)) {
+		if (subject && !subject->Equals(expr)) {
+			conflict = true;
+		} else {
+			subject = expr;
+		}
+		return;
+	}
+	ExpressionIterator::EnumerateChildren(
+	    expr, [&](const Expression &child) { FindFilterSubject(child, subject, conflict); });
+}
+
+optional_ptr<const Expression> DuckLakeUtil::GetFilterSubject(const Expression &expr) {
+	optional_ptr<const Expression> subject;
+	bool conflict = false;
+	FindFilterSubject(expr, subject, conflict);
+	return conflict ? nullptr : subject;
+}
+
+const Expression &DuckLakeUtil::GetFilterSubjectPath(const Expression &subject, vector<string> &path) {
+	reference<const Expression> current = subject;
+	idx_t position;
+	while (TryResolveStructExtractChild(current.get(), position)) {
+		auto &func = current.get().Cast<BoundFunctionExpression>();
+		auto &input_type = func.GetChildren()[0]->GetReturnType();
+		// the key is matched case-insensitively at bind time, so take the name from the struct type
+		path.push_back(StructType::GetChildName(input_type, position).GetIdentifierName());
+		current = *func.GetChildren()[0];
+	}
+	return current.get();
+}
+
+//! Rewrite the subject to the column placeholder an ExpressionFilter is evaluated against
+unique_ptr<Expression> DuckLakeUtil::ReplaceFilterSubject(const Expression &expr, const Expression &subject,
+                                                          const LogicalType &type) {
+	if (expr.Equals(subject)) {
+		return make_uniq<BoundReferenceExpression>(type, 0U);
+	}
+	auto result = expr.Copy();
+	ExpressionIterator::EnumerateChildren(*result, [&](unique_ptr<Expression> &child) {
+		child = DuckLakeUtil::ReplaceFilterSubject(*child, subject, type);
+	});
+	return result;
+}
+
+bool DuckLakeUtil::IsInlinedSystemColumn(const string &name, bool prefixed_inlined_columns) {
+	if (prefixed_inlined_columns) {
+		return StringUtil::CIStartsWith(name, DuckLakeInlinedColNames::PREFIX);
+	}
+	return DuckLakeInlinedColNames(false).ConflictsWith(name);
+}
+
+static void ThrowReservedInlinedColumn(const string &name, bool prefixed_inlined_columns) {
+	if (prefixed_inlined_columns) {
+		throw BinderException("Column name \"%s\" is reserved by DuckLake for internal use: column names starting "
+		                      "with \"%s\" are not allowed.",
+		                      name, DuckLakeInlinedColNames::PREFIX);
+	}
+	throw BinderException(
+	    "Column name \"%s\" is reserved by DuckLake for internal use when data inlining is enabled. If "
+	    "you must use this column name, disable inlining by calling "
+	    "ducklake_set_option('data_inlining_row_limit', 0).",
+	    name);
+}
+
+void DuckLakeUtil::ValidateInlinedSystemColumn(DuckLakeCatalog &catalog, ClientContext &context, SchemaIndex schema_id,
+                                               TableIndex table_id, const string &name) {
+	bool prefixed_inlined_columns = catalog.SupportsV1_1Metadata();
+	if (!prefixed_inlined_columns && catalog.DataInliningRowLimit(context, schema_id, table_id) == 0) {
+		return;
+	}
+	if (IsInlinedSystemColumn(name, prefixed_inlined_columns)) {
+		ThrowReservedInlinedColumn(name, prefixed_inlined_columns);
+	}
+}
+
+void DuckLakeUtil::ValidateNoInlinedSystemColumns(DuckLakeCatalog &catalog, ClientContext &context,
+                                                  SchemaIndex schema_id, const ColumnList &columns) {
+	bool prefixed_inlined_columns = catalog.SupportsV1_1Metadata();
+	if (!prefixed_inlined_columns && catalog.DataInliningRowLimit(context, schema_id, TableIndex()) == 0) {
+		return;
+	}
+	for (auto &col : columns.Logical()) {
+		if (IsInlinedSystemColumn(col.Name().GetIdentifierName(), prefixed_inlined_columns)) {
+			ThrowReservedInlinedColumn(col.Name().GetIdentifierName(), prefixed_inlined_columns);
+		}
+	}
+}
+
+void DuckLakeUtil::ValidateCanEnableInlining(const ColumnList &columns, bool prefixed_inlined_columns,
+                                             const string &table_name) {
+	DuckLakeInlinedColNames col_names(prefixed_inlined_columns);
+	for (auto &col : columns.Logical()) {
+		if (col_names.ConflictsWith(col.Name().GetIdentifierName())) {
 			throw BinderException(
 			    "Cannot enable data inlining for table \"%s\". Column \"%s\" conflicts with a reserved DuckLake "
 			    "internal column name used for inlining. To enable inlining for this table, rename or drop column "
@@ -461,6 +625,49 @@ string DuckLakeUtil::ChunkRowToSQL(DuckLakeMetadataManager &metadata_manager, Cl
 		result += ValueToSQL(metadata_manager, context, chunk.GetValue(c, row));
 	}
 	return result;
+}
+
+void DuckLakeUtil::CopyExtensionSettings(ClientContext &from, ClientContext &to) {
+	auto &db_config = DBConfig::GetConfig(from);
+	for (auto &entry : db_config.GetExtensionSettings()) {
+		auto &option = entry.second;
+		if (!option.setting_index.IsValid()) {
+			continue;
+		}
+		auto setting_index = option.setting_index.GetIndex();
+		if (!from.config.user_settings.IsSet(setting_index)) {
+			continue;
+		}
+		Value value;
+		if (!from.TryGetCurrentSetting(entry.first, value)) {
+			continue;
+		}
+		to.config.user_settings.SetUserSetting(setting_index, value);
+	}
+}
+
+bool DuckLakeUtil::TryGetLiteralValue(const ParsedExpression &expr, Value &result) {
+	if (expr.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+		result = expr.Cast<ConstantExpression>().GetLiteral().ToValue();
+		return true;
+	}
+	if (expr.GetExpressionType() != ExpressionType::OPERATOR_CAST) {
+		return false;
+	}
+	auto &cast = expr.Cast<CastExpression>();
+	if (cast.IsTryCast() || cast.Child().GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+		return false;
+	}
+	auto target_type = UnboundType::TryDefaultBind(cast.TargetType());
+	if (target_type.id() == LogicalTypeId::INVALID || target_type.id() == LogicalTypeId::UNBOUND) {
+		return false;
+	}
+	auto value = cast.Child().Cast<ConstantExpression>().GetLiteral().ToValue().DefaultTryCastAs(target_type);
+	if (!value) {
+		return false;
+	}
+	result = std::move(*value);
+	return true;
 }
 
 string DuckLakeUtil::MaterializedViewBackingTableName(const string &view_uuid) {

@@ -1,10 +1,11 @@
-# postgres_scanner needs DONT_LINK because it depends on libpq/OpenSSL
+# Note: tests for postgres_scanner are currently not run. All of them need a postgres server running. One test
+#       uses a remote rds server but that's not something we want to run here.
 if (NOT MINGW AND NOT ${WASM_ENABLED})
     duckdb_extension_load(postgres_scanner
             DONT_LINK
             GIT_URL https://github.com/duckdb/duckdb-postgres
-            GIT_TAG c91ea5779322c97dfff1940f67b3a4d5b6a1e07e
+            GIT_TAG bc6aab54dea43be1f4e218aa7cca06d915ad18ea
             SUBMODULES "database-connector"
             APPLY_PATCHES
             )
-endif()
+ endif()
