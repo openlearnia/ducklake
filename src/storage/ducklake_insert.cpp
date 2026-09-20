@@ -578,7 +578,7 @@ DuckLakeCopyOptions DuckLakeInsert::GetCopyOptions(ClientContext &context, DuckL
 	}
 	idx_t target_file_size = catalog.GetTargetFileSize(context, schema_id, table_id);
 
-	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(context, file_format);
+	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(context, Identifier(file_format));
 
 	auto &fs = FileSystem::GetFileSystem(context);
 	DuckLakeUtil::EnsureDirectoryExists(fs, copy_input.data_path);

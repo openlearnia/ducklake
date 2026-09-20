@@ -863,7 +863,7 @@ LIMIT 1)",
 	if (query_result->HasError()) {
 		query_result->GetErrorObject().Throw("Failed to read persisted DuckLake data file format: ");
 	}
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	if (materialized.RowCount() > 0 && !materialized.GetValue(0, 0).IsNull()) {
 		result = materialized.GetValue(0, 0).GetValue<string>();
 		return true;
@@ -942,7 +942,7 @@ DuckLakeCatalogInfo DuckLakeMetadataManager::GetCatalogForSnapshot(DuckLakeSnaps
 }
 
 struct DuckLakeMaterializedRow {
-	MaterializedQueryResult &result;
+	QueryResult &result;
 	idx_t index;
 	template <typename T> T GetValue(idx_t column) const { return result.GetValue(column, index).GetValue<T>(); }
 	Value GetBaseValue(idx_t column) const { return result.GetValue(column, index); }
@@ -1033,7 +1033,7 @@ ORDER BY table_id, parent_column NULLS FIRST, column_order
 	}
 	const idx_t COLUMN_INDEX_START = 8;
 	auto &tables = catalog.tables;
-	auto &materialized_result = result->Cast<MaterializedQueryResult>();
+	auto &materialized_result = *result;
 	for (idx_t row_index = 0; row_index < materialized_result.RowCount(); row_index++) {
 		DuckLakeMaterializedRow row {materialized_result, row_index};
 		auto table_id = TableIndex(row.GetValue<uint64_t>(1));
@@ -1291,7 +1291,7 @@ ORDER BY sort.table_id, sort.sort_id, sort_expr.sort_key_index
 		result->GetErrorObject().Throw("Failed to get sort information from DuckLake: ");
 	}
 	auto &sorts = catalog.sorts;
-	auto &sort_result = result->Cast<MaterializedQueryResult>();
+	auto &sort_result = *result;
 	for (idx_t row_index = 0; row_index < sort_result.RowCount(); row_index++) {
 		DuckLakeMaterializedRow row {sort_result, row_index};
 		auto sort_id = row.GetValue<uint64_t>(0);
@@ -2339,7 +2339,7 @@ vector<DuckLakeFileListEntry> DuckLakeMetadataManager::GetFilesForTable(DuckLake
 	auto inlined_deletions = ReadInlinedFileDeletions(table_id, snapshot);
 
 	vector<DuckLakeFileListEntry> files;
-	auto &materialized_result = result->Cast<MaterializedQueryResult>();
+	auto &materialized_result = *result;
 	for (idx_t row_index = 0; row_index < materialized_result.RowCount(); row_index++) {
 		DuckLakeMaterializedRow row {materialized_result, row_index};
 		DuckLakeFileListEntry file_entry;
@@ -2649,7 +2649,7 @@ DuckLakeMetadataManager::GetExtendedFilesForTable(DuckLakeTableEntry &table, Duc
 		result->GetErrorObject().Throw("Failed to get extended data file list from DuckLake: ");
 	}
 	vector<DuckLakeFileListExtendedEntry> files;
-	auto &materialized_result = result->Cast<MaterializedQueryResult>();
+	auto &materialized_result = *result;
 	for (idx_t row_index = 0; row_index < materialized_result.RowCount(); row_index++) {
 		DuckLakeMaterializedRow row {materialized_result, row_index};
 		DuckLakeFileListExtendedEntry file_entry;
@@ -3539,7 +3539,7 @@ WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_s
 	if (view_result->HasError()) {
 		view_result->GetErrorObject().Throw("Failed to load materialized views from DuckLake: ");
 	}
-	auto &materialized_views = view_result->Cast<MaterializedQueryResult>();
+	auto &materialized_views = *view_result;
 	for (idx_t row_index = 0; row_index < materialized_views.RowCount(); row_index++) {
 		DuckLakeMaterializedRow row {materialized_views, row_index};
 		DuckLakeMaterializedViewInfo info;
@@ -3576,7 +3576,7 @@ WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_s
 	for (idx_t i = 0; i < result.size(); i++) {
 		view_index_by_id.emplace(result[i].id.index, i);
 	}
-	auto &materialized_dependencies = dependency_result->Cast<MaterializedQueryResult>();
+	auto &materialized_dependencies = *dependency_result;
 	for (idx_t row_index = 0; row_index < materialized_dependencies.RowCount(); row_index++) {
 		DuckLakeMaterializedRow row {materialized_dependencies, row_index};
 		auto view_id = row.GetValue<uint64_t>(0);
@@ -5137,7 +5137,7 @@ unique_ptr<DuckLakeSnapshot> DuckLakeMetadataManager::GetSnapshot() {
 	}
 	unique_ptr<DataChunk> snapshot_chunk;
 	ErrorData snapshot_error;
-	if (!result->TryFetch(snapshot_chunk, snapshot_error)) {
+	if (!result->TryFetchOrError(snapshot_chunk, snapshot_error)) {
 		throw InvalidInputException("Snapshot fetch failed: %s", snapshot_error.RawMessage());
 	}
 	if (!snapshot_chunk || snapshot_chunk->size() == 0) {

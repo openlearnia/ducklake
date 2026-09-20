@@ -59,7 +59,7 @@ ParquetFileScanner::ParquetFileScanner(ClientContext &context, const DuckLakeFil
 	bind_data = parquet_scan.bind(context, bind_input, return_types, bind_return_names);
 	return_names.reserve(bind_return_names.size());
 	for (auto &name : bind_return_names) {
-		return_names.push_back(name.GetIdentifierName());
+		return_names.push_back(name);
 	}
 }
 

@@ -46,7 +46,7 @@ static bool GetSnapshotTime(DuckLakeTransaction &transaction, DuckLakeSnapshot s
 	if (rows->HasError()) {
 		return false;
 	}
-	auto &materialized = rows->Cast<MaterializedQueryResult>();
+	auto &materialized = *rows;
 	if (materialized.RowCount() == 0 || materialized.GetValue(0, 0).IsNull()) {
 		return false;
 	}
@@ -511,8 +511,8 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 	for (auto &group : groups) {
 		if (group->GetExpressionClass() == ExpressionClass::CONSTANT) {
 			auto &constant = group->Cast<const ConstantExpression>();
-			if (constant.GetValue().type().IsIntegral()) {
-				auto select_index = constant.GetValue().GetValue<int64_t>();
+			int64_t select_index = 0;
+			if (constant.GetLiteral().TryGetInt64(select_index)) {
 				if (select_index >= 1 && NumericCast<idx_t>(select_index) <= node.select_list.size()) {
 					result.key_positions.push_back(NumericCast<idx_t>(select_index - 1));
 					result.key_expr_sql.push_back(node.select_list[NumericCast<idx_t>(select_index - 1)]->ToString());
@@ -681,7 +681,7 @@ public:
 		if (!table_id.IsTransactionLocal()) {
 			// end-snapshot the currently live files of the backing table
 			string live_files_query = StringUtil::Format(R"(
-SELECT data_file_id, path, path_is_relative
+SELECT data_file_id, path, path_is_relative, record_count, file_size_bytes
 FROM {METADATA_CATALOG}.ducklake_data_file
 WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
   AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
@@ -698,7 +698,9 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 				if (path_is_relative) {
 					path = table.DataPath() + path;
 				}
-				transaction.DropFile(table_id, file_id, std::move(path));
+				transaction.DropFile(table_id, file_id, std::move(path),
+				                     NumericCast<idx_t>(row.GetValue<uint64_t>(3)),
+				                     NumericCast<idx_t>(row.GetValue<uint64_t>(4)));
 			}
 		}
 
@@ -717,7 +719,7 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 			if (diff_result->HasError()) {
 				diff_result->GetErrorObject().Throw("Failed to compute materialized view logical refresh diff: ");
 			}
-			auto &diff = diff_result->Cast<MaterializedQueryResult>();
+			auto &diff = *diff_result;
 			if (diff.RowCount() != 1 || diff.ColumnCount() != 3) {
 				throw InternalException("Materialized view logical refresh diff returned an unexpected shape");
 			}

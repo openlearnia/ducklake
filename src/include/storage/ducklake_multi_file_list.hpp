@@ -24,6 +24,10 @@ class DuckLakeMultiFileList : public MultiFileList {
 	    "__ducklake_inlined_transaction_local_data";
 
 public:
+	//! Whether this file list carries transaction-local (not yet committed) data.
+	bool HasTransactionLocalData() const {
+		return !transaction_local_files.empty() || transaction_local_data != nullptr;
+	}
 	DuckLakeMultiFileList(DuckLakeFunctionInfo &read_info, vector<DuckLakeDataFile> transaction_local_files,
 	                      shared_ptr<DuckLakeInlinedData> transaction_local_data,
 	                      unique_ptr<FilterPushdownInfo> filter_info = nullptr);

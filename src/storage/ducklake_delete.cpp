@@ -70,7 +70,7 @@ static DuckLakeDeleteFile WriteDeleteFileInternal(ClientContext &context, InputT
 	}
 
 	// get the actual copy function and bind it
-	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(input.context, info->format);
+	auto &copy_fun = DuckLakeFunctions::GetCopyFunction(input.context, Identifier(info->format));
 	CopyFunctionBindInput bind_input(*info);
 
 	vector<Identifier> names_to_write {"file_path", "pos"};
