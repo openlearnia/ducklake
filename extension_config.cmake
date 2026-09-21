@@ -33,9 +33,10 @@ if($ENV{ENABLE_GRAIN_BUNDLE_EXTENSIONS})
     duckdb_extension_load(httpfs
             GIT_URL https://github.com/duckdb/duckdb-httpfs
             # Upstream pin (SigV4 moved into core); matches the duckdb
-            # submodule's .github/config/extensions/httpfs.cmake.
+            # submodule's .github/config/extensions/httpfs.cmake. No
+            # APPLY_PATCHES: upstream removed the httpfs patch set with the
+            # reimplementation.
             GIT_TAG 96a2f2e88e5dd075facbc5a65dc3afd67aa2bb44
-            APPLY_PATCHES
     )
 endif()
 
