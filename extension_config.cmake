@@ -34,7 +34,7 @@ if($ENV{ENABLE_GRAIN_BUNDLE_EXTENSIONS})
             GIT_URL https://github.com/duckdb/duckdb-httpfs
             # Upstream pin (SigV4 moved into core); matches the duckdb
             # submodule's .github/config/extensions/httpfs.cmake.
-            GIT_TAG fafb14f2c899ddfd1998f8adf2e07fbbfd28b3fd
+            GIT_TAG 96a2f2e88e5dd075facbc5a65dc3afd67aa2bb44
             APPLY_PATCHES
     )
 endif()
@@ -49,7 +49,7 @@ if($ENV{ENABLE_QUACK})
             # openlearnia fork: b2f2d10 ported to the cyanoptera v2.0.0-alpha
             # core APIs (Identifier/QualifiedName), RPC behavior unchanged.
             GIT_URL https://github.com/openlearnia/duckdb-quack.git
-            GIT_TAG 5f26fe3460d7ace98f631786924d3d57fa08d72b
+            GIT_TAG 5e9bace
             SUBMODULES "extension-ci-tools"
             # core-side patches moved into the fork (SetFallible owned by
             # quack) — no APPLY_PATCHES: apply_extension_patches.py fails
