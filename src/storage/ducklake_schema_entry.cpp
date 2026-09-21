@@ -141,32 +141,37 @@ bool DuckLakeSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransaction transaction,
                                                                CreateFunctionInfo &info) {
 	unique_ptr<CatalogEntry> entry;
-	auto &create_macro_info = info.Cast<CreateMacroInfo>();
 	auto version = ParentCatalog().Cast<DuckLakeCatalog>().GetDuckLakeVersion();
-	for (auto &macro : create_macro_info.macros) {
-		for (auto &type : macro->types) {
-			DuckLakeTypes::CheckSupportedType(type, version);
-		}
-		for (auto &entry : macro->default_parameters) {
-			Value default_value;
-			if (DuckLakeUtil::TryGetLiteralValue(*entry.second, default_value)) {
-				DuckLakeTypes::CheckSupportedType(default_value.type(), version);
-			}
-		}
-	}
+	// Cast per-case: CreateProcedureInfo derives from CreateFunctionInfo, not
+	// CreateMacroInfo, and Cast is unchecked in release builds.
 	switch (info.type) {
-	case CatalogType::MACRO_ENTRY: {
-		auto &create_macro_info = info.Cast<CreateMacroInfo>();
-		entry = make_uniq<ScalarMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
-		break;
-	}
+	case CatalogType::MACRO_ENTRY:
 	case CatalogType::TABLE_MACRO_ENTRY: {
 		auto &create_macro_info = info.Cast<CreateMacroInfo>();
-		entry = make_uniq<TableMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
+		for (auto &macro : create_macro_info.macros) {
+			for (auto &type : macro->types) {
+				DuckLakeTypes::CheckSupportedType(type, version);
+			}
+			for (auto &entry : macro->default_parameters) {
+				Value default_value;
+				if (DuckLakeUtil::TryGetLiteralValue(*entry.second, default_value)) {
+					DuckLakeTypes::CheckSupportedType(default_value.type(), version);
+				}
+			}
+		}
+		if (info.type == CatalogType::MACRO_ENTRY) {
+			entry = make_uniq<ScalarMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
+		} else {
+			entry = make_uniq<TableMacroCatalogEntry>(ParentCatalog(), *this, create_macro_info);
+		}
 		break;
 	}
 	case CatalogType::PROCEDURE_ENTRY: {
 		auto &create_procedure_info = info.Cast<CreateProcedureInfo>();
+		for (auto &type : create_procedure_info.parameter_types) {
+			DuckLakeTypes::CheckSupportedType(type, version);
+		}
+		DuckLakeTypes::CheckSupportedType(create_procedure_info.return_type, version);
 		entry = make_uniq<DuckLakeProcedureEntry>(ParentCatalog(), *this, create_procedure_info,
 		                                          ProcedureIndex(DConstants::INVALID_INDEX));
 		break;
