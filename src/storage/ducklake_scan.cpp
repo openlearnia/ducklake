@@ -109,7 +109,10 @@ unique_ptr<BaseStatistics> DuckLakeStatisticsExtended(ClientContext &context,
 	}
 	auto &multi_file_data = input.bind_data->Cast<MultiFileBindData>();
 	auto &file_list = multi_file_data.file_list->Cast<DuckLakeMultiFileList>();
-	if (file_list.HasTransactionLocalData()) {
+	// Global column stats are only valid for current-snapshot scans: applying
+	// them to time-travel scans lets the optimizer drop NULLs that exist in the
+	// historical snapshot (see count_not_null_optimization_time_travel.test).
+	if (!file_list.CanUseGlobalStats() || file_list.HasTransactionLocalData()) {
 		return nullptr;
 	}
 	// Scalar nested-extract statistics are propagated from the root STRUCT/LIST

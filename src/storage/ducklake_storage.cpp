@@ -1,6 +1,8 @@
 #include "duckdb.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
 
 #include "storage/ducklake_storage.hpp"
@@ -81,6 +83,24 @@ static void HandleDuckLakeOption(DuckLakeOptions &options, const string &option,
 static unique_ptr<Catalog> DuckLakeAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                           AttachedDatabase &db, const string &name, AttachInfo &info,
                                           AttachOptions &attach_options) {
+	// DuckDB 2.0 runs the storage attach callback and the full catalog
+	// initialization (DuckLakeCatalog::FinalizeLoad) BEFORE the attach-name
+	// conflict check in DatabaseManager::FinalizeAttach. A duplicate attach name
+	// would therefore initialize the lake first - attaching the metadata
+	// database, which can OR REPLACE-evict the live metadata database of an
+	// already-attached DuckLake catalog - before the guaranteed "already exists"
+	// failure unwinds the attach without ever detaching it again. The victim
+	// catalog is left with a missing metadata database, and any later query that
+	// enumerates its schemas fails with "Catalog <name> does not exist!". Detect
+	// the conflict up front so initialization never runs for a doomed attach.
+	// (IGNORE_ON_CONFLICT never reaches this callback; REPLACE_ON_CONFLICT is
+	// allowed to proceed and swaps the entries in FinalizeAttach.)
+	if (info.on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
+		auto &db_manager = DatabaseManager::Get(context);
+		if (db_manager.GetDatabase(context, Identifier(name))) {
+			throw BinderException("Failed to attach database: database with name \"%s\" already exists", name);
+		}
+	}
 	DuckLakeOptions options;
 	unique_ptr<SecretEntry> secret;
 	if (info.path.empty()) {

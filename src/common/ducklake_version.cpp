@@ -28,6 +28,15 @@ DuckLakeVersion DuckLakeVersionFromString(const string &version_str) {
 	if (version_str == "1.1-dev1") {
 		return DuckLakeVersion::V1_1_DEV_1;
 	}
+	if (version_str == "1.1") {
+		return DuckLakeVersion::V1_1;
+	}
+	if (version_str == "1.2") {
+		return DuckLakeVersion::V1_2;
+	}
+	if (version_str == "1.3") {
+		return DuckLakeVersion::V1_3;
+	}
 	throw InvalidInputException("Unsupported ducklake_version '%s'", version_str);
 }
 
@@ -49,6 +58,12 @@ string DuckLakeVersionToString(DuckLakeVersion version) {
 		return "1.0";
 	case DuckLakeVersion::V1_1_DEV_1:
 		return "1.1-dev1";
+	case DuckLakeVersion::V1_1:
+		return "1.1";
+	case DuckLakeVersion::V1_2:
+		return "1.2";
+	case DuckLakeVersion::V1_3:
+		return "1.3";
 	default:
 		throw InternalException("DuckLakeVersionToString: unknown version");
 	}

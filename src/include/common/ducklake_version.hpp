@@ -21,10 +21,15 @@ enum class DuckLakeVersion : uint8_t {
 	V0_4_DEV1 = 5,
 	V0_4 = 6,
 	V1_0 = 7,
-	V1_1_DEV_1 = 8
+	V1_1_DEV_1 = 8,
+	//! This port's own catalog versions - they extend the 1.1-dev1 table shape with the
+	//! port-specific metadata tables (materialized views, stored procedures)
+	V1_1 = 9,
+	V1_2 = 10,
+	V1_3 = 11
 };
 
-static constexpr DuckLakeVersion DUCKLAKE_LATEST_VERSION = DuckLakeVersion::V1_1_DEV_1;
+static constexpr DuckLakeVersion DUCKLAKE_LATEST_VERSION = DuckLakeVersion::V1_3;
 
 DuckLakeVersion DuckLakeVersionFromString(const string &version_str);
 string DuckLakeVersionToString(DuckLakeVersion version);

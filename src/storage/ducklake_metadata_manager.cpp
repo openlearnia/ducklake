@@ -938,7 +938,7 @@ DuckLakeCatalogInfo DuckLakeMetadataManager::GetCatalogForSnapshot(DuckLakeSnaps
 	auto &ducklake_catalog = transaction.GetCatalog();
 	return BuildCatalogForSnapshot(
 	    snapshot, [this](DuckLakeSnapshot s, string q) { return Query(s, q); }, ducklake_catalog.DataPath(),
-	    ducklake_catalog.Separator(), ducklake_catalog.SupportsV1_1Metadata());
+	    ducklake_catalog.Separator(), ducklake_catalog.SupportsV1_1Metadata(), ducklake_catalog.SupportsPortMetadata());
 }
 
 struct DuckLakeMaterializedRow {
@@ -951,7 +951,7 @@ struct DuckLakeMaterializedRow {
 
 DuckLakeCatalogInfo DuckLakeMetadataManager::BuildCatalogForSnapshot(
     DuckLakeSnapshot snapshot, const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor,
-    const string &base_data_path, const string &separator, bool load_view_column_tags) {
+    const string &base_data_path, const string &separator, bool load_view_column_tags, bool load_procedures) {
 	DuckLakeCatalogInfo catalog;
 	// load the schema information
 	auto result = query_executor(snapshot, R"(
@@ -1205,7 +1205,9 @@ WHERE  {SNAPSHOT_ID} >= ducklake_macro.begin_snapshot AND ({SNAPSHOT_ID} < duckl
 
 	static const vector<pair<string, string>> PROCEDURE_PARAM_FIELDS = { {"parameter_name", "parameter_name"},
 	                                                                    {"parameter_type", "parameter_type"} };
-	result = query_executor(snapshot, StringUtil::Format(R"(
+	// pre-port lakes (catalog version < 1.1) have no procedure metadata tables - skip them
+	if (load_procedures) {
+		result = query_executor(snapshot, StringUtil::Format(R"(
 SELECT schema_id, ducklake_procedure.procedure_id, procedure_name, language, body,
        COALESCE(ducklake_procedure.definition_version, 1), return_type, (
 	SELECT %s
@@ -1216,36 +1218,37 @@ FROM {METADATA_CATALOG}.ducklake_procedure
 WHERE {SNAPSHOT_ID} >= ducklake_procedure.begin_snapshot
   AND ({SNAPSHOT_ID} < ducklake_procedure.end_snapshot OR ducklake_procedure.end_snapshot IS NULL)
 )", ListAggregation(PROCEDURE_PARAM_FIELDS)));
-	if (result->HasError()) {
-		result->GetErrorObject().Throw("Failed to get procedure information from DuckLake: ");
-	}
-	for (auto &row : *result) {
-		DuckLakeProcedureInfo procedure_info;
-		procedure_info.schema_id = SchemaIndex(row.GetValue<uint64_t>(0));
-		procedure_info.procedure_id = ProcedureIndex(row.GetValue<uint64_t>(1));
-		procedure_info.procedure_name = row.GetValue<string>(2);
-		procedure_info.language = row.GetValue<string>(3);
-		procedure_info.body = row.GetValue<string>(4);
-		procedure_info.definition_version = row.GetValue<uint64_t>(5);
-		if (procedure_info.definition_version > CURRENT_PROCEDURE_DEFINITION_VERSION) {
-			throw InvalidInputException(
-			    "Procedure \"%s\" uses definition version %llu - this build supports up to version %llu. "
-			    "Upgrade the ducklake extension to read this catalog.",
-			    procedure_info.procedure_name, procedure_info.definition_version,
-			    CURRENT_PROCEDURE_DEFINITION_VERSION);
+		if (result->HasError()) {
+			result->GetErrorObject().Throw("Failed to get procedure information from DuckLake: ");
 		}
-		procedure_info.return_type = row.GetValue<string>(6);
-		auto parameters = row.GetValue<Value>(7);
-		if (!parameters.IsNull()) {
-			for (auto &parameter : ListValue::GetChildren(parameters)) {
-				auto &fields = StructValue::GetChildren(parameter);
-				DuckLakeProcedureParameter parameter_info;
-				parameter_info.parameter_name = StringValue::Get(fields[0]);
-				parameter_info.parameter_type = StringValue::Get(fields[1]);
-				procedure_info.parameters.push_back(std::move(parameter_info));
+		for (auto &row : *result) {
+			DuckLakeProcedureInfo procedure_info;
+			procedure_info.schema_id = SchemaIndex(row.GetValue<uint64_t>(0));
+			procedure_info.procedure_id = ProcedureIndex(row.GetValue<uint64_t>(1));
+			procedure_info.procedure_name = row.GetValue<string>(2);
+			procedure_info.language = row.GetValue<string>(3);
+			procedure_info.body = row.GetValue<string>(4);
+			procedure_info.definition_version = row.GetValue<uint64_t>(5);
+			if (procedure_info.definition_version > CURRENT_PROCEDURE_DEFINITION_VERSION) {
+				throw InvalidInputException(
+				    "Procedure \"%s\" uses definition version %llu - this build supports up to version %llu. "
+				    "Upgrade the ducklake extension to read this catalog.",
+				    procedure_info.procedure_name, procedure_info.definition_version,
+				    CURRENT_PROCEDURE_DEFINITION_VERSION);
 			}
+			procedure_info.return_type = row.GetValue<string>(6);
+			auto parameters = row.GetValue<Value>(7);
+			if (!parameters.IsNull()) {
+				for (auto &parameter : ListValue::GetChildren(parameters)) {
+					auto &fields = StructValue::GetChildren(parameter);
+					DuckLakeProcedureParameter parameter_info;
+					parameter_info.parameter_name = StringValue::Get(fields[0]);
+					parameter_info.parameter_type = StringValue::Get(fields[1]);
+					procedure_info.parameters.push_back(std::move(parameter_info));
+				}
+			}
+			catalog.procedures.push_back(std::move(procedure_info));
 		}
-		catalog.procedures.push_back(std::move(procedure_info));
 	}
 
 	// load partition information
@@ -3529,6 +3532,10 @@ string DuckLakeMetadataManager::DropMaterializedViews(const set<TableIndex> &dro
 
 vector<DuckLakeMaterializedViewInfo> DuckLakeMetadataManager::LoadMaterializedViews(DuckLakeSnapshot snapshot) {
 	vector<DuckLakeMaterializedViewInfo> result;
+	if (!transaction.GetCatalog().SupportsPortMetadata()) {
+		// pre-port lakes (catalog version < 1.1) have no materialized view metadata tables
+		return result;
+	}
 	string view_query = R"(
 SELECT view_id, view_uuid, schema_id, view_name, dialect, sql, backing_table_id, last_refreshed_snapshot,
        COALESCE(definition_version, 1)

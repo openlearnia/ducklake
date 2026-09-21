@@ -815,7 +815,9 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, 
 	auto create_info = GetInfo();
 	auto &table_info = create_info->Cast<CreateTableInfo>();
 	if (!table_info.columns.ColumnExists(info.old_name)) {
-		throw CatalogException("column %s does not exist", info.old_name.GetIdentifierName());
+		// format the Identifier directly - it renders as a quoted identifier, matching the
+		// error message consumers expect (e.g. column "blablabla" does not exist)
+		throw CatalogException("Failed to rename column - column %s does not exist", info.old_name);
 	}
 	auto &col = table_info.columns.GetColumn(info.old_name);
 	auto &field_id = GetFieldId(col.Physical());

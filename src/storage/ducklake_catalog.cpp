@@ -1020,9 +1020,17 @@ optional_ptr<BoundAtClause> DuckLakeCatalog::CatalogSnapshot() const {
 }
 
 void DuckLakeCatalog::OnDetach(ClientContext &context) {
-	// detach the metadata database
+	// detach the metadata database - but only if the database currently
+	// registered under our metadata name is still the one WE attached. During
+	// ATTACH OR REPLACE the replacing catalog's initialization runs before this
+	// (replaced) catalog is detached, and both catalogs default to the same
+	// "__ducklake_metadata_<name>" - detaching by name alone would evict the
+	// replacement's metadata database out from under it.
 	auto &db_manager = DatabaseManager::Get(context);
-	db_manager.DetachDatabase(context, Identifier(MetadataDatabaseName()), OnEntryNotFound::RETURN_NULL);
+	auto current = db_manager.GetDatabase(context, Identifier(MetadataDatabaseName()));
+	if (current && current.get() == MetadataDatabaseAttachment().get()) {
+		db_manager.DetachDatabase(context, Identifier(MetadataDatabaseName()), OnEntryNotFound::RETURN_NULL);
+	}
 }
 
 optional_idx DuckLakeCatalog::GetCatalogVersion(ClientContext &context) {

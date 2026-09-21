@@ -137,6 +137,19 @@ public:
 	const Identifier &MetadataSchemaName() const {
 		return options.metadata_schema;
 	}
+	//! The metadata database attachment, captured right after this catalog
+	//! attached it during initialization. Used for an identity check in
+	//! OnDetach: during ATTACH OR REPLACE the entry registered under our
+	//! metadata database name can already belong to the REPLACING catalog (both
+	//! default to "__ducklake_metadata_<attach name>") by the time the replaced
+	//! (this) catalog is torn down - detaching by name alone would evict the
+	//! replacement's metadata database out from under it.
+	optional_ptr<AttachedDatabase> MetadataDatabaseAttachment() const {
+		return metadata_database_attachment;
+	}
+	void SetMetadataDatabaseAttachment(optional_ptr<AttachedDatabase> attachment) {
+		metadata_database_attachment = std::move(attachment);
+	}
 	const string &MetadataPath() const {
 		return options.metadata_path;
 	}
@@ -274,6 +287,10 @@ public:
 	bool SupportsV1_1Metadata() const {
 		return ducklake_version >= DuckLakeVersion::V1_1_DEV_1;
 	}
+	//! Whether the catalog has this port's metadata tables (materialized views, stored procedures)
+	bool SupportsPortMetadata() const {
+		return ducklake_version >= DuckLakeVersion::V1_1;
+	}
 
 	void OnDetach(ClientContext &context) override;
 
@@ -404,6 +421,8 @@ private:
 	atomic<idx_t> last_uncommitted_catalog_version;
 	//! The metadata server type
 	string metadata_type;
+	//! The metadata database attached by this catalog (see MetadataDatabaseAttachment)
+	optional_ptr<AttachedDatabase> metadata_database_attachment;
 	//! The resolved DuckLake spec version of the attached catalog
 	DuckLakeVersion ducklake_version = DuckLakeVersion::V1_0;
 	//! A per-instance identifier used to scope ObjectCache keys.
