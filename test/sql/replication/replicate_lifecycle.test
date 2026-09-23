@@ -1,0 +1,175 @@
+# name: test/sql/replication/replicate_lifecycle.test
+# description: background supervisor lifecycle: start/pause/resume/stop and lag reporting
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_life_src.db' AS repl_src (DATA_PATH '{TEST_DIR}/repl_life_src_files')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_life.db' AS repl_life (DATA_PATH '{TEST_DIR}/repl_life_files')
+
+statement ok
+CREATE SCHEMA repl_src.app
+
+statement ok
+CREATE TABLE repl_src.app.t AS SELECT i AS id, 'v' || i AS val FROM range(5) t(i)
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_life', 'repl_src', interval_ms := 300)
+----
+1
+
+# start marks the job running and spawns the supervisor
+query II
+SELECT replication_id, status FROM ducklake_replicate_start('repl_life')
+----
+1	running
+
+query I
+SELECT status FROM ducklake_replicate_status('repl_life')
+----
+running
+
+# the supervisor performs the initial sync without a manual catchup
+statement ok
+SELECT sleep_ms(1500)
+
+query I
+SELECT count(*) FROM repl_life.app.t
+----
+5
+
+query I
+SELECT strategy FROM ducklake_replicate_tables('repl_life', 1)
+----
+snapshot
+
+# new source writes propagate on the next cycle
+statement ok
+INSERT INTO repl_src.app.t VALUES (6, 'v6')
+
+statement ok
+SELECT sleep_ms(1200)
+
+query I
+SELECT count(*) FROM repl_life.app.t
+----
+6
+
+# pausing stops further cycles without dropping the job
+query II
+SELECT replication_id, status FROM ducklake_replicate_pause('repl_life', 1)
+----
+1	paused
+
+statement ok
+INSERT INTO repl_src.app.t VALUES (7, 'v7')
+
+statement ok
+SELECT sleep_ms(1200)
+
+query I
+SELECT count(*) FROM repl_life.app.t
+----
+6
+
+query I
+SELECT status FROM ducklake_replicate_status('repl_life')
+----
+paused
+
+# resume restarts scheduling and picks up the missed write
+query II
+SELECT replication_id, status FROM ducklake_replicate_resume('repl_life', 1)
+----
+1	running
+
+statement ok
+SELECT sleep_ms(1200)
+
+query I
+SELECT count(*) FROM repl_life.app.t
+----
+7
+
+# pause again, then resume_all brings it back
+statement ok
+SELECT * FROM ducklake_replicate_pause('repl_life', 1)
+
+query II
+SELECT replication_id, status FROM ducklake_replicate_resume_all('repl_life')
+----
+1	running
+
+# stop shuts the supervisor down; writes no longer propagate
+statement ok
+SELECT * FROM ducklake_replicate_stop('repl_life')
+
+statement ok
+INSERT INTO repl_src.app.t VALUES (8, 'v8')
+
+statement ok
+SELECT sleep_ms(1000)
+
+query I
+SELECT count(*) FROM repl_life.app.t
+----
+7
+
+# status exposes dest snapshot, snapshot lag and time lag;
+# the replica sits one commit behind after the stopped write
+query IIII
+SELECT status, dest_snapshot >= 0, snapshots_behind >= 1, lag_ms >= 0 FROM ducklake_replicate_status('repl_life')
+----
+stopped	1	1	1
+
+# restarting after stop resumes automatic catchup
+statement ok
+SELECT * FROM ducklake_replicate_start('repl_life')
+
+statement ok
+SELECT sleep_ms(1200)
+
+query I
+SELECT count(*) FROM repl_life.app.t
+----
+8
+
+# lifecycle errors on unknown jobs
+statement error
+SELECT * FROM ducklake_replicate_pause('repl_life', 99)
+----
+No replication job
+
+statement error
+SELECT * FROM ducklake_replicate_resume('repl_life', 99)
+----
+No replication job
+
+statement error
+SELECT * FROM ducklake_replicate_start('repl_life', job_id := 99)
+----
+No replication job
+
+# dropping the running job removes it from the supervisor schedule;
+# the replicated data stays behind but is no longer updated
+statement ok
+SELECT * FROM ducklake_replicate_drop('repl_life', 1)
+
+statement ok
+INSERT INTO repl_src.app.t VALUES (9, 'v9')
+
+statement ok
+SELECT sleep_ms(1000)
+
+query I
+SELECT count(*) FROM repl_life.app.t
+----
+8
+
+statement ok
+SELECT * FROM ducklake_replicate_stop('repl_life')

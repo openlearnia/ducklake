@@ -39,3 +39,4 @@
 ## Testing
 
 - New code must always be tested with minimal sqltests.
+- Run the replication SQL suite from `ducklake/` with `build/release/test/unittest --test-dir . 'test/sql/replication/*'`.

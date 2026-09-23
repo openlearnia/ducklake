@@ -435,6 +435,10 @@ public:
 
 	virtual vector<DuckLakeColumnMappingInfo> GetColumnMappings(optional_idx start_from);
 	static string WriteNewColumnMappings(const vector<DuckLakeColumnMappingInfo> &new_column_mappings);
+
+	//! Lazily creates ducklake_external_file on lakes initialized before the table existed; returns
+	//! the set of normalized absolute paths this catalog references but does not own.
+	unordered_set<string> GetExternalFilePaths();
 	//! Caller supplies one resolved path per compaction, in the same order.
 	static string WriteMergeAdjacent(const vector<DuckLakeCompactedFileInfo> &compactions,
 	                                 const vector<DuckLakePath> &resolved_paths);

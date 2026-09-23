@@ -1,0 +1,57 @@
+# name: test/sql/replication/replicate_errors.test
+# description: replication job validation and error paths
+# group: [replication]
+
+require ducklake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_err_dest.db' AS repl_err_dest (DATA_PATH '{TEST_DIR}/repl_err_dest_files')
+
+# unknown source catalog
+statement error
+SELECT replication_id FROM ducklake_replicate_create('repl_err_dest', 'does_not_exist')
+----
+Failed to find attached database
+
+# source == dest
+statement error
+SELECT replication_id FROM ducklake_replicate_create('repl_err_dest', 'repl_err_dest')
+----
+must differ
+
+# share mode requires a ducklake source - a native catalog is rejected
+statement error
+SELECT replication_id FROM ducklake_replicate_create('repl_err_dest', 'memory', data_sync_mode := 'share')
+----
+share mode requires a DuckLake source
+
+# catchup for unknown id
+statement error
+SELECT * FROM ducklake_replicate_catchup('repl_err_dest', 99)
+----
+No replication job with id
+
+# valid create + status
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_err_dest', 'memory')
+----
+1
+
+query I
+SELECT status FROM ducklake_replicate_status('repl_err_dest') WHERE replication_id = 1
+----
+created
+
+# empty source schemas → catchup succeeds with a message
+query IIII
+SELECT replication_id, tables_synced, rows_copied, message FROM ducklake_replicate_catchup('repl_err_dest', 1)
+----
+1	0	0	no source tables matched include/exclude patterns
+
+query I
+SELECT last_ok_ts IS NOT NULL FROM ducklake_replicate_status('repl_err_dest')
+----
+1
+
+statement ok
+DETACH repl_err_dest

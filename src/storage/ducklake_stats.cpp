@@ -258,6 +258,11 @@ void DuckLakeTableStats::MergeFileStats(const DuckLakeDataFile &file) {
 	if (!file.max_partial_file_snapshot.IsValid()) {
 		record_count += file.row_count;
 		next_row_id += file.row_count;
+		if (file.flush_row_id_start.IsValid()) {
+			// files carrying embedded row ids can arrive out of id order (share-mode replication) -
+			// keep next_row_id above the file's id span so future writes cannot collide
+			next_row_id = MaxValue(next_row_id, file.flush_row_id_start.GetIndex() + file.row_count);
+		}
 	}
 	table_size_bytes += file.file_size_bytes;
 	for (auto &entry : file.column_stats) {

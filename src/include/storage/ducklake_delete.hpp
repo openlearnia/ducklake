@@ -81,6 +81,8 @@ struct WriteDeleteFileInputBase {
 	//! Managed data-file format of the parent table ("parquet" or "vortex").
 	//! Vortex tables always write Vortex positional deletes (never new Puffin DVs).
 	string data_file_format;
+	//! Optional explicit output file name (overrides the generated name).
+	string file_name;
 };
 
 //! Input for writing a delete file without per-position snapshot IDs, used for deletion

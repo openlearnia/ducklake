@@ -26,6 +26,7 @@
 #include "storage/ducklake_transaction_manager.hpp"
 #include "storage/ducklake_view_entry.hpp"
 #include "duckdb/main/database_path_and_type.hpp"
+#include "replication/ducklake_replication.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -224,6 +225,9 @@ DuckLakeCatalog::DuckLakeCatalog(AttachedDatabase &db_p, DuckLakeOptions options
 }
 
 DuckLakeCatalog::~DuckLakeCatalog() {
+	// DETACH routes through OnDetach, but Close() during instance teardown does not - a
+	// running supervisor must not outlive the catalog it drives.
+	DuckLakeReplication::OnCatalogDetach(GetDatabase(), GetName().GetIdentifierName());
 }
 
 void DuckLakeCatalog::Initialize(bool load_builtin) {
@@ -693,8 +697,8 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			create_procedure->parameter_names.push_back(parameter.parameter_name);
 			create_procedure->parameter_types.push_back(DuckLakeTypes::FromString(parameter.parameter_type));
 		}
-		auto procedure_entry = make_uniq<DuckLakeProcedureEntry>(*this, schema_entry, *create_procedure,
-		                                                        procedure.procedure_id);
+		auto procedure_entry =
+		    make_uniq<DuckLakeProcedureEntry>(*this, schema_entry, *create_procedure, procedure.procedure_id);
 		procedure_entry->definition_version = procedure.definition_version;
 		schema_set->AddEntry(schema_entry, procedure.procedure_id, std::move(procedure_entry));
 	}
@@ -1020,6 +1024,8 @@ optional_ptr<BoundAtClause> DuckLakeCatalog::CatalogSnapshot() const {
 }
 
 void DuckLakeCatalog::OnDetach(ClientContext &context) {
+	// stop the replication supervisor before the metadata database goes away
+	DuckLakeReplication::OnCatalogDetach(*context.db, GetName().GetIdentifierName());
 	// detach the metadata database - but only if the database currently
 	// registered under our metadata name is still the one WE attached. During
 	// ATTACH OR REPLACE the replacing catalog's initialization runs before this
@@ -1290,16 +1296,15 @@ ObjectCache &DuckLakeCatalog::GetObjectCacheInstance() {
 vector<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViews(DuckLakeTransaction &transaction) {
 	lock_guard<mutex> guard(materialized_views_lock);
 	auto snapshot = transaction.GetSnapshot();
-	if (!materialized_views_snapshot.IsValid() ||
-	    materialized_views_snapshot.GetIndex() != snapshot.snapshot_id) {
+	if (!materialized_views_snapshot.IsValid() || materialized_views_snapshot.GetIndex() != snapshot.snapshot_id) {
 		materialized_views_cache = transaction.GetMetadataManager().LoadMaterializedViews(snapshot);
 		materialized_views_snapshot = snapshot.snapshot_id;
 	}
 	return materialized_views_cache;
 }
 
-unique_ptr<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViewByBackingTable(
-    DuckLakeTransaction &transaction, TableIndex backing_table_id) {
+unique_ptr<DuckLakeMaterializedViewInfo>
+DuckLakeCatalog::GetMaterializedViewByBackingTable(DuckLakeTransaction &transaction, TableIndex backing_table_id) {
 	auto views = GetMaterializedViews(transaction);
 	for (auto &mv : views) {
 		if (mv.backing_table_id == backing_table_id) {
@@ -1309,9 +1314,10 @@ unique_ptr<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViewByB
 	return nullptr;
 }
 
-optional_ptr<CatalogEntry> DuckLakeCatalog::TryResolveMaterializedViewBackingTable(
-    DuckLakeTransaction &transaction, const DuckLakeSchemaEntry &schema, const string &view_name) {
-		auto mv = GetMaterializedViewByName(transaction, schema.name.GetIdentifierName(), view_name);
+optional_ptr<CatalogEntry> DuckLakeCatalog::TryResolveMaterializedViewBackingTable(DuckLakeTransaction &transaction,
+                                                                                   const DuckLakeSchemaEntry &schema,
+                                                                                   const string &view_name) {
+	auto mv = GetMaterializedViewByName(transaction, schema.name.GetIdentifierName(), view_name);
 	if (!mv) {
 		return nullptr;
 	}
@@ -1321,8 +1327,9 @@ optional_ptr<CatalogEntry> DuckLakeCatalog::TryResolveMaterializedViewBackingTab
 	return GetEntryById(transaction, transaction.GetSnapshot(), mv->backing_table_id);
 }
 
-unique_ptr<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViewByName(
-    DuckLakeTransaction &transaction, const string &schema_name, const string &view_name) {
+unique_ptr<DuckLakeMaterializedViewInfo> DuckLakeCatalog::GetMaterializedViewByName(DuckLakeTransaction &transaction,
+                                                                                    const string &schema_name,
+                                                                                    const string &view_name) {
 	auto views = GetMaterializedViews(transaction);
 	if (views.empty()) {
 		return nullptr;
@@ -1364,10 +1371,9 @@ void DuckLakeCatalog::VerifyNotMaterializedViewBackingTable(ClientContext &conte
                                                             const char *operation) {
 	auto &transaction = DuckLakeTransaction::Get(context, *this);
 	if (IsMaterializedViewBackingTable(transaction, table.GetTableId())) {
-		throw InvalidInputException(
-		    "Cannot %s materialized view \"%s\" - materialized views are refreshed with "
-		    "ducklake_refresh_materialized_view (or REFRESH MATERIALIZED VIEW)",
-		    operation, table.name);
+		throw InvalidInputException("Cannot %s materialized view \"%s\" - materialized views are refreshed with "
+		                            "ducklake_refresh_materialized_view (or REFRESH MATERIALIZED VIEW)",
+		                            operation, table.name);
 	}
 }
 

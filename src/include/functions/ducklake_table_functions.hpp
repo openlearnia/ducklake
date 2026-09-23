@@ -15,6 +15,9 @@
 
 namespace duckdb {
 class DuckLakeCatalog;
+class DuckLakeTableEntry;
+class DuckLakeTransaction;
+struct DuckLakeDataFile;
 struct DuckLakeSnapshotInfo;
 
 class DuckLakeTableFunctionUtil {
@@ -131,6 +134,12 @@ public:
 	static TableFunctionSet GetFunctions();
 };
 
+//! Reads file footers and builds DuckLakeDataFile entries (column stats, name maps) for external
+//! files without registering them - shared between ducklake_add_data_files and share-mode replication.
+vector<DuckLakeDataFile> DuckLakePrepareExternalFiles(DuckLakeTransaction &transaction, ClientContext &context,
+                                                      Catalog &catalog, DuckLakeTableEntry &table,
+                                                      const vector<string> &paths, const string &file_format);
+
 class DuckLakeSettingsFunction : public DuckLakeBaseMetadataFunction {
 public:
 	DuckLakeSettingsFunction();
@@ -164,6 +173,56 @@ public:
 class DuckLakeMaterializedViewRefreshHistoryFunction : public DuckLakeBaseMetadataFunction {
 public:
 	DuckLakeMaterializedViewRefreshHistoryFunction();
+};
+
+class DuckLakeReplicateCreateFunction : public TableFunction {
+public:
+	DuckLakeReplicateCreateFunction();
+};
+
+class DuckLakeReplicateCatchupFunction : public TableFunction {
+public:
+	DuckLakeReplicateCatchupFunction();
+};
+
+class DuckLakeReplicateStatusFunction : public TableFunction {
+public:
+	DuckLakeReplicateStatusFunction();
+};
+
+class DuckLakeReplicateTablesFunction : public TableFunction {
+public:
+	DuckLakeReplicateTablesFunction();
+};
+
+class DuckLakeReplicateDropFunction : public TableFunction {
+public:
+	DuckLakeReplicateDropFunction();
+};
+
+class DuckLakeReplicateStartFunction : public TableFunction {
+public:
+	DuckLakeReplicateStartFunction();
+};
+
+class DuckLakeReplicateStopFunction : public TableFunction {
+public:
+	DuckLakeReplicateStopFunction();
+};
+
+class DuckLakeReplicatePauseFunction : public TableFunction {
+public:
+	DuckLakeReplicatePauseFunction();
+};
+
+class DuckLakeReplicateResumeFunction : public TableFunction {
+public:
+	DuckLakeReplicateResumeFunction();
+};
+
+class DuckLakeReplicateResumeAllFunction : public TableFunction {
+public:
+	DuckLakeReplicateResumeAllFunction();
 };
 
 } // namespace duckdb

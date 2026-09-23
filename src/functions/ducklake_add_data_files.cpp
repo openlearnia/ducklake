@@ -32,6 +32,7 @@ struct DuckLakeAddDataFilesData : public TableFunctionData {
 	vector<string> globs;
 	bool allow_missing = false;
 	bool ignore_extra_columns = false;
+	bool allow_internal_columns = false;
 	HivePartitioningType hive_partitioning = HivePartitioningType::AUTOMATIC;
 };
 
@@ -162,7 +163,8 @@ public:
 	DuckLakeFileProcessor(DuckLakeTransaction &transaction, ClientContext &context,
 	                      const DuckLakeAddDataFilesData &bind_data, string target_format_p)
 	    : transaction(transaction), context(context), table(bind_data.table), allow_missing(bind_data.allow_missing),
-	      ignore_extra_columns(bind_data.ignore_extra_columns), hive_partitioning(bind_data.hive_partitioning),
+	      ignore_extra_columns(bind_data.ignore_extra_columns),
+	      allow_internal_columns(bind_data.allow_internal_columns), hive_partitioning(bind_data.hive_partitioning),
 	      target_format(std::move(target_format_p)), skipped_fields(bind_data.table.GetSkippedStatsFields()) {
 	}
 
@@ -195,6 +197,7 @@ private:
 	DuckLakeTableEntry &table;
 	bool allow_missing;
 	bool ignore_extra_columns;
+	bool allow_internal_columns;
 	map<string, string> hive_partitions;
 	HivePartitioningType hive_partitioning;
 	unordered_set<string> processed_files;
@@ -756,13 +759,13 @@ FROM vortex_full_metadata(%s)
 		DetermineMapping(file);
 
 		auto &stats_struct_children = StructVector::GetEntries(vortex_stats_list_entries);
-			auto &column_id_vec = stats_struct_children[0];
-			auto &stats_min_vec = stats_struct_children[1];
-			auto &stats_max_vec = stats_struct_children[2];
-			auto &stats_null_count_vec = stats_struct_children[3];
-			auto &stats_num_values_vec = stats_struct_children[4];
-			auto &total_compressed_size_vec = stats_struct_children[5];
-			auto &contains_nan_vec = stats_struct_children[6];
+		auto &column_id_vec = stats_struct_children[0];
+		auto &stats_min_vec = stats_struct_children[1];
+		auto &stats_max_vec = stats_struct_children[2];
+		auto &stats_null_count_vec = stats_struct_children[3];
+		auto &stats_num_values_vec = stats_struct_children[4];
+		auto &total_compressed_size_vec = stats_struct_children[5];
+		auto &contains_nan_vec = stats_struct_children[6];
 
 		auto column_id_data = FlatVector::GetData<int64_t>(column_id_vec);
 		auto stats_min_data = FlatVector::GetData<string_t>(stats_min_vec);
@@ -1481,6 +1484,8 @@ void DuckLakeFileProcessor::MapColumnStats(ParquetFileMetadata &file_metadata, D
 	}
 }
 
+static bool IsDuckLakeInternalColumn(const string &name);
+
 vector<unique_ptr<DuckLakeNameMapEntry>>
 DuckLakeFileProcessor::MapColumns(ParquetFileMetadata &file_metadata,
                                   vector<unique_ptr<ParquetColumn>> &parquet_columns,
@@ -1492,6 +1497,11 @@ DuckLakeFileProcessor::MapColumns(ParquetFileMetadata &file_metadata,
 	}
 	vector<unique_ptr<DuckLakeNameMapEntry>> column_maps;
 	for (auto &col : parquet_columns) {
+		if (allow_internal_columns && IsDuckLakeInternalColumn(col->name)) {
+			// internal columns (row ids, snapshot ids) are not table columns - they stay in the
+			// file unmapped
+			continue;
+		}
 		// find the top-level column to map to
 		auto entry = field_id_map.find(col->name);
 		if (entry == field_id_map.end()) {
@@ -1723,6 +1733,19 @@ vector<DuckLakeDataFile> DuckLakeFileProcessor::AddFiles(const vector<string> &g
 		}
 	}
 	return written_files;
+}
+
+vector<DuckLakeDataFile> DuckLakePrepareExternalFiles(DuckLakeTransaction &transaction, ClientContext &context,
+                                                      Catalog &catalog, DuckLakeTableEntry &table,
+                                                      const vector<string> &paths, const string &file_format) {
+	DuckLakeAddDataFilesData bind_data(catalog, table);
+	// shared/external files carry their own layout - never derive values from hive-style paths
+	bind_data.hive_partitioning = HivePartitioningType::NO;
+	// ducklake-written files can carry internal columns (row ids, snapshot ids) - they are skipped
+	// rather than mapped
+	bind_data.allow_internal_columns = true;
+	DuckLakeFileProcessor processor(transaction, context, bind_data, file_format);
+	return processor.AddFiles(paths);
 }
 
 static void DuckLakeAddDataFilesExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {

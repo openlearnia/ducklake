@@ -1,0 +1,118 @@
+# name: test/sql/replication/replicate_basic.test
+# description: full-sync catalog replication from a native catalog into DuckLake
+# group: [replication]
+
+require ducklake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_dest.db' AS repl_dest (DATA_PATH '{TEST_DIR}/repl_dest_files')
+
+statement ok
+CREATE SCHEMA app
+
+statement ok
+CREATE TABLE app.orders AS SELECT i AS id, i * 10 AS amount FROM range(100) t(i)
+
+statement ok
+CREATE TABLE app.customers AS SELECT i AS id, 'c' || i AS name FROM range(20) t(i)
+
+# schema/include filters
+statement ok
+CREATE TABLE app.staging_scratch AS SELECT 1 AS x
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'memory', include := 'app.*', exclude := 'app.staging_*')
+----
+1
+
+query I
+SELECT status FROM ducklake_replicate_status('repl_dest')
+----
+created
+
+# initial catchup copies matching tables
+query IIII
+SELECT replication_id, tables_synced > 0, rows_copied, length(message) > 0 FROM ducklake_replicate_catchup('repl_dest', 1)
+----
+1	1	120	1
+
+query II
+SELECT (SELECT COUNT(*) FROM repl_dest.app.orders), (SELECT COUNT(*) FROM repl_dest.app.customers)
+----
+100	20
+
+# excluded staging table must not be replicated
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'repl_dest' AND table_name = 'staging_scratch'
+----
+0
+
+# per-table state
+query II
+SELECT strategy, row_count_dest FROM ducklake_replicate_tables('repl_dest', 1) WHERE source_table = 'orders'
+----
+full	100
+
+# incremental catchup reflects deletes and inserts (full refresh)
+statement ok
+DELETE FROM app.orders WHERE id >= 90
+
+statement ok
+INSERT INTO app.orders VALUES (1000, 42)
+
+query IIII
+SELECT replication_id, tables_synced, rows_copied, 1 FROM ducklake_replicate_catchup('repl_dest', 1)
+----
+1	2	111	1
+
+query I
+SELECT COUNT(*) FROM repl_dest.main.app.orders
+----
+91
+
+# new source table is discovered on the next cycle
+statement ok
+CREATE TABLE app.products AS SELECT i AS id FROM range(5) t(i)
+
+query I
+SELECT tables_synced FROM ducklake_replicate_catchup('repl_dest', 1)
+----
+3
+
+query I
+SELECT COUNT(*) FROM repl_dest.app.products
+----
+5
+
+# column drift forces a recreate + full copy
+statement ok
+ALTER TABLE app.customers ADD COLUMN email VARCHAR
+
+query I
+SELECT tables_synced FROM ducklake_replicate_catchup('repl_dest', 1)
+----
+3
+
+query II
+SELECT COUNT(*), count(email) IS NOT NULL FROM repl_dest.app.customers
+----
+20	1
+
+# drop job (replica data remains)
+query I
+SELECT replication_id FROM ducklake_replicate_drop('repl_dest', 1)
+----
+1
+
+query I
+SELECT count(*) FROM ducklake_replicate_status('repl_dest')
+----
+0
+
+query I
+SELECT COUNT(*) FROM repl_dest.app.orders
+----
+91
+
+statement ok
+DETACH repl_dest

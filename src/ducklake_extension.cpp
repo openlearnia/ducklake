@@ -157,6 +157,36 @@ static void LoadInternal(ExtensionLoader &loader) {
 	DuckLakeMaterializedViewRefreshHistoryFunction materialized_view_refresh_history;
 	loader.RegisterFunction(materialized_view_refresh_history);
 
+	DuckLakeReplicateCreateFunction replicate_create;
+	loader.RegisterFunction(replicate_create);
+
+	DuckLakeReplicateCatchupFunction replicate_catchup;
+	loader.RegisterFunction(replicate_catchup);
+
+	DuckLakeReplicateStatusFunction replicate_status;
+	loader.RegisterFunction(replicate_status);
+
+	DuckLakeReplicateTablesFunction replicate_tables;
+	loader.RegisterFunction(replicate_tables);
+
+	DuckLakeReplicateDropFunction replicate_drop;
+	loader.RegisterFunction(replicate_drop);
+
+	DuckLakeReplicateStartFunction replicate_start;
+	loader.RegisterFunction(replicate_start);
+
+	DuckLakeReplicateStopFunction replicate_stop;
+	loader.RegisterFunction(replicate_stop);
+
+	DuckLakeReplicatePauseFunction replicate_pause;
+	loader.RegisterFunction(replicate_pause);
+
+	DuckLakeReplicateResumeFunction replicate_resume;
+	loader.RegisterFunction(replicate_resume);
+
+	DuckLakeReplicateResumeAllFunction replicate_resume_all;
+	loader.RegisterFunction(replicate_resume_all);
+
 	// Register ducklake_scan so it can be found during deserialization
 	auto ducklake_scan = DuckLakeFunctions::GetDuckLakeScanFunction(loader.GetDatabaseInstance());
 	loader.RegisterFunction(ducklake_scan);

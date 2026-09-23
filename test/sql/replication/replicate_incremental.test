@@ -1,0 +1,330 @@
+# name: test/sql/replication/replicate_incremental.test
+# description: adaptive incremental replication strategies (watermark, merge, snapshot, full)
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_dest.db' AS repl_dest (DATA_PATH '{TEST_DIR}/repl_dest_files')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_src.db' AS repl_src (DATA_PATH '{TEST_DIR}/repl_src_files')
+
+# native source tables: one with a PK (merge), one append-only (watermark), one plain (full)
+statement ok
+CREATE TABLE pk_t (id INTEGER PRIMARY KEY, v VARCHAR)
+
+statement ok
+INSERT INTO pk_t VALUES (1, 'a'), (2, 'b'), (3, 'c')
+
+statement ok
+CREATE TABLE wm_t (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO wm_t VALUES (1, 'w1'), (2, 'w2'), (3, 'w3')
+
+statement ok
+CREATE TABLE nopk_t (id INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO nopk_t VALUES (1, 'x'), (2, 'y')
+
+# ducklake source table (snapshot strategy)
+statement ok
+CREATE TABLE repl_src.main.snap_t (id INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO repl_src.main.snap_t VALUES (1, 's1'), (2, 's2')
+
+# job 1: native source with a watermark override for wm_t
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'memory', watermark_columns := 'main.wm_t=seq')
+----
+1
+
+# job 2: ducklake source -> snapshot strategy
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'repl_src')
+----
+2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+# strategy selection: watermark override wins, PK -> merge, no key -> full, ducklake source -> snapshot
+query IIIIII
+SELECT source_table, strategy, pk_columns, watermark_column, last_watermark, row_count_dest
+FROM ducklake_replicate_tables('repl_dest', 1) ORDER BY source_table
+----
+nopk_t	full	NULL	NULL	NULL	2
+pk_t	merge	id	NULL	NULL	3
+wm_t	watermark	NULL	seq	3	3
+
+query III
+SELECT source_table, strategy, last_source_snapshot FROM ducklake_replicate_tables('repl_dest', 2)
+----
+snap_t	snapshot	2
+
+# incremental round: merge sees update+delete+insert, watermark sees new rows only
+statement ok
+UPDATE pk_t SET v = 'bb' WHERE id = 2
+
+statement ok
+DELETE FROM pk_t WHERE id = 3
+
+statement ok
+INSERT INTO pk_t VALUES (4, 'd')
+
+statement ok
+INSERT INTO wm_t VALUES (4, 'w4'), (5, 'w5')
+
+statement ok
+DELETE FROM nopk_t WHERE id = 1
+
+statement ok
+INSERT INTO nopk_t VALUES (9, 'z')
+
+statement ok
+UPDATE repl_src.main.snap_t SET v = 'S2' WHERE id = 2
+
+statement ok
+DELETE FROM repl_src.main.snap_t WHERE id = 1
+
+statement ok
+INSERT INTO repl_src.main.snap_t VALUES (3, 's3')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query II
+SELECT id, v FROM repl_dest.main.pk_t ORDER BY id
+----
+1	a
+2	bb
+4	d
+
+# watermark applies appended rows; cursor advanced to new max
+query II
+SELECT seq, v FROM repl_dest.main.wm_t ORDER BY seq
+----
+1	w1
+2	w2
+3	w3
+4	w4
+5	w5
+
+query I
+SELECT last_watermark FROM ducklake_replicate_tables('repl_dest', 1) WHERE source_table = 'wm_t'
+----
+5
+
+query II
+SELECT id, v FROM repl_dest.main.nopk_t ORDER BY id
+----
+2	y
+9	z
+
+query II
+SELECT id, v FROM repl_dest.main.snap_t ORDER BY id
+----
+2	S2
+3	s3
+
+# a no-op update must not drop the row on the replica
+statement ok
+UPDATE repl_src.main.snap_t SET v = v WHERE id = 2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query I
+SELECT count(*) FROM repl_dest.main.snap_t WHERE id = 2 AND v = 'S2'
+----
+1
+
+# additive schema change: ALTER in place; merge backfills via diff, watermark/snapshot re-seed
+statement ok
+ALTER TABLE pk_t ADD COLUMN extra INTEGER
+
+statement ok
+INSERT INTO pk_t VALUES (5, 'e', 7)
+
+statement ok
+ALTER TABLE wm_t ADD COLUMN note VARCHAR
+
+statement ok
+INSERT INTO wm_t VALUES (6, 'w6', 'hi')
+
+statement ok
+ALTER TABLE repl_src.main.snap_t ADD COLUMN extra INTEGER
+
+statement ok
+INSERT INTO repl_src.main.snap_t VALUES (4, 's4', 42)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query III
+SELECT id, v, extra FROM repl_dest.main.pk_t ORDER BY id
+----
+1	a	NULL
+2	bb	NULL
+4	d	NULL
+5	e	7
+
+query III
+SELECT seq, v, note FROM repl_dest.main.wm_t ORDER BY seq
+----
+1	w1	NULL
+2	w2	NULL
+3	w3	NULL
+4	w4	NULL
+5	w5	NULL
+6	w6	hi
+
+query III
+SELECT id, v, extra FROM repl_dest.main.snap_t ORDER BY id
+----
+2	S2	NULL
+3	s3	NULL
+4	s4	42
+
+# destructive schema change recreates the table
+statement ok
+ALTER TABLE nopk_t DROP COLUMN v
+
+statement ok
+INSERT INTO nopk_t VALUES (8)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query I
+SELECT id FROM repl_dest.main.nopk_t ORDER BY id
+----
+2
+8
+9
+
+# invalid watermark spec fails at create time
+statement error
+SELECT * FROM ducklake_replicate_create('repl_dest', 'memory', watermark_columns := 'no_equals_sign')
+----
+Invalid watermark_columns entry
+
+# a watermark column missing on the source table fails that table only; the job reports error
+statement ok
+CREATE TABLE wm_bad (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO wm_bad VALUES (1, 'x')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'memory', include := 'main.wm_bad', watermark_columns := 'main.wm_bad=nonexistent_col')
+----
+3
+
+query IIII
+SELECT replication_id, tables_synced, rows_copied, message LIKE '%nonexistent_col%' FROM ducklake_replicate_catchup('repl_dest', 3)
+----
+3	0	0	1
+
+query II
+SELECT source_table, last_error LIKE '%nonexistent_col%' FROM ducklake_replicate_tables('repl_dest', 3) WHERE source_table = 'wm_bad'
+----
+wm_bad	1
+
+query I
+SELECT status FROM ducklake_replicate_status('repl_dest') WHERE replication_id = 3
+----
+error
+
+statement ok
+SELECT * FROM ducklake_replicate_drop('repl_dest', 3)
+
+statement ok
+INSERT INTO repl_src.main.snap_t SELECT i + 100, repeat('v', 160) || i, NULL FROM range(2048) t(i)
+
+statement ok
+UPDATE repl_src.main.snap_t SET v = repeat('u', 160) || id WHERE id BETWEEN 100 AND 1123
+
+statement ok
+DELETE FROM repl_src.main.snap_t WHERE id BETWEEN 100 AND 611
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.snap_t
+----
+1539	2118921
+
+query I
+SELECT (SELECT bit_xor(hash(id, v)) FROM repl_dest.main.snap_t) =
+       (SELECT bit_xor(hash(id, v)) FROM repl_src.main.snap_t)
+----
+1
+
+statement ok
+INSERT INTO repl_src.main.snap_t VALUES (9999, 'duplicate', NULL)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+statement ok
+INSERT INTO repl_src.main.snap_t VALUES (9999, 'duplicate', NULL)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query I
+SELECT count(*) FROM repl_dest.main.snap_t WHERE id = 9999
+----
+2
+
+statement ok
+DELETE FROM repl_src.main.snap_t WHERE rowid =
+    (SELECT min(rowid) FROM repl_src.main.snap_t WHERE id = 9999)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query I
+SELECT count(*) FROM repl_dest.main.snap_t WHERE id = 9999
+----
+1
+
+statement ok
+CREATE TABLE repl_src.main.nested_t AS SELECT 1 AS id, struct_pack(x := 2, label := 'a') AS details,
+    [1, 2] AS vals
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+statement ok
+UPDATE repl_src.main.nested_t SET vals = [1, 2, 3] WHERE id = 1
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query II
+SELECT details.x, vals[3] FROM repl_dest.main.nested_t
+----
+2	3
+
+statement ok
+DETACH repl_dest
+
+statement ok
+DETACH repl_src

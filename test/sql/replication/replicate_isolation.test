@@ -1,0 +1,150 @@
+# name: test/sql/replication/replicate_isolation.test
+# description: per-table error isolation, stale-table reconciliation, ownership guards
+# group: [replication]
+
+require ducklake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/iso_dest.db' AS iso_dest (DATA_PATH '{TEST_DIR}/iso_files')
+
+statement ok
+CREATE SCHEMA app
+
+statement ok
+CREATE TABLE app.ok1 AS SELECT i AS id FROM range(10) t(i)
+
+# ENUM columns cannot be mapped to a DuckLake type - this table always fails
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
+
+statement ok
+CREATE TABLE app.bad AS SELECT 'happy'::mood AS e FROM range(2) t(i)
+
+statement ok
+SELECT replication_id FROM ducklake_replicate_create('iso_dest', 'memory', include := 'app.*')
+
+# one bad table does not abort the cycle; catchup returns a summary row
+query IIII
+SELECT replication_id, tables_synced, rows_copied, message LIKE '%1 table(s) failed%' FROM ducklake_replicate_catchup('iso_dest', 1)
+----
+1	1	10	1
+
+query I
+SELECT count(*) FROM iso_dest.app.ok1
+----
+10
+
+# per-table error recorded; healthy table reports NULL error and watermark
+query III
+SELECT source_table, last_error IS NOT NULL, watermark_column IS NULL FROM ducklake_replicate_tables('iso_dest', 1) ORDER BY 1
+----
+bad	1	1
+ok1	0	1
+
+# job status reflects the partial failure
+query II
+SELECT status, last_error IS NOT NULL FROM ducklake_replicate_status('iso_dest') WHERE replication_id = 1
+----
+error	1
+
+# dropping source tables reconciles the destination on the next cycle
+statement ok
+DROP TABLE app.bad
+
+statement ok
+DROP TABLE app.ok1
+
+statement ok
+CREATE TABLE app.fresh AS SELECT 1 AS x
+
+query III
+SELECT replication_id, tables_synced, message LIKE '%dropped 2 stale%' FROM ducklake_replicate_catchup('iso_dest', 1)
+----
+1	1	1
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'iso_dest' AND table_name IN ('ok1', 'bad')
+----
+0
+
+# state rows for dropped tables are removed too
+query I
+SELECT count(*) FROM ducklake_replicate_tables('iso_dest', 1) WHERE source_table IN ('ok1', 'bad')
+----
+0
+
+# job recovered to clean status
+query II
+SELECT status, last_error IS NULL FROM ducklake_replicate_status('iso_dest') WHERE replication_id = 1
+----
+created	1
+
+# a second job cannot steal a destination table owned by another job
+statement ok
+ATTACH '{TEST_DIR}/other_src.db' AS other_src
+
+statement ok
+CREATE SCHEMA other_src.app
+
+statement ok
+CREATE TABLE other_src.app.fresh AS SELECT 'x' AS v
+
+statement ok
+SELECT replication_id FROM ducklake_replicate_create('iso_dest', 'other_src', include := 'app.*')
+
+query III
+SELECT replication_id, tables_synced, message LIKE '%already managed%' FROM ducklake_replicate_catchup('iso_dest', 2)
+----
+2	0	1
+
+# the owning job's replica is untouched and keeps syncing
+query I
+SELECT count(*) FROM iso_dest.app.fresh
+----
+1
+
+query I
+SELECT tables_synced FROM ducklake_replicate_catchup('iso_dest', 1)
+----
+1
+
+# the rejected job does not claim a state row for the foreign table
+query I
+SELECT count(*) FROM ducklake_replicate_tables('iso_dest', 2)
+----
+0
+
+# an unmanaged pre-existing destination table is never clobbered
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/um_dest.db' AS um_dest (DATA_PATH '{TEST_DIR}/um_files')
+
+statement ok
+CREATE SCHEMA um_dest.app
+
+statement ok
+CREATE TABLE um_dest.app.clash AS SELECT 9 AS y
+
+statement ok
+CREATE TABLE app.clash AS SELECT 1 AS x
+
+statement ok
+SELECT replication_id FROM ducklake_replicate_create('um_dest', 'memory', include := 'app.clash')
+
+query III
+SELECT replication_id, tables_synced, message LIKE '%not managed%' FROM ducklake_replicate_catchup('um_dest', 1)
+----
+1	0	1
+
+query I
+SELECT y FROM um_dest.app.clash
+----
+9
+
+statement ok
+DETACH other_src
+
+statement ok
+DETACH iso_dest
+
+statement ok
+DETACH um_dest

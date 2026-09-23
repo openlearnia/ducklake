@@ -78,12 +78,16 @@ void LocalTableChanges::CleanupFiles(DatabaseInstance &db) {
 				fs.TryRemoveFile(file.file_name);
 			}
 			for (auto &del_file : file.delete_files) {
-				fs.TryRemoveFile(del_file.file_name);
+				if (del_file.created_by_ducklake) {
+					fs.TryRemoveFile(del_file.file_name);
+				}
 			}
 		}
 		for (auto &file : table_changes.new_delete_files) {
 			for (auto &delete_files : file.second) {
-				fs.TryRemoveFile(delete_files.file_name);
+				if (delete_files.created_by_ducklake) {
+					fs.TryRemoveFile(delete_files.file_name);
+				}
 			}
 		}
 		for (auto &compaction : table_changes.compactions) {
@@ -162,7 +166,9 @@ void LocalTableChanges::DropTransactionLocalFile(ClientContext &context, TableIn
 		if (file.file_name == path) {
 			auto created_by_ducklake = file.created_by_ducklake;
 			for (auto &del_file : file.delete_files) {
-				fs.RemoveFile(del_file.file_name);
+				if (del_file.created_by_ducklake) {
+					fs.RemoveFile(del_file.file_name);
+				}
 			}
 			file.delete_files.clear();
 			// found the file - delete it from the table list and from disk if DuckLake owns it
@@ -609,7 +615,9 @@ void LocalTableChanges::TransactionLocalDelete(ClientContext &context, TableInde
 				vector<string> files_to_delete;
 				files_to_delete.reserve(file.delete_files.size());
 				for (auto &old_file : file.delete_files) {
-					files_to_delete.push_back(old_file.file_name);
+					if (old_file.created_by_ducklake) {
+						files_to_delete.push_back(old_file.file_name);
+					}
 				}
 				fs.RemoveFiles(files_to_delete);
 				file.delete_files.clear();
@@ -632,12 +640,16 @@ void LocalTableChanges::CleanupFiles(ClientContext &context, TableIndex table_id
 				fs.RemoveFile(file.file_name);
 			}
 			for (auto &del_file : file.delete_files) {
-				fs.TryRemoveFile(del_file.file_name);
+				if (del_file.created_by_ducklake) {
+					fs.TryRemoveFile(del_file.file_name);
+				}
 			}
 		}
 		for (auto &file : table_changes.new_delete_files) {
 			for (auto &delete_files : file.second) {
-				fs.TryRemoveFile(delete_files.file_name);
+				if (delete_files.created_by_ducklake) {
+					fs.TryRemoveFile(delete_files.file_name);
+				}
 			}
 		}
 		for (auto &compaction : table_changes.compactions) {
@@ -1993,9 +2005,7 @@ void DuckLakeTransaction::RefreshMaterializedView(DuckLakeMaterializedViewRefres
 void DuckLakeTransaction::DropMaterializedView(TableIndex view_id) {
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
 	auto entry = std::find_if(state->new_materialized_views.begin(), state->new_materialized_views.end(),
-	                          [&](const DuckLakeMaterializedViewInfo &existing) {
-		                          return existing.id == view_id;
-	                          });
+	                          [&](const DuckLakeMaterializedViewInfo &existing) { return existing.id == view_id; });
 	if (entry != state->new_materialized_views.end()) {
 		// created and dropped in the same transaction - never persists
 		state->new_materialized_views.erase(entry);
