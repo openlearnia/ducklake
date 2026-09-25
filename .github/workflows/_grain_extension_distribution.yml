@@ -190,6 +190,26 @@ on:
         required: false
         type: string
         default: 'regular'
+      # When set, the linux job checks out the Vortex workspace at ./vortex and
+      # the DuckDB-Vortex extension at ./duckdb-vortex (both inside the docker
+      # mount), and the extension build picks them up via
+      # DUCKLAKE_VORTEX_EXTENSION_DIR.
+      vortex_repository:
+        required: false
+        type: string
+        default: ""
+      vortex_ref:
+        required: false
+        type: string
+        default: ""
+      duckdb_vortex_repository:
+        required: false
+        type: string
+        default: ""
+      duckdb_vortex_ref:
+        required: false
+        type: string
+        default: ""
 
 env:
   VCPKG_BINARY_SOURCES: ${{inputs.vcpkg_binary_sources == '' && 'clear;http,https://vcpkg-cache.duckdb.org,read' || inputs.vcpkg_binary_sources }}
@@ -340,6 +360,22 @@ jobs:
           submodules: 'recursive'
 
       - uses: actions/checkout@v4
+        name: Checkout Vortex workspace
+        if: ${{ inputs.vortex_ref != '' }}
+        with:
+          repository: ${{ inputs.vortex_repository }}
+          ref: ${{ inputs.vortex_ref }}
+          path: vortex
+
+      - uses: actions/checkout@v4
+        name: Checkout duckdb-vortex
+        if: ${{ inputs.duckdb_vortex_ref != '' }}
+        with:
+          repository: ${{ inputs.duckdb_vortex_repository }}
+          ref: ${{ inputs.duckdb_vortex_ref }}
+          path: duckdb-vortex
+
+      - uses: actions/checkout@v4
         name: Checkout Extension CI tools
         with:
           path: 'extension-ci-tools'
@@ -392,6 +428,22 @@ jobs:
             -t duckdb/${{ matrix.duckdb_arch }} \
             ./extension-ci-tools/docker/${{ matrix.duckdb_arch }}
 
+      - name: Build pinned flatc inside toolchain image
+        if: ${{ inputs.vortex_ref != '' }}
+        run: |
+          docker run --rm -v `pwd`:/duckdb_build_dir -w /tmp duckdb/${{ matrix.duckdb_arch }} bash -c '
+            set -euo pipefail
+            curl -fsSL -o flatbuffers.tar.gz https://github.com/google/flatbuffers/archive/refs/tags/v25.12.19.tar.gz
+            tar xzf flatbuffers.tar.gz
+            cmake -S flatbuffers-25.12.19 -B fb-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DFLATBUFFERS_BUILD_TESTS=OFF -DFLATBUFFERS_BUILD_FLATLIB=OFF \
+              -DFLATBUFFERS_BUILD_FLATHASH=OFF -DFLATBUFFERS_INSTALL=OFF
+            cmake --build fb-build --target flatc --parallel
+            mkdir -p /duckdb_build_dir/ci-bin
+            cp fb-build/flatc /duckdb_build_dir/ci-bin/flatc
+            /duckdb_build_dir/ci-bin/flatc --version
+          '
+
       - name: Create env file for docker
         run: |
           cat <<-EOF > docker_env.txt
@@ -420,6 +472,10 @@ jobs:
           SUBSET_EXTENSIONS_TESTS=${{ inputs.extensions_test_selection }}
           EOF
           echo '${{ inputs.test_config }}'| jq -r '.test_env_variables // {} | to_entries | map("\(.key)=\(.value)")|.[]' >> docker_env.txt
+          if [ "${{ inputs.duckdb_vortex_ref != '' }}" == "true" ]; then
+            echo "DUCKLAKE_VORTEX_EXTENSION_DIR=/duckdb_build_dir/duckdb-vortex" >> docker_env.txt
+            echo "FLATC=/duckdb_build_dir/ci-bin/flatc" >> docker_env.txt
+          fi
 
       - name: Generate timestamp for Ccache entry
         shell: cmake -P {0}
