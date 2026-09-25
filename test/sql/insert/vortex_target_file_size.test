@@ -25,8 +25,9 @@ CREATE TABLE ducklake.test(i BIGINT, s VARCHAR);
 statement ok
 SET ducklake_target_file_size = '1KB'
 
+# rotation is evaluated per write batch, so the insert must span multiple batches
 statement ok
-INSERT INTO ducklake.test SELECT i, repeat('abcdefghij', 20) FROM range(200) t(i);
+INSERT INTO ducklake.test SELECT i, repeat('abcdefghij', 20) FROM range(500000) t(i);
 
 query I
 SELECT COUNT(*) > 1 FROM glob('${DATA_PATH}/vortex_target_file_size/main/test/*.vortex')
@@ -36,4 +37,4 @@ true
 query I
 SELECT COUNT(*) FROM ducklake.test
 ----
-200
+500000

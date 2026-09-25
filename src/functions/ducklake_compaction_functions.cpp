@@ -708,7 +708,7 @@ DuckLakeCompactor::GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry>
 	}
 
 	// read the configured row group size before copy_options.info is moved into the LogicalCopyToFile
-	idx_t configured_row_group_size = DuckLakeInsert::GetCopyBatchSize(copy_options);
+	optional_idx configured_row_group_size = DuckLakeInsert::GetCopyBatchSize(copy_options);
 	optional_idx configured_batch_size_bytes;
 	if (copy_options.info) {
 		auto row_group_size_bytes = copy_options.info->options.find("row_group_size_bytes");
@@ -725,6 +725,10 @@ DuckLakeCompactor::GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry>
 	if (write_row_id) {
 		copy->file_path = copy_options.file_path;
 		copy->batch_size = configured_row_group_size;
+		if (!copy->batch_size.IsValid() && copy->function.desired_batch_size) {
+			// same fallback as BindCopyTo
+			copy->batch_size = copy->function.desired_batch_size(context, *copy->bind_data);
+		}
 		copy->batch_size_bytes = configured_batch_size_bytes;
 		copy->file_size_bytes = copy_options.file_size_bytes;
 		copy->rotate = copy_options.rotate;

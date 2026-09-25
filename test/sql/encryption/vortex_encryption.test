@@ -6,6 +6,8 @@ require ducklake
 
 require vortex
 
+require httpfs
+
 statement ok
 SET ducklake_default_data_file_format='vortex'
 

@@ -414,7 +414,11 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	copy->overwrite_mode = copy_options.overwrite_mode;
 	copy->per_thread_output = copy_options.per_thread_output;
 	copy->file_size_bytes = copy_options.file_size_bytes;
-	copy->batch_size = configured_batch_size.IsValid() ? configured_batch_size : DEFAULT_ROW_GROUP_SIZE;
+	// Keep the single large batch when no row_group_size is configured: per-chunk
+	// flushing here would let target_file_size rotation split the flush, which
+	// fragments delete files that must stay consolidated per snapshot.
+	copy->batch_size = configured_batch_size.IsValid() ? configured_batch_size
+	                                                   : optional_idx(DEFAULT_ROW_GROUP_SIZE);
 	copy->batch_size_bytes = configured_batch_size_bytes;
 	copy->rotate = copy_options.rotate;
 	copy->return_type = copy_options.return_type;

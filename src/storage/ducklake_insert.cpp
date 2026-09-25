@@ -695,12 +695,12 @@ unique_ptr<LogicalOperator> DuckLakeInsert::InsertCasts(Binder &binder, unique_p
 	return std::move(result);
 }
 
-idx_t DuckLakeInsert::GetCopyBatchSize(const DuckLakeCopyOptions &copy_options) {
+optional_idx DuckLakeInsert::GetCopyBatchSize(const DuckLakeCopyOptions &copy_options) {
 	auto rgs_entry = copy_options.info->options.find("row_group_size");
 	if (rgs_entry != copy_options.info->options.end() && !rgs_entry->second.empty()) {
-		return std::stoull(rgs_entry->second[0].ToString());
+		return optional_idx(std::stoull(rgs_entry->second[0].ToString()));
 	}
-	return DEFAULT_ROW_GROUP_SIZE;
+	return optional_idx();
 }
 
 PhysicalOperator &DuckLakeInsert::PlanCopyForInsert(ClientContext &context, PhysicalPlanGenerator &planner,
@@ -744,6 +744,10 @@ PhysicalOperator &DuckLakeInsert::PlanCopyForInsert(ClientContext &context, Phys
 	physical_copy.per_thread_output = copy_options.per_thread_output;
 	physical_copy.file_size_bytes = copy_options.file_size_bytes;
 	physical_copy.batch_size = GetCopyBatchSize(copy_options);
+	if (!physical_copy.batch_size.IsValid() && physical_copy.function.desired_batch_size) {
+		// same fallback as BindCopyTo
+		physical_copy.batch_size = physical_copy.function.desired_batch_size(context, *physical_copy.bind_data);
+	}
 	auto rgsb_entry = copy_options.info->options.find("row_group_size_bytes");
 	if (rgsb_entry != copy_options.info->options.end() && !rgsb_entry->second.empty()) {
 		auto bytes_str = rgsb_entry->second[0].ToString();

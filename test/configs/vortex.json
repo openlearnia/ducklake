@@ -1,6 +1,6 @@
 {
   "description": "Run DuckLake tests with Vortex as the default managed data-file format.",
-  "on_init": "SET ducklake_default_data_file_format = 'vortex'; SET ducklake_default_data_inlining_row_limit = 0;",
+  "on_init": "SET ducklake_default_data_file_format = 'vortex'; SET ducklake_default_data_inlining_row_limit = 0; SET timezone = 'UTC';",
   "statically_loaded_extensions": [
     "core_functions",
     "parquet",
@@ -20,13 +20,16 @@
       "paths": [
         "test/sql/add_files/add_columns_named_array_element.test",
         "test/sql/add_files/add_empty_file.test",
+        "test/sql/add_files/add_file_epoch_partitioned.test",
         "test/sql/add_files/add_file_footer_size.test",
         "test/sql/add_files/add_file_partitioned.test",
+        "test/sql/add_files/add_file_repeated_bucket.test",
         "test/sql/add_files/add_file_specific_schema.test",
         "test/sql/add_files/add_file_with_three_level_list.test",
         "test/sql/add_files/add_files.test",
         "test/sql/add_files/add_files_compaction.test",
         "test/sql/add_files/add_files_complex_nested_stats_mre.test",
+        "test/sql/add_files/add_files_equivalent_path_duplicate.test",
         "test/sql/add_files/add_files_extra_columns.test",
         "test/sql/add_files/add_files_hive.test",
         "test/sql/add_files/add_files_hive_many_columns.test",
@@ -37,6 +40,7 @@
         "test/sql/add_files/add_files_missing_fields.test",
         "test/sql/add_files/add_files_nested.test",
         "test/sql/add_files/add_files_nested_list_struct_nulls.test",
+        "test/sql/add_files/add_files_null_type.test",
         "test/sql/add_files/add_files_overlapping_globs.test",
         "test/sql/add_files/add_files_rename.test",
         "test/sql/add_files/add_files_table_changes.test",
@@ -95,8 +99,26 @@
         "test/sql/settings/parquet_compression.test",
         "test/sql/settings/parquet_row_group_size_bytes.test",
         "test/sql/settings/per_table_settings.test",
+        "test/sql/transaction/transaction_conflict_cleanup.test",
+        "test/sql/transaction/basic_transaction.test",
         "test/sql/schema_evolution/field_ids.test",
-        "test/sql/geo/ducklake_geometry_add_files.test"
+        "test/sql/geo/ducklake_geometry_add_files.test",
+        "test/sql/delete/delete_mixed_formats.test",
+        "test/sql/delete/deletion_vector_multi_snapshot.test",
+        "test/sql/delete/preserve_external_transaction_local_files.test",
+        "test/sql/remove_orphans/puffin_orphan.test",
+        "test/sql/rewrite_data_files/rewrite_deletion_vectors.test",
+        "test/sql/metadata/row_group_count.test",
+        "test/sql/add_files/add_files_field_id_drop_readd.test",
+        "test/sql/delete/parquet_deletion_describe.test",
+        "test/sql/rewrite_data_files/test_rewrite_rollback_cleanup.test",
+        "test/sql/compaction/merge_adjacent_external_hive_paths.test",
+        "test/sql/compaction/merge_adjacent_tiered.test_slow",
+        "test/sql/insert/insert_partitioned_file_size.test",
+        "test/sql/issues/issue_852_cache_growth.test",
+        "test/sql/create_table_inline_partition_sort/create_table_inline_ctas_sort_verification.test",
+        "test/sql/stats/skip_stats_columns_add_files.test",
+        "test/sql/add_files/add_files_stats_exactness.test"
       ]
     },
     {
@@ -104,6 +126,18 @@
       "paths": [
         "test/sql/data_inlining/inlining_reserved_column_names.test",
         "test/sql/alter/issue_944.test"
+      ]
+    },
+    {
+      "reason": "Asserts Parquet's file-read counts in EXPLAIN ANALYZE; Vortex footer stats prune files before opening them, so fewer files are read",
+      "paths": [
+        "test/sql/stats/topn_file_pruning.test"
+      ]
+    },
+    {
+      "reason": "Exact rotated-file counts are calibrated to Parquet row groups; Vortex rotates at different boundaries (see vortex_rewrite_target_file_size_rotation.test)",
+      "paths": [
+        "test/sql/rewrite_data_files/test_rewrite_target_file_size_rotation.test"
       ]
     }
   ]
