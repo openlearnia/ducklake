@@ -1,0 +1,49 @@
+# name: test/sql/add_files/vortex_add_file_with_three_level_list.test
+# description: Vortex twin of add_file_with_three_level_list — schema conversion keeps deeply nested types
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/vortex_add_file_with_three_level_list/');
+
+statement ok
+use ducklake
+
+# three-level list plus a nested struct, generated without a parquet fixture
+statement ok
+COPY (
+    SELECT [[['a','b'],['c']],[['d']]]::VARCHAR[][][] AS deep_list,
+           {'pos': {'lat': 1.5::DOUBLE, 'lon': 2.5::DOUBLE}, 'tags': ['x','y']} AS attrs
+    UNION ALL
+    SELECT NULL::VARCHAR[][][], NULL::STRUCT(pos STRUCT(lat DOUBLE, lon DOUBLE), tags VARCHAR[])
+    UNION ALL
+    SELECT []::VARCHAR[][][], {'pos': NULL, 'tags': []}
+) TO '{DATA_PATH}/three_level_list.vortex' (FORMAT vortex);
+
+statement ok
+create or replace table location as (select * from vortex_scan('{DATA_PATH}/three_level_list.vortex') limit 0);
+
+statement ok
+call ducklake_add_data_files('ducklake', 'location', '{DATA_PATH}/three_level_list.vortex');
+
+query I
+SELECT COUNT(*) FROM location
+----
+3
+
+query II rowsort
+SELECT deep_list::VARCHAR, attrs::VARCHAR FROM location
+----
+NULL	NULL
+[[[a, b], [c]], [[d]]]	{'pos': {'lat': 1.5, 'lon': 2.5}, 'tags': [x, y]}
+[]	{'pos': NULL, 'tags': []}

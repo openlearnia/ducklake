@@ -181,7 +181,7 @@ private:
 	                                                    const vector<unique_ptr<DuckLakeFieldId>> &field_ids,
 	                                                    const string &prefix = string());
 	void CollectLiveFieldIds(const vector<unique_ptr<DuckLakeFieldId>> &field_ids, unordered_set<idx_t> &result);
-	void ValidateParquetFieldIds(const ParquetFileMetadata &file, const vector<unique_ptr<ParquetColumn>> &columns,
+	void ValidateFileFieldIds(const ParquetFileMetadata &file, const vector<unique_ptr<ParquetColumn>> &columns,
 	                             const unordered_set<idx_t> &live_field_ids, const string &prefix = string());
 	void MapColumnStats(ParquetFileMetadata &file_metadata, DuckLakeDataFile &result);
 	unique_ptr<DuckLakeNameMapEntry> MapHiveColumn(ParquetFileMetadata &file_metadata, const DuckLakeFieldId &field_id,
@@ -618,7 +618,9 @@ SELECT
         stats_null_count := x.stats_null_count,
         stats_num_values := x.stats_num_values,
         total_compressed_size := x.total_compressed_size,
-        contains_nan := x.contains_nan
+        contains_nan := x.contains_nan,
+        min_is_exact := x.stats_min IS NOT NULL,
+        max_is_exact := x.stats_max IS NOT NULL
     )) AS vortex_column_stats,
     list_transform(vortex_schema, lambda x: struct_pack(
         "name" := x."name",
@@ -665,14 +667,30 @@ FROM vortex_full_metadata(%s)
 		idx_t struct_idx = file_metadata_offset;
 
 		auto filename = FlatVector::GetData<string_t>(struct_children[0])[struct_idx].GetString();
-		auto normalized_filename = StringUtil::Replace(filename, "\\", "/");
-		if (processed_files.count(normalized_filename)) {
+
+		// same canonicalize + rebase treatment as the parquet path
+		auto &fs = FileSystem::GetFileSystem(context);
+		auto canonical_filepath = fs.CanonicalizePath(filename);
+		if (processed_files.count(canonical_filepath)) {
 			continue;
 		}
-		processed_files.insert(normalized_filename);
+		processed_files.insert(canonical_filepath);
+
+		auto persisted_filepath = canonical_filepath;
+		auto &data_path = transaction.GetCatalog().DataPath();
+		if (!data_path.empty()) {
+			auto canonical_data_path = fs.CanonicalizePath(data_path);
+			auto path_separator = fs.PathSeparator(data_path);
+			if (!StringUtil::EndsWith(canonical_data_path, path_separator)) {
+				canonical_data_path += path_separator;
+			}
+			if (StringUtil::StartsWith(canonical_filepath, canonical_data_path)) {
+				persisted_filepath = data_path + canonical_filepath.substr(canonical_data_path.size());
+			}
+		}
 
 		ParquetFileMetadata file;
-		file.filepath = std::move(filename);
+		file.filepath = std::move(persisted_filepath);
 		file.row_count = FlatVector::GetData<int64_t>(struct_children[1])[struct_idx];
 		file.file_size_bytes = FlatVector::GetData<uint64_t>(struct_children[2])[struct_idx];
 		file.footer_size = FlatVector::GetData<uint64_t>(struct_children[3])[struct_idx];
@@ -766,6 +784,8 @@ FROM vortex_full_metadata(%s)
 		auto &stats_num_values_vec = stats_struct_children[4];
 		auto &total_compressed_size_vec = stats_struct_children[5];
 		auto &contains_nan_vec = stats_struct_children[6];
+		auto &min_is_exact_vec = stats_struct_children[7];
+		auto &max_is_exact_vec = stats_struct_children[8];
 
 		auto column_id_data = FlatVector::GetData<int64_t>(column_id_vec);
 		auto stats_min_data = FlatVector::GetData<string_t>(stats_min_vec);
@@ -774,6 +794,8 @@ FROM vortex_full_metadata(%s)
 		auto stats_num_values_data = FlatVector::GetData<int64_t>(stats_num_values_vec);
 		auto total_compressed_size_data = FlatVector::GetData<int64_t>(total_compressed_size_vec);
 		auto contains_nan_data = FlatVector::GetData<bool>(contains_nan_vec);
+		auto min_is_exact_data = FlatVector::GetData<bool>(min_is_exact_vec);
+		auto max_is_exact_data = FlatVector::GetData<bool>(max_is_exact_vec);
 
 		auto &column_id_validity = FlatVector::Validity(column_id_vec);
 		auto &stats_min_validity = FlatVector::Validity(stats_min_vec);
@@ -782,6 +804,8 @@ FROM vortex_full_metadata(%s)
 		auto &stats_num_values_validity = FlatVector::Validity(stats_num_values_vec);
 		auto &total_compressed_size_validity = FlatVector::Validity(total_compressed_size_vec);
 		auto &contains_nan_validity = FlatVector::Validity(contains_nan_vec);
+		auto &min_is_exact_validity = FlatVector::Validity(min_is_exact_vec);
+		auto &max_is_exact_validity = FlatVector::Validity(max_is_exact_vec);
 
 		for (idx_t metadata_idx = vortex_stats_offset; metadata_idx < vortex_stats_offset + vortex_stats_length;
 		     metadata_idx++) {
@@ -805,10 +829,15 @@ FROM vortex_full_metadata(%s)
 			if (stats_min_validity.RowIsValid(metadata_idx)) {
 				stats.has_min = true;
 				stats.min = stats_min_data[metadata_idx].GetString();
+				// Vortex footer stats are exact-or-absent: present bounds are never truncated.
+				stats.min_is_exact = !min_is_exact_validity.RowIsValid(metadata_idx) ||
+				                     min_is_exact_data[metadata_idx];
 			}
 			if (stats_max_validity.RowIsValid(metadata_idx)) {
 				stats.has_max = true;
 				stats.max = stats_max_data[metadata_idx].GetString();
+				stats.max_is_exact = !max_is_exact_validity.RowIsValid(metadata_idx) ||
+				                     max_is_exact_data[metadata_idx];
 			}
 			if (stats_null_count_validity.RowIsValid(metadata_idx)) {
 				auto null_count = stats_null_count_data[metadata_idx];
@@ -1558,7 +1587,7 @@ void DuckLakeFileProcessor::CollectLiveFieldIds(const vector<unique_ptr<DuckLake
 	}
 }
 
-void DuckLakeFileProcessor::ValidateParquetFieldIds(const ParquetFileMetadata &file,
+void DuckLakeFileProcessor::ValidateFileFieldIds(const ParquetFileMetadata &file,
                                                     const vector<unique_ptr<ParquetColumn>> &columns,
                                                     const unordered_set<idx_t> &live_field_ids, const string &prefix) {
 	for (auto &column : columns) {
@@ -1567,12 +1596,12 @@ void DuckLakeFileProcessor::ValidateParquetFieldIds(const ParquetFileMetadata &f
 			const auto source_field_id = column->field_id.GetIndex();
 			if (live_field_ids.find(source_field_id) == live_field_ids.end()) {
 				throw InvalidInputException(
-				    "Parquet field ID mismatch for column \"%s\" in file \"%s\": field ID %d is not a live field in "
+				    "Field ID mismatch for column \"%s\" in file \"%s\": field ID %d is not a live field in "
 				    "table \"%s\"",
 				    full_name, file.filepath, source_field_id, table.name.GetIdentifierName());
 			}
 		}
-		ValidateParquetFieldIds(file, column->child_columns, live_field_ids, full_name);
+		ValidateFileFieldIds(file, column->child_columns, live_field_ids, full_name);
 	}
 }
 
@@ -1628,7 +1657,7 @@ void DuckLakeFileProcessor::DetermineMapping(ParquetFileMetadata &file) {
 	// Before we map parquet columns to DuckLake columns, we need to validate that the parquet field ids are live.
 	unordered_set<idx_t> live_field_ids;
 	CollectLiveFieldIds(table.GetFieldData().GetFieldIds(), live_field_ids);
-	ValidateParquetFieldIds(file, file.columns, live_field_ids);
+	ValidateFileFieldIds(file, file.columns, live_field_ids);
 
 	file.map_entries = MapColumns(file, file.columns, table.GetFieldData().GetFieldIds());
 }

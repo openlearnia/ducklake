@@ -1,0 +1,72 @@
+# name: test/sql/add_files/vortex_add_files_complex_nested_stats_mre.test
+# description: Vortex twin of add_files_complex_nested_stats_mre — array/struct-array columns add cleanly
+# group: [add_files]
+
+# Vortex footer stats cover only top-level leaf columns: nested container
+# columns contribute no per-leaf stats, so only the primitive column appears.
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/vortex_stats_data', METADATA_CATALOG 'metadata');
+
+# Schema that reproduces the original error: array + struct array + other types
+statement ok
+CREATE TABLE ducklake.test_table(
+    data_array DOUBLE[],
+    diagnostics STRUCT("key" VARCHAR, "value" VARCHAR)[],
+    seq_num UINTEGER
+);
+
+statement ok
+COPY (SELECT 
+    [1.0::DOUBLE, 2.0] as data_array,
+    [{'key': 'status', 'value': 'active'}] as diagnostics,
+    100::UINTEGER as seq_num
+) TO '{DATA_PATH}/file1.vortex' (FORMAT vortex);
+
+statement ok
+COPY (SELECT 
+    [3.0::DOUBLE, 4.0, 5.0] as data_array,
+    [{'key': 'type', 'value': 'test'}, {'key': 'state', 'value': 'running'}] as diagnostics,
+    200::UINTEGER as seq_num
+) TO '{DATA_PATH}/file2.vortex' (FORMAT vortex);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test_table', '{DATA_PATH}/file1.vortex')
+
+# only the primitive top-level column carries footer stats
+query III
+SELECT column_id, min_value, max_value FROM metadata.ducklake_file_column_stats ORDER BY data_file_id, column_id
+----
+7	100	100
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test_table', '{DATA_PATH}/file2.vortex')
+
+query IIII
+SELECT data_file_id, column_id, min_value, max_value FROM metadata.ducklake_file_column_stats ORDER BY data_file_id, column_id
+----
+1	7	100	100
+2	7	200	200
+
+query III
+SELECT column_id, min_value, max_value FROM metadata.ducklake_table_column_stats ORDER BY column_id
+----
+7	100	200
+
+# added data reads back correctly
+query III rowsort
+SELECT * FROM ducklake.test_table ORDER BY seq_num
+----
+[1.0, 2.0]	[{'key': status, 'value': active}]	100
+[3.0, 4.0, 5.0]	[{'key': type, 'value': test}, {'key': state, 'value': running}]	200

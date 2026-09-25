@@ -1,0 +1,59 @@
+# name: test/sql/add_files/vortex_add_file_repeated_bucket.test
+# description: Vortex twin of add_file_repeated_bucket — repeated bucket transforms map to the right partition_key_index
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (
+	DATA_PATH '{DATA_PATH}/vortex_add_file_repeated_bucket/',
+	METADATA_CATALOG 'metadata'
+);
+
+statement ok
+USE ducklake;
+
+statement ok
+CREATE TABLE repeated_bucket_t (id INT, c INT);
+
+statement ok
+ALTER TABLE repeated_bucket_t SET PARTITIONED BY (id, bucket(4, c), bucket(8, c), bucket(16, c));
+
+statement ok
+COPY (SELECT 10 AS id, 42 AS c, 1 AS bucket, 5 AS bucket_c, 13 AS bucket_c_2)
+TO '{DATA_PATH}/vortex_repeated_bucket_staged'
+(FORMAT vortex, PARTITION_BY (id, bucket, bucket_c, bucket_c_2));
+
+statement ok
+CALL ducklake_add_data_files(
+	'ducklake',
+	'repeated_bucket_t',
+	'{DATA_PATH}/vortex_repeated_bucket_staged/id=10/bucket=1/bucket_c=5/bucket_c_2=13/*.vortex'
+)
+
+statement ok
+SET VARIABLE bucket_file_id = (
+	SELECT data_file_id
+	FROM metadata.ducklake_data_file
+	WHERE path LIKE '%bucket_c_2=13%'
+)
+
+query IT
+SELECT partition_key_index, partition_value
+FROM metadata.ducklake_file_partition_value
+WHERE data_file_id = getvariable('bucket_file_id')
+ORDER BY partition_key_index
+----
+0	10
+1	1
+2	5
+3	13

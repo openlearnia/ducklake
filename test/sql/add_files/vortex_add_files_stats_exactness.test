@@ -1,0 +1,68 @@
+# name: test/sql/add_files/vortex_add_files_stats_exactness.test
+# description: Vortex twin of add_files_stats_exactness — vortex footer stats are exact-or-absent
+# group: [add_files]
+
+# Vortex does not truncate footer statistics like the Parquet writer does:
+# present min/max bounds are always exact, and long strings omit bounds entirely.
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/vortex_add_files_stats_exactness/', METADATA_CATALOG 'metadata');
+
+statement ok
+CREATE TABLE ducklake.test(s VARCHAR);
+
+# short strings: vortex emits exact min/max
+statement ok
+COPY (SELECT 'hello' s UNION ALL SELECT 'world' s) TO '{DATA_PATH}/afse_exact.vortex' (FORMAT vortex);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '{DATA_PATH}/afse_exact.vortex')
+
+query IIII
+SELECT min_value, max_value, min_is_exact::BOOLEAN, max_is_exact::BOOLEAN FROM metadata.ducklake_file_column_stats
+----
+hello	world	true	true
+
+# strings above the footer stats cutoff: vortex omits the bounds entirely (they stay NULL, not inexact)
+statement ok
+COPY (SELECT 'B' || repeat('x', 300) s) TO '{DATA_PATH}/afse_omitted.vortex' (FORMAT vortex);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '{DATA_PATH}/afse_omitted.vortex')
+
+query IIII
+SELECT min_value, max_value, min_is_exact::BOOLEAN, max_is_exact::BOOLEAN FROM metadata.ducklake_file_column_stats ORDER BY data_file_id
+----
+hello	world	true	true
+NULL	NULL	NULL	NULL
+
+# global merge: one statless file means no table-level bound can be claimed
+query IIII
+SELECT min_value, max_value, min_is_exact::BOOLEAN, max_is_exact::BOOLEAN FROM metadata.ducklake_table_column_stats
+----
+NULL	NULL	NULL	NULL
+
+# every emitted bound remains exact across multiple files
+statement ok
+COPY (SELECT concat('val', range % 10) s FROM range(5000)) TO '{DATA_PATH}/afse_rows.vortex' (FORMAT vortex);
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '{DATA_PATH}/afse_rows.vortex')
+
+query IIII
+SELECT min_value, max_value, min_is_exact::BOOLEAN, max_is_exact::BOOLEAN FROM metadata.ducklake_file_column_stats ORDER BY data_file_id
+----
+hello	world	true	true
+NULL	NULL	NULL	NULL
+val0	val9	true	true

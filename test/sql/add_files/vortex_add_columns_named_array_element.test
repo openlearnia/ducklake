@@ -1,0 +1,50 @@
+# name: test/sql/add_files/vortex_add_columns_named_array_element.test
+# description: Vortex twin of add_columns_named_array_element — columns literally named "array" and "element"
+# group: [add_files]
+
+require ducklake
+
+require vortex
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+SET ducklake_default_data_file_format = 'vortex';
+
+statement ok
+COPY (SELECT 1 as array, 2 as element, [1,2,3] as my_list) TO '{DATA_PATH}/array_element_cols.vortex' (FORMAT vortex);
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/vortex_add_columns_named_array_element');
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE test AS SELECT * FROM vortex_scan('{DATA_PATH}/array_element_cols.vortex')
+WITH NO DATA;
+
+statement ok
+CALL ducklake_add_data_files('ducklake', 'test', '{DATA_PATH}/array_element_cols.vortex')
+
+query III
+FROM test;
+----
+1	2	[1, 2, 3]
+
+query I
+SELECT "array" FROM test;
+----
+1
+
+query I
+SELECT "element" FROM test;
+----
+2
+
+query I
+SELECT my_list FROM test;
+----
+[1, 2, 3]
