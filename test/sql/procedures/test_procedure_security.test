@@ -1,0 +1,267 @@
+# name: test/sql/procedures/test_procedure_security.test
+# description: SECURITY INVOKER/DEFINER on procedures - parsing, persistence, EXECUTE privilege
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+# ---------------------------------------------------------------------------
+# Parsing and defaulting
+#
+# PostgreSQL defaults to SECURITY INVOKER, so an absent SECURITY clause and an
+# explicit SECURITY INVOKER must be indistinguishable after a round-trip.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_security.db' AS lake (DATA_PATH '{TEST_DIR}/proc_security_files')
+
+statement ok
+SET ducklake_default_data_file_format = 'parquet'
+
+statement ok
+USE lake
+
+statement ok
+CREATE PROCEDURE p_default() RETURNS INTEGER LANGUAGE JAVASCRIPT AS $$ return 1; $$;
+
+statement ok
+CREATE PROCEDURE p_invoker() RETURNS INTEGER LANGUAGE JAVASCRIPT SECURITY INVOKER AS $$ return 2; $$;
+
+statement ok
+CREATE PROCEDURE p_definer() RETURNS INTEGER LANGUAGE JAVASCRIPT SECURITY DEFINER AS $$ return 3; $$;
+
+query TTI
+SELECT procedure_name, security_definer, definition_version
+FROM __ducklake_metadata_lake.ducklake_procedure
+ORDER BY procedure_name
+----
+p_default	false	1
+p_definer	true	1
+p_invoker	false	1
+
+# All three are callable, and the SECURITY clause does not change the result.
+query I
+CALL p_default();
+----
+1
+
+query I
+CALL p_invoker();
+----
+2
+
+query I
+CALL p_definer();
+----
+3
+
+# An unknown SECURITY type is rejected at parse time.
+statement error
+CREATE PROCEDURE p_bad() RETURNS INTEGER LANGUAGE JAVASCRIPT SECURITY SOMEBODY AS $$ return 0; $$;
+----
+syntax error at or near "SOMEBODY"
+
+# ---------------------------------------------------------------------------
+# Transaction control
+#
+# PostgreSQL forbids transaction control inside a SECURITY DEFINER routine: the
+# body runs with the creator's privileges, so it could commit work the caller
+# never observed. SECURITY INVOKER keeps duckdb.transaction available.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE PROCEDURE p_definer_txn() RETURNS VARCHAR LANGUAGE JAVASCRIPT SECURITY DEFINER AS $$
+await duckdb.transaction(async () => {
+	await duckdb.execute('CREATE TABLE definer_side_effect(i INTEGER)');
+});
+return 'committed';
+$$;
+
+statement ok
+CREATE PROCEDURE p_invoker_txn() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+await duckdb.transaction(async () => {
+	await duckdb.execute('CREATE TABLE invoker_side_effect(i INTEGER)');
+});
+return 'committed';
+$$;
+
+statement error
+CALL p_definer_txn();
+----
+duckdb.transaction cannot be used inside a SECURITY DEFINER procedure
+
+# The rejected transaction must not have created its table.
+query I
+SELECT count(*) FROM information_schema.tables
+WHERE table_catalog = 'lake' AND table_name = 'definer_side_effect'
+----
+0
+
+query I
+CALL p_invoker_txn();
+----
+committed
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_security.db' AS lake (DATA_PATH '{TEST_DIR}/proc_security_files')
+
+statement ok
+USE lake
+
+query TTI
+SELECT procedure_name, security_definer, definition_version
+FROM __ducklake_metadata_lake.ducklake_procedure
+ORDER BY procedure_name
+----
+p_default	false	1
+p_definer	true	1
+p_definer_txn	true	1
+p_invoker	false	1
+p_invoker_txn	false	1
+
+# SECURITY DEFINER survives reattach.
+query I
+CALL p_definer();
+----
+3
+
+# ---------------------------------------------------------------------------
+# EXECUTE privilege
+#
+# Both modes require EXECUTE from the caller; only the execution identity
+# differs. A new catalog is used because RBAC is one-way and this test enables
+# it after procedures already exist.
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_security_rbac.db' AS rlake (DATA_PATH '{TEST_DIR}/proc_security_rbac_files')
+
+statement ok
+USE rlake
+
+# RBAC is enabled per attach, and only then are the grants below enforced.
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_admin_role = 'root'
+
+statement ok
+SET ducklake_role = 'root'
+
+statement ok
+CREATE PROCEDURE sec_definer() RETURNS INTEGER LANGUAGE JAVASCRIPT SECURITY DEFINER AS $$ return 3; $$;
+
+statement ok
+CREATE PROCEDURE sec_invoker() RETURNS INTEGER LANGUAGE JAVASCRIPT AS $$ return 1; $$;
+
+# EXECUTE is a first-class privilege string alongside the table privileges.
+statement ok
+SELECT * FROM ducklake_create_role('rlake', 'caller')
+
+statement ok
+SELECT * FROM ducklake_grant('rlake', 'caller', 'EXECUTE', table_name := NULL, "schema" := 'main')
+
+query TT
+SELECT grantee, privileges FROM ducklake_grants('rlake')
+----
+caller	EXECUTE
+
+# The role that owns the grant can call both routines.
+statement ok
+SET ducklake_role = 'caller'
+
+query I
+CALL sec_definer();
+----
+3
+
+query I
+CALL sec_invoker();
+----
+1
+
+# A role with no EXECUTE grant is refused in both modes.
+statement ok
+SET ducklake_role = 'root'
+
+statement ok
+SELECT * FROM ducklake_create_role('rlake', 'nobody')
+
+statement ok
+SET ducklake_role = 'nobody'
+
+statement error
+CALL sec_definer();
+----
+Role "nobody" does not have EXECUTE privilege on procedure "main.sec_definer"
+
+statement error
+CALL sec_invoker();
+----
+Role "nobody" does not have EXECUTE privilege on procedure "main.sec_invoker"
+
+# Revoking EXECUTE re-denies a role that previously had it.
+statement ok
+SET ducklake_role = 'root'
+
+statement ok
+SELECT * FROM ducklake_revoke('rlake', 'caller', 'EXECUTE', table_name := NULL, "schema" := 'main')
+
+statement ok
+SET ducklake_role = 'caller'
+
+statement error
+CALL sec_definer();
+----
+Role "caller" does not have EXECUTE privilege on procedure "main.sec_definer"
+
+# A catalog-wide (wildcard) EXECUTE grant also satisfies the check.
+statement ok
+SET ducklake_role = 'root'
+
+statement ok
+SELECT * FROM ducklake_grant('rlake', 'caller', 'EXECUTE')
+
+statement ok
+SET ducklake_role = 'caller'
+
+query I
+CALL sec_definer();
+----
+3
+
+# A table-only grant does not imply EXECUTE.
+statement ok
+SET ducklake_role = 'root'
+
+statement ok
+SELECT * FROM ducklake_create_role('rlake', 'tableonly')
+
+statement ok
+SELECT * FROM ducklake_grant('rlake', 'tableonly', 'SELECT, INSERT, UPDATE, DELETE', table_name := NULL, "schema" := 'main')
+
+statement ok
+SET ducklake_role = 'tableonly'
+
+statement error
+CALL sec_invoker();
+----
+Role "tableonly" does not have EXECUTE privilege on procedure "main.sec_invoker"

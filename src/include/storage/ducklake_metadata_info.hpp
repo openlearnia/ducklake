@@ -157,6 +157,8 @@ struct DuckLakeProcedureInfo {
 	vector<DuckLakeProcedureParameter> parameters;
 	//! definition-contract version of the stored language/body/parameters
 	uint64_t definition_version = CURRENT_PROCEDURE_DEFINITION_VERSION;
+	//! SECURITY DEFINER: the body runs with the creator's privileges
+	bool security_definer = false;
 };
 
 struct DuckLakeColumnStatsInfo {

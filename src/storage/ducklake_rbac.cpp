@@ -57,6 +57,8 @@ static bool ParseSinglePrivilege(const string &privilege, uint64_t &result) {
 		result |= DUCKLAKE_PRIVILEGE_DROP;
 	} else if (entry == "ALTER") {
 		result |= DUCKLAKE_PRIVILEGE_ALTER;
+	} else if (entry == "EXECUTE") {
+		result |= DUCKLAKE_PRIVILEGE_EXECUTE;
 	} else if (entry == "ADMIN") {
 		result |= DUCKLAKE_PRIVILEGE_ADMIN;
 	} else if (entry == "ALL") {
@@ -76,7 +78,7 @@ uint64_t DuckLakeRbac::ParsePrivileges(const string &privileges) {
 			StringUtil::Trim(trimmed);
 			throw InvalidInputException(
 			    "Unknown privilege \"%s\" - supported privileges are SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, "
-			    "ALTER, ADMIN, ALL",
+			    "ALTER, EXECUTE, ADMIN, ALL",
 			    trimmed);
 		}
 	}
@@ -111,6 +113,9 @@ string DuckLakeRbac::PrivilegesToString(uint64_t privileges) {
 	}
 	if (privileges & DUCKLAKE_PRIVILEGE_ALTER) {
 		entries.push_back("ALTER");
+	}
+	if (privileges & DUCKLAKE_PRIVILEGE_EXECUTE) {
+		entries.push_back("EXECUTE");
 	}
 	if (privileges & DUCKLAKE_PRIVILEGE_ADMIN) {
 		entries.push_back("ADMIN");

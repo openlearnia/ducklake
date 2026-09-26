@@ -9,6 +9,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "storage/ducklake_schema_entry.hpp"
 
 namespace duckdb {
 
@@ -23,14 +24,15 @@ DuckLakeRbac *DuckLakeRbac::FindActiveRbac(ClientContext &context) {
 	return nullptr;
 }
 
-bool DuckLakeRbac::CheckDuckDBObject(ClientContext &context, DuckLakePrivilege privilege, const string &) {
+bool DuckLakeRbac::CheckDuckDBObject(ClientContext &context, DuckLakePrivilege privilege, const string &,
+                                    optional_idx schema_id) {
 	if (!enabled || IsInternalConnection(context) || HasAdminInternal(context)) {
 		return true;
 	}
 	auto role = GetActiveRole(context);
-	uint64_t granted = GetPrivileges(context, DUCKLAKE_PUBLIC_GRANTEE, optional_idx(), optional_idx());
+	uint64_t granted = GetPrivileges(context, DUCKLAKE_PUBLIC_GRANTEE, schema_id, optional_idx());
 	if (!role.empty()) {
-		granted |= GetPrivileges(context, role, optional_idx(), optional_idx());
+		granted |= GetPrivileges(context, role, schema_id, optional_idx());
 	}
 	const auto requested = static_cast<uint64_t>(privilege);
 	return (granted & requested) == requested;
@@ -41,7 +43,7 @@ bool DuckLakeRbac::CheckDuckDBObject(ClientContext &context, DuckLakePrivilege p
 //! only while at least one attached DuckLake catalog has RBAC enabled.
 class DuckLakeAuthorizationProvider : public AuthorizationProvider {
 public:
-	static DuckLakePrivilege MapPrivileges(uint8_t privileges) {
+	static DuckLakePrivilege MapPrivileges(uint16_t privileges) {
 		uint64_t result = DUCKLAKE_PRIVILEGE_NONE;
 		if (privileges & AUTH_SELECT) {
 			result |= DUCKLAKE_PRIVILEGE_SELECT;
@@ -67,10 +69,13 @@ public:
 		if (privileges & AUTH_ADMIN) {
 			result |= DUCKLAKE_PRIVILEGE_ADMIN;
 		}
+		if (privileges & AUTH_EXECUTE) {
+			result |= DUCKLAKE_PRIVILEGE_EXECUTE;
+		}
 		return static_cast<DuckLakePrivilege>(result);
 	}
 
-	static bool Check(ClientContext &context, uint8_t privileges, const string &object_desc) {
+	static bool Check(ClientContext &context, uint16_t privileges, const string &object_desc) {
 		auto rbac = DuckLakeRbac::FindActiveRbac(context);
 		if (!rbac) {
 			// no attached catalog has RBAC enabled - allow everything
@@ -102,7 +107,7 @@ public:
 		}
 	}
 
-	void CheckModifyTable(ClientContext &context, Catalog &catalog, uint8_t privileges, const string &schema_name,
+	void CheckModifyTable(ClientContext &context, Catalog &catalog, uint16_t privileges, const string &schema_name,
 	                      const string &table_name) override {
 		if (catalog.GetCatalogType() == "ducklake") {
 			// enforced by DuckLake's own plan-time hooks
@@ -117,7 +122,7 @@ public:
 		}
 	}
 
-	void CheckModifySchema(ClientContext &context, Catalog &catalog, uint8_t privileges, const string &schema_name,
+	void CheckModifySchema(ClientContext &context, Catalog &catalog, uint16_t privileges, const string &schema_name,
 	                       const string &object_name) override {
 		if (catalog.GetCatalogType() == "ducklake") {
 			// enforced by DuckLake's own DDL hooks
@@ -140,6 +145,34 @@ public:
 		// ATTACH/DETACH while RBAC is active requires admin - this also
 		// prevents detaching an RBAC-enabled catalog to disable enforcement
 		rbac->CheckAdmin(context);
+	}
+
+	//! Calling a routine requires EXECUTE, whether or not it is SECURITY DEFINER.
+	//! PostgreSQL requires EXECUTE in both modes. `security_definer` is not consulted
+	//! yet: procedure SQL runs on a private connection that inherits the calling session's
+	//! ducklake_role, so both modes currently execute under the caller.
+	void CheckExecuteRoutine(ClientContext &context, Catalog &catalog, const string &schema_name,
+	                         const string &routine_name, bool security_definer) override {
+		auto rbac = DuckLakeRbac::FindActiveRbac(context);
+		if (!rbac) {
+			// no attached catalog has RBAC enabled - allow everything
+			return;
+		}
+		// A routine lives in a schema, so scope the grant lookup to that schema and let a
+		// schema-scoped EXECUTE grant match, as well as a catalog-wide one.
+		optional_idx schema_id;
+		if (catalog.GetCatalogType() == "ducklake") {
+			auto &ducklake = catalog.Cast<DuckLakeCatalog>();
+			auto &schema_entry = ducklake.GetSchema(ducklake.GetCatalogTransaction(context), Identifier(schema_name));
+			schema_id = optional_idx(schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId().index);
+		}
+		if (rbac->CheckDuckDBObject(context, DUCKLAKE_PRIVILEGE_EXECUTE, DescribeObject(schema_name, routine_name),
+		                            schema_id)) {
+			return;
+		}
+		auto role = DuckLakeRbac::GetActiveRole(context);
+		throw PermissionException("Role \"%s\" does not have EXECUTE privilege on procedure \"%s.%s\"",
+		                          role.empty() ? DUCKLAKE_PUBLIC_GRANTEE : role, schema_name, routine_name);
 	}
 
 	bool RequireStatementRebind(ClientContext &context) override {

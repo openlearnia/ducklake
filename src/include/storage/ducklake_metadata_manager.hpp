@@ -518,6 +518,8 @@ public:
 	virtual void MigrateV10(bool allow_failures = false);
 	//! Renames inlined metadata columns to the prefixed variants, skipping already renamed tables
 	virtual void MigrateInlinedColumnNames();
+	//! Adds ducklake_procedure.security_definer, skipping catalogs that predate the table
+	virtual void EnsureProcedureSecurityColumn();
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 

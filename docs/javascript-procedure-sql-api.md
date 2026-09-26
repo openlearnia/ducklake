@@ -96,6 +96,63 @@ fails. Nested `duckdb.transaction` calls are rejected. Raw `BEGIN`, `START TRANS
 `COMMIT`, `ROLLBACK`, `ABORT`, and `END` statements (including later statements in a multi-
 statement `execute`) are rejected because the callback owns transaction control.
 
+`duckdb.transaction` is also rejected inside a `SECURITY DEFINER` procedure, matching
+PostgreSQL — see below.
+
+## Execution identity and `SECURITY`
+
+Like PostgreSQL, a procedure declares who its body runs as. The clause goes between `LANGUAGE`
+and `AS`, and defaults to `SECURITY INVOKER`:
+
+```sql
+CREATE PROCEDURE refresh_totals()
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+SECURITY DEFINER
+AS $$
+  await duckdb.execute('DELETE FROM totals');
+  await duckdb.execute('INSERT INTO totals SELECT sum(balance) FROM accounts');
+  return 1;
+$$;
+```
+
+| Mode | Body runs as | `duckdb.transaction` |
+| --- | --- | --- |
+| `SECURITY INVOKER` (default) | the calling session's `ducklake_role` | allowed |
+| `SECURITY DEFINER` | the creating session's `ducklake_role` | refused |
+
+The clause is persisted in `ducklake_procedure.security_definer` and survives detach/reattach.
+The execution identity is **not yet switched**: procedure SQL runs on a private connection that
+inherits the calling session's `ducklake_role`, so a `SECURITY DEFINER` body currently executes
+under the caller, exactly like an invoker body. What the mode does enforce today is the
+transaction-control restriction below. Treat a definer procedure as reserved for its creator and
+restrict `CALL` with `EXECUTE` grants accordingly, so the day identity switching lands the grant
+model is already correct.
+
+Because a definer body runs with privileges the caller may not hold, it may not open, commit, or
+roll back a transaction — otherwise it could commit work the caller never observed. A definer
+procedure that needs atomic work must instead have the caller wrap the `CALL`, or express the
+work as a single statement that DuckLake commits atomically on its own.
+
+### `EXECUTE` is required in both modes
+
+Calling any procedure requires the `EXECUTE` privilege, whether or not it is `SECURITY
+DEFINER` — the same rule PostgreSQL applies. `EXECUTE` is a distinct privilege from the table
+privileges, so a role holding only `SELECT`/`INSERT`/`UPDATE`/`DELETE` cannot call a procedure:
+
+```sql
+SELECT * FROM ducklake_grant('lake', 'reporting', 'SELECT', table_name := NULL, "schema" := 'main');
+-- reporting can read tables but not call routines
+
+SELECT * FROM ducklake_grant('lake', 'reporting', 'EXECUTE', table_name := NULL, "schema" := 'main');
+-- schema-scoped: applies to routines in main
+```
+
+Grants are scoped the same way as table grants. A schema-scoped `EXECUTE` grant covers routines
+in that schema; a grant with no schema is catalog-wide and covers every schema. `EXECUTE` never
+implies any table privilege, and no table privilege implies `EXECUTE`. Unlike PostgreSQL, a new
+procedure is **not** automatically executable by `PUBLIC` — grants must be issued explicitly.
+
 ## Value conversion
 
 * `BOOLEAN` becomes a JavaScript boolean.

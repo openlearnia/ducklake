@@ -699,6 +699,7 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		create_procedure->language = procedure.language;
 		create_procedure->body = procedure.body;
 		create_procedure->return_type = DuckLakeTypes::FromString(procedure.return_type);
+		create_procedure->security_definer = procedure.security_definer;
 		for (auto &parameter : procedure.parameters) {
 			create_procedure->parameter_names.push_back(parameter.parameter_name);
 			create_procedure->parameter_types.push_back(DuckLakeTypes::FromString(parameter.parameter_type));

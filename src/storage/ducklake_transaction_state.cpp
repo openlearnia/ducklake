@@ -569,6 +569,7 @@ void GetNewProcedureInfo(DuckLakeCommitState &commit_state, reference<CatalogEnt
 	procedure_info.body = procedure_entry.body;
 	procedure_info.return_type = DuckLakeTypes::ToString(procedure_entry.return_type);
 	procedure_info.definition_version = procedure_entry.definition_version;
+	procedure_info.security_definer = procedure_entry.security_definer;
 	for (idx_t i = 0; i < procedure_entry.parameter_names.size(); i++) {
 		DuckLakeProcedureParameter parameter;
 		parameter.parameter_name = procedure_entry.parameter_names[i];

@@ -203,9 +203,11 @@ Findings:
    collision the retry loop rebuilds candidates from the raw `name`, so for auto-named
    `"unnamed"` columns a deeper collision yields `_3` instead of `unnamed_3`. Cosmetic;
    needs ≥3 unnamed outputs plus a literal conflicting name.
-2. **`if_stale` is inert**: parsed and threaded through, but both plain REFRESH and
-   `REFRESH ... IF STALE` take the same skip-when-clean path (`(void)if_stale;`). Fine if
-   intentional; document it.
+2. **`if_stale` was inert, now wired**: at the time of this review `if_stale` was parsed and
+   threaded through but discarded (`(void)if_stale;`), so plain REFRESH and `REFRESH ... IF
+   STALE` took the same path. That has since been fixed —
+   `ducklake_materialized_view.cpp` now short-circuits `if_stale && !source_changed` to a
+   `"skipped"` result and uses `!if_stale && !source_changed` to select the full-refresh path.
 3. The refresh-history reader's try-extended/fallback-to-short pattern is exactly the ad-hoc
    compatibility mechanism `definition_version` will formalize — good precedent for reader
    behavior.

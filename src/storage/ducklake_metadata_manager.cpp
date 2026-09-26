@@ -351,7 +351,7 @@ string DuckLakeMetadataManager::GetCreateTableStatements() {
 	                     "lag_ms BIGINT);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, "
 	                     "procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot "
-	                     "BIGINT, end_snapshot BIGINT, definition_version BIGINT);");
+	                     "BIGINT, end_snapshot BIGINT, definition_version BIGINT, security_definer BOOLEAN);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_procedure_parameters(procedure_id BIGINT, "
 	                     "parameter_id BIGINT, parameter_name VARCHAR, parameter_type VARCHAR);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_replication(replication_id BIGINT PRIMARY KEY, "
@@ -524,8 +524,9 @@ CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRI
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT, definition_version BIGINT);
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS definition_version BIGINT;
 UPDATE {METADATA_CATALOG}.ducklake_materialized_view SET definition_version = %llu WHERE definition_version IS NULL;
-CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, definition_version BIGINT);
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, definition_version BIGINT, security_definer BOOLEAN);
 ALTER TABLE {METADATA_CATALOG}.ducklake_procedure ADD COLUMN IF NOT EXISTS definition_version BIGINT;
+ALTER TABLE {METADATA_CATALOG}.ducklake_procedure ADD COLUMN IF NOT EXISTS security_definer BOOLEAN;
 UPDATE {METADATA_CATALOG}.ducklake_procedure SET definition_version = %llu WHERE definition_version IS NULL;
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view_refresh_history(
     view_id BIGINT,
@@ -575,6 +576,22 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev1' WHERE key = '
 	// rename first so a conflict aborts while the catalog is still at v1.0
 	MigrateInlinedColumnNames();
 	ExecuteMigration(migrate_query, allow_failures, "1.0", "1.1-dev1");
+	EnsureProcedureSecurityColumn();
+}
+
+void DuckLakeMetadataManager::EnsureProcedureSecurityColumn() {
+	// ducklake_procedure only exists from v1.1 onwards, so this runs for catalogs that are
+	// already past the versioned migrations and would otherwise never see the new column.
+	auto probe = Query("SELECT * FROM {METADATA_CATALOG}.ducklake_procedure LIMIT 0");
+	if (probe->HasError()) {
+		return;
+	}
+	auto result = Execute(StringUtil::Format(R"(
+ALTER TABLE {METADATA_CATALOG}.ducklake_procedure ADD COLUMN IF NOT EXISTS security_definer BOOLEAN;
+	)"));
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to add ducklake_procedure.security_definer: ");
+	}
 }
 
 void DuckLakeMetadataManager::MigrateInlinedColumnNames() {
@@ -1233,7 +1250,8 @@ WHERE  {SNAPSHOT_ID} >= ducklake_macro.begin_snapshot AND ({SNAPSHOT_ID} < duckl
 	if (load_procedures) {
 		result = query_executor(snapshot, StringUtil::Format(R"(
 SELECT schema_id, ducklake_procedure.procedure_id, procedure_name, language, body,
-       COALESCE(ducklake_procedure.definition_version, 1), return_type, (
+       COALESCE(ducklake_procedure.definition_version, 1), return_type,
+       COALESCE(ducklake_procedure.security_definer, false), (
 	SELECT %s
 	FROM {METADATA_CATALOG}.ducklake_procedure_parameters
 	WHERE ducklake_procedure.procedure_id = ducklake_procedure_parameters.procedure_id
@@ -1262,7 +1280,8 @@ WHERE {SNAPSHOT_ID} >= ducklake_procedure.begin_snapshot
 				    CURRENT_PROCEDURE_DEFINITION_VERSION);
 			}
 			procedure_info.return_type = row.GetValue<string>(6);
-			auto parameters = row.GetValue<Value>(7);
+			procedure_info.security_definer = row.GetValue<bool>(7);
+			auto parameters = row.GetValue<Value>(8);
 			if (!parameters.IsNull()) {
 				for (auto &parameter : ListValue::GetChildren(parameters)) {
 					auto &fields = StructValue::GetChildren(parameter);
@@ -3363,12 +3382,12 @@ string DuckLakeMetadataManager::WriteNewProcedures(const vector<DuckLakeProcedur
 	string batch_query;
 	for (auto &procedure : new_procedures) {
 		batch_query += StringUtil::Format(R"(
-INSERT INTO {METADATA_CATALOG}.ducklake_procedure(schema_id, procedure_id, procedure_name, language, body, return_type, begin_snapshot, end_snapshot, definition_version) values(%llu,%llu,%s,%s,%s,%s,{SNAPSHOT_ID}, NULL, %llu);
+INSERT INTO {METADATA_CATALOG}.ducklake_procedure(schema_id, procedure_id, procedure_name, language, body, return_type, begin_snapshot, end_snapshot, definition_version, security_definer) values(%llu,%llu,%s,%s,%s,%s,{SNAPSHOT_ID}, NULL, %llu, %s);
 )",
 		                                  procedure.schema_id.index, procedure.procedure_id.index,
 		                                  SQLString(procedure.procedure_name), SQLString(procedure.language),
 		                                  SQLString(procedure.body), SQLString(procedure.return_type),
-		                                  procedure.definition_version);
+		                                  procedure.definition_version, procedure.security_definer ? "true" : "false");
 		for (idx_t parameter_id = 0; parameter_id < procedure.parameters.size(); parameter_id++) {
 			auto &parameter = procedure.parameters[parameter_id];
 			batch_query += StringUtil::Format(R"(

@@ -38,8 +38,9 @@ enum DuckLakePrivilege : uint64_t {
 	DUCKLAKE_PRIVILEGE_CREATE = 1ULL << 4,
 	DUCKLAKE_PRIVILEGE_DROP = 1ULL << 5,
 	DUCKLAKE_PRIVILEGE_ALTER = 1ULL << 6,
-	DUCKLAKE_PRIVILEGE_ADMIN = 1ULL << 7,
-	DUCKLAKE_PRIVILEGE_ALL = (1ULL << 8) - 1,
+	DUCKLAKE_PRIVILEGE_EXECUTE = 1ULL << 7,
+	DUCKLAKE_PRIVILEGE_ADMIN = 1ULL << 8,
+	DUCKLAKE_PRIVILEGE_ALL = (1ULL << 9) - 1,
 };
 
 //! Reserved grantee that applies to every session regardless of the
@@ -97,7 +98,11 @@ public:
 	void InvalidateCache();
 	static DuckLakeRbac *FindActiveRbac(ClientContext &context);
 	static bool IsInternalConnection(ClientContext &context);
-	bool CheckDuckDBObject(ClientContext &context, DuckLakePrivilege privilege, const string &object_desc);
+	//! Verify `privilege` for a non-table DuckDB object (a routine, for example).
+	//! `schema_id` scopes the lookup so a schema-scoped grant matches; an invalid
+	//! id means catalog-wide scope, where only wildcard grants apply.
+	bool CheckDuckDBObject(ClientContext &context, DuckLakePrivilege privilege, const string &object_desc,
+	                        optional_idx schema_id = optional_idx());
 
 private:
 	DuckLakeCatalog &catalog;
