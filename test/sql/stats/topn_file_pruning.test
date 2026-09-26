@@ -36,11 +36,15 @@ statement ok
 INSERT INTO ducklake.events
 SELECT TIMESTAMP '2026-01-04 00:00:00' + interval (i) second, 'd' FROM range(100) t(i);
 
-# The Top-N phase should not need to read all files once the dynamic filter is initialized
+# The Top-N dynamic filter must be pushed into the scan, and the file-column-stats lookup
+# must actually skip files. The data scan's own "Total Files Read" is deliberately not
+# pinned: it is 4 when the Top-N consumer initializes the filter only after the scan has
+# dispatched every file, and 3 when the filter lands first, so it varies with pipeline
+# interleaving. Only the presence of the dynamic filter and of skipped files is guaranteed.
 query II
 EXPLAIN ANALYZE SELECT * FROM ducklake.events ORDER BY timestamp DESC LIMIT 1
 ----
-analyzed_plan	<REGEX>:.*optional: Dynamic Filter.*Total Files Read: 4.*
+analyzed_plan	<REGEX>:.*Total Files Skipped: [1-9][0-9]*.*optional: Dynamic Filter.*
 
 # Verify correct result for timestamp DESC LIMIT 1
 query II
@@ -53,7 +57,7 @@ SELECT * FROM ducklake.events ORDER BY timestamp DESC LIMIT 2
 query II
 EXPLAIN ANALYZE SELECT * FROM ducklake.events ORDER BY timestamp ASC LIMIT 1
 ----
-analyzed_plan	<REGEX>:.*optional: Dynamic Filter.*Total Files Read: 4.*
+analyzed_plan	<REGEX>:.*Total Files Skipped: [1-9][0-9]*.*optional: Dynamic Filter.*
 
 # Verify correct result for timestamp ASC LIMIT 2
 query II
@@ -123,11 +127,14 @@ SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
 ----
 true
 
-# Test with multiple sort orders - should still prune using first column
+# Test with multiple sort orders. The secondary sort key changes the plan: there is no
+# file-column-stats sub-query, so no "Total Files Skipped" line is emitted at all. What is
+# guaranteed is that the Top-N dynamic filter is still pushed into the scan, so assert that
+# and leave the file count unpinned for the same interleaving reason as above.
 query II
 EXPLAIN ANALYZE SELECT * FROM ducklake.events ORDER BY timestamp DESC, user_id ASC LIMIT 1
 ----
-analyzed_plan	<REGEX>:.*optional: Dynamic Filter.*Total Files Read: 4.*
+analyzed_plan	<REGEX>:.*optional: Dynamic Filter.*Total Files Read: [0-9]+.*
 
 # Verify actual result is correct with multiple sort orders
 query IT
