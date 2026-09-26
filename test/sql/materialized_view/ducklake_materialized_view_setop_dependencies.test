@@ -38,7 +38,7 @@ SELECT is_stale FROM ducklake_materialized_views('ducklake') WHERE view_name = '
 false
 
 query I
-SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'setop_mv')
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'setop_mv', if_stale := true)
 ----
 skipped
 

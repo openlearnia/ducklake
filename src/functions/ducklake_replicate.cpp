@@ -9,6 +9,7 @@
 #include "functions/ducklake_table_functions.hpp"
 #include "replication/ducklake_replication.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "storage/ducklake_rbac.hpp"
 #include "common/ducklake_util.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -18,6 +19,10 @@
 #include "duckdb/main/extension_helper.hpp"
 
 namespace duckdb {
+
+static void CheckReplicationAdmin(ClientContext &context, Catalog &catalog) {
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckAdmin(context);
+}
 
 // Loads the statically linked parquet extension when it is not registered yet (autoload may be disabled).
 static void EnsureParquetLoaded(ClientContext &context) {
@@ -139,6 +144,7 @@ static unique_ptr<FunctionData> ReplicateCreateBind(ClientContext &context, Tabl
 
 static void ReplicateCreateExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateCreateData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateOnceState>();
 	if (state.offset > 0) {
 		output.SetChildCardinality(0);
@@ -204,6 +210,7 @@ static unique_ptr<FunctionData> ReplicateCatchupBind(ClientContext &context, Tab
 
 static void ReplicateCatchupExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateCatchupData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateOnceState>();
 	if (state.offset > 0) {
 		output.SetChildCardinality(0);
@@ -305,6 +312,7 @@ static unique_ptr<FunctionData> ReplicateStatusBind(ClientContext &context, Tabl
 
 static void ReplicateStatusExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateStatusData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateRowsState>();
 	if (!state.loaded) {
 		auto &ducklake = data.dest_catalog->Cast<DuckLakeCatalog>();
@@ -390,6 +398,7 @@ static unique_ptr<FunctionData> ReplicateTablesBind(ClientContext &context, Tabl
 
 static void ReplicateTablesExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateTablesData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateRowsState>();
 	if (!state.loaded) {
 		auto &ducklake = data.dest_catalog->Cast<DuckLakeCatalog>();
@@ -442,6 +451,7 @@ static unique_ptr<FunctionData> ReplicateDropBind(ClientContext &context, TableF
 
 static void ReplicateDropExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateDropData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateOnceState>();
 	if (state.offset > 0) {
 		output.SetChildCardinality(0);
@@ -505,6 +515,7 @@ static unique_ptr<FunctionData> ReplicateStartBind(ClientContext &context, Table
 
 static void ReplicateStartExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateDropData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateRowsState>();
 	if (!state.loaded) {
 		auto &ducklake = data.dest_catalog->Cast<DuckLakeCatalog>();
@@ -552,6 +563,7 @@ static unique_ptr<FunctionData> ReplicateStopBind(ClientContext &context, TableF
 
 static void ReplicateStopExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateDropData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateRowsState>();
 	if (!state.loaded) {
 		auto &ducklake = data.dest_catalog->Cast<DuckLakeCatalog>();
@@ -574,6 +586,7 @@ static unique_ptr<FunctionData> ReplicatePauseBind(ClientContext &context, Table
 
 static void ReplicatePauseExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateDropData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateRowsState>();
 	if (!state.loaded) {
 		auto &ducklake = data.dest_catalog->Cast<DuckLakeCatalog>();
@@ -595,6 +608,7 @@ static unique_ptr<FunctionData> ReplicateResumeBind(ClientContext &context, Tabl
 
 static void ReplicateResumeExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateDropData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateRowsState>();
 	if (!state.loaded) {
 		auto &ducklake = data.dest_catalog->Cast<DuckLakeCatalog>();
@@ -616,6 +630,7 @@ static unique_ptr<FunctionData> ReplicateResumeAllBind(ClientContext &context, T
 
 static void ReplicateResumeAllExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<ReplicateDropData>();
+	CheckReplicationAdmin(context, *data.dest_catalog);
 	auto &state = data_p.global_state->Cast<ReplicateRowsState>();
 	if (!state.loaded) {
 		auto &ducklake = data.dest_catalog->Cast<DuckLakeCatalog>();

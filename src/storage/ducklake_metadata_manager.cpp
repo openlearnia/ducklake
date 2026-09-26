@@ -297,6 +297,8 @@ string DuckLakeMetadataManager::GetCreateTableStatements() {
 	    "BIGINT, variant_path VARCHAR, shredded_type VARCHAR, column_size_bytes BIGINT, value_count BIGINT, null_count "
 	    "BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);");
 	statements.push_back(GetDeleteFileTableStatement());
+	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_role(role_id BIGINT PRIMARY KEY, role_name VARCHAR UNIQUE NOT NULL);");
+	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRIMARY KEY, grantee VARCHAR NOT NULL, schema_id BIGINT, table_id BIGINT, privileges BIGINT NOT NULL);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_column(column_id BIGINT, begin_snapshot BIGINT, "
 	                     "end_snapshot BIGINT, table_id BIGINT, column_order BIGINT, column_name VARCHAR, column_type "
 	                     "VARCHAR, initial_default VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, "
@@ -517,6 +519,8 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.2' WHERE key = 'versi
 
 void DuckLakeMetadataManager::MigrateV07() {
 	auto result = Execute(StringUtil::Format(R"(
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_role(role_id BIGINT PRIMARY KEY, role_name VARCHAR UNIQUE NOT NULL);
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRIMARY KEY, grantee VARCHAR NOT NULL, schema_id BIGINT, table_id BIGINT, privileges BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT, definition_version BIGINT);
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS definition_version BIGINT;
 UPDATE {METADATA_CATALOG}.ducklake_materialized_view SET definition_version = %llu WHERE definition_version IS NULL;

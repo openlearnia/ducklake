@@ -211,7 +211,7 @@ void DuckLakeCatalog::EnsureCommitInfoProvided(const DuckLakeSnapshotCommit &com
 
 DuckLakeCatalog::DuckLakeCatalog(AttachedDatabase &db_p, DuckLakeOptions options_p)
     : Catalog(db_p), options(std::move(options_p)), last_uncommitted_catalog_version(TRANSACTION_ID_START),
-      instance_id(UUID::ToString(UUID::GenerateRandomUUID())) {
+      instance_id(UUID::ToString(UUID::GenerateRandomUUID())), rbac(make_uniq<DuckLakeRbac>(*this)) {
 	// figure out the metadata server type
 	auto entry = options.metadata_parameters.find("type");
 	if (entry != options.metadata_parameters.end()) {
@@ -253,6 +253,10 @@ void DuckLakeCatalog::FinalizeLoad(optional_ptr<ClientContext> context) {
 	}
 	DuckLakeInitializer initializer(*context, *this, options);
 	initializer.Initialize();
+	if (options.enable_rbac) {
+		rbac->EnsureMetadataTables(*context);
+		rbac->SetEnabled(true);
+	}
 	db.tags["data_path"] = DataPath();
 	if (con) {
 		con->Commit();
@@ -282,6 +286,7 @@ string DuckLakeCatalog::GeneratePathFromName(const string &uuid, const string &n
 }
 
 optional_ptr<CatalogEntry> DuckLakeCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+	Rbac().CheckCatalogPrivilege(transaction.GetContext(), DUCKLAKE_PRIVILEGE_CREATE);
 	auto schema = GetSchema(transaction, info.GetQualifiedName().Schema(), OnEntryNotFound::RETURN_NULL);
 	if (schema) {
 		if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
@@ -326,6 +331,7 @@ void DuckLakeCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, *this);
 	auto &ducklake_schema = schema->Cast<DuckLakeSchemaEntry>();
+	Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_DROP, ducklake_schema);
 	ducklake_schema.TryDropSchema(transaction, info.cascade);
 	transaction.DropEntry(*schema);
 }

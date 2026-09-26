@@ -880,6 +880,7 @@ PhysicalOperator &DuckLakeCatalog::PlanInsert(ClientContext &context, PhysicalPl
 	}
 	auto &ducklake_table = op.table.Cast<DuckLakeTableEntry>();
 	VerifyNotMaterializedViewBackingTable(context, ducklake_table, "insert into");
+	Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_INSERT, ducklake_table);
 	auto &ducklake_schema = ducklake_table.ParentSchema().Cast<DuckLakeSchemaEntry>();
 	auto pipeline = PlanInsertPipeline(context, planner, *plan, ducklake_table.GetColumns(), ducklake_table.name,
 	                                   ducklake_table.GetSortData(),
@@ -907,6 +908,7 @@ PhysicalOperator &DuckLakeCatalog::PlanCreateTableAs(ClientContext &context, Phy
 	auto &columns = create_info.columns;
 	auto &duck_transaction = DuckLakeTransaction::Get(context, *this);
 	auto &duck_schema = op.schema.Cast<DuckLakeSchemaEntry>();
+	Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_CREATE, duck_schema);
 
 	// The table entry doesn't exist yet; build field/partition/sort specs now so the physical write can use them.
 	auto field_data = DuckLakeFieldData::FromColumns(columns);

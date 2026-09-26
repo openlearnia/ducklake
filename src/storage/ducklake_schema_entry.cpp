@@ -80,6 +80,8 @@ DuckLakeSchemaEntry::CreateTableExtended(CatalogTransaction transaction, BoundCr
 	                          base_info.on_conflict)) {
 		return nullptr;
 	}
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(transaction.GetContext(), DUCKLAKE_PRIVILEGE_CREATE,
+	                                                           *this);
 	DuckLakeUtil::ValidateNoInlinedSystemColumns(catalog.Cast<DuckLakeCatalog>(), transaction.GetContext(), schema_id,
 	                                             base_info.columns);
 	//! get a local table-id
@@ -140,6 +142,8 @@ bool DuckLakeSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransaction transaction,
                                                                CreateFunctionInfo &info) {
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(transaction.GetContext(), DUCKLAKE_PRIVILEGE_CREATE,
+	                                                           *this);
 	unique_ptr<CatalogEntry> entry;
 	auto version = ParentCatalog().Cast<DuckLakeCatalog>().GetDuckLakeVersion();
 	// Cast per-case: CreateProcedureInfo derives from CreateFunctionInfo, not
@@ -195,6 +199,8 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateIndex(CatalogTransaction t
 }
 
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(transaction.GetContext(), DUCKLAKE_PRIVILEGE_CREATE,
+	                                                           *this);
 	if (info.security_type == ViewSecurityType::SECURE_VIEW) {
 		throw NotImplementedException("DuckLake does not support secure views");
 	}
@@ -288,6 +294,16 @@ void ApplySetColumnCommentToView(DuckLakeTransaction &transaction, CatalogTransa
 void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInfo &info) {
 	auto &context = catalog_transaction.GetContext();
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
+	if (info.type == AlterType::ALTER_TABLE) {
+		auto &alter = info.Cast<AlterTableInfo>();
+		auto entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, alter.GetQualifiedName().Name());
+		if (entry && entry->type == CatalogType::TABLE_ENTRY) {
+			catalog.Cast<DuckLakeCatalog>().Rbac().CheckTablePrivilege(
+			    context, DUCKLAKE_PRIVILEGE_ALTER, entry->Cast<DuckLakeTableEntry>());
+		}
+	} else if (info.type == AlterType::ALTER_VIEW) {
+		catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_ALTER, *this);
+	}
 	switch (info.type) {
 	case AlterType::ALTER_TABLE: {
 		auto &alter = info.Cast<AlterTableInfo>();
@@ -435,6 +451,21 @@ void DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 	if (catalog_entry->type != info.type) {
 		throw CatalogException("Existing object %s is of type %s, trying to drop type %s", catalog_entry->name,
 		                       CatalogTypeToString(catalog_entry->type), CatalogTypeToString(info.type));
+	}
+	auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
+	switch (info.type) {
+	case CatalogType::TABLE_ENTRY:
+		duck_catalog.Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_DROP,
+		                                       catalog_entry->Cast<DuckLakeTableEntry>());
+		break;
+	case CatalogType::VIEW_ENTRY:
+	case CatalogType::MACRO_ENTRY:
+	case CatalogType::TABLE_MACRO_ENTRY:
+	case CatalogType::PROCEDURE_ENTRY:
+		duck_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_DROP, *this);
+		break;
+	default:
+		break;
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	transaction.DropEntry(*catalog_entry);

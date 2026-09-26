@@ -22,6 +22,12 @@ FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv', if_stale 
 ----
 main	mv	skipped	0
 
+# A plain refresh forces recomputation even without a new source snapshot.
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv')
+----
+full
+
 statement ok
 INSERT INTO ducklake.base VALUES (100, 0, 10)
 

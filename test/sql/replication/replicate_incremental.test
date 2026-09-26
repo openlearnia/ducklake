@@ -126,6 +126,31 @@ SELECT last_watermark FROM ducklake_replicate_tables('repl_dest', 1) WHERE sourc
 ----
 5
 
+# Rows sharing the current watermark must be picked up on the next pass.
+statement ok
+INSERT INTO wm_t VALUES (5, 'w5-late')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query I
+SELECT count(*) FROM repl_dest.main.wm_t WHERE seq = 5
+----
+2
+
+# Simulate a data commit whose cursor update did not persist, then replay safely.
+statement ok
+UPDATE __ducklake_metadata_repl_dest.main.ducklake_replication_table
+SET last_watermark = '3' WHERE replication_id = 1 AND source_table = 'wm_t'
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query I
+SELECT count(*) FROM repl_dest.main.wm_t
+----
+6
+
 query II
 SELECT id, v FROM repl_dest.main.nopk_t ORDER BY id
 ----
@@ -191,6 +216,7 @@ SELECT seq, v, note FROM repl_dest.main.wm_t ORDER BY seq
 3	w3	NULL
 4	w4	NULL
 5	w5	NULL
+5	w5-late	NULL
 6	w6	hi
 
 query III

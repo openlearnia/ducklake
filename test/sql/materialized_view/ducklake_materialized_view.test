@@ -69,9 +69,9 @@ SELECT grp, total, cnt FROM ducklake.mv1 WHERE grp = 0
 ----
 0	1300	5
 
-# refreshing with no changes is a no-op
+# IF STALE skips when no changes are present
 query TTTI
-SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv1')
+SELECT * FROM ducklake_refresh_materialized_view('ducklake', view_name := 'mv1', if_stale := true)
 ----
 main	mv1	skipped	0
 

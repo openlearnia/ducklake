@@ -465,16 +465,17 @@ static void UpsertTableSyncState(ClientContext &context, DuckLakeCatalog &dest, 
                                  const SourceTableRef &ref, const TableSyncOutcome &outcome) {
 	auto con = MakeConnection(context, dest.GetDatabase());
 	auto state_table = MetaTableName(dest, "ducklake_replication_table");
-	auto delete_sql = StringUtil::Format("DELETE FROM %s WHERE replication_id = %llu AND source_schema = %s AND "
-	                                     "source_table = %s",
-	                                     state_table, job.replication_id, SQLLit(ref.schema), SQLLit(ref.table));
-	auto del_res = con->Query(delete_sql);
-	CheckResult(*del_res, "Failed to clear replication table state");
 	auto insert_sql = StringUtil::Format(
 	    "INSERT INTO %s (replication_id, source_schema, source_table, dest_schema, dest_table, strategy, "
 	    "watermark_column, pk_columns, last_watermark, last_source_snapshot, last_full_sync_snapshot, "
 	    "row_count_dest, last_error, synced_at) "
-	    "VALUES (%llu, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %lld, NULL, now())",
+	    "VALUES (%llu, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %lld, NULL, now()) "
+	    "ON CONFLICT (replication_id, source_schema, source_table) DO UPDATE SET "
+	    "strategy = excluded.strategy, watermark_column = excluded.watermark_column, "
+	    "pk_columns = excluded.pk_columns, last_watermark = excluded.last_watermark, "
+	    "last_source_snapshot = excluded.last_source_snapshot, "
+	    "last_full_sync_snapshot = excluded.last_full_sync_snapshot, "
+	    "row_count_dest = excluded.row_count_dest, last_error = NULL, synced_at = excluded.synced_at",
 	    state_table, job.replication_id, SQLLit(ref.schema), SQLLit(ref.table), SQLLit(ref.schema), SQLLit(ref.table),
 	    SQLLit(outcome.strategy), outcome.watermark_column.empty() ? "NULL" : SQLLit(outcome.watermark_column),
 	    outcome.pk_columns.empty() ? "NULL" : SQLLit(outcome.pk_columns), ValueSql(outcome.last_watermark),
@@ -793,16 +794,17 @@ static string ChooseStrategy(ClientContext &context, Catalog &source_catalog, co
 	return "full";
 }
 
-//! Applies source inserts into `dst_table` for rows whose watermark falls in (low, high]; a NULL low
-//! watermark means this is the first incremental pass and copies everything up to `high`.
+//! Replay the boundary value to capture rows arriving with the previous maximum watermark.
 static void ApplyWatermarkDelta(Connection &apply, const string &dst_table, const string &src_table,
                                 const string &watermark_column, const string &watermark_type, const Value &low,
                                 const Value &high) {
 	auto wm = SQLId(watermark_column);
 	string predicate = StringUtil::Format("%s <= CAST(%s AS %s)", wm, SQLLit(high.ToString()), watermark_type);
 	if (!low.IsNull()) {
-		predicate =
-		    StringUtil::Format("%s > CAST(%s AS %s) AND %s", wm, SQLLit(low.ToString()), watermark_type, predicate);
+		auto low_bound = StringUtil::Format("CAST(%s AS %s)", SQLLit(low.ToString()), watermark_type);
+		auto delete_sql = StringUtil::Format("DELETE FROM %s WHERE %s >= %s", dst_table, wm, low_bound);
+		CheckResult(*apply.Query(delete_sql), "Failed to replay watermark boundary in " + dst_table);
+		predicate = StringUtil::Format("%s >= %s AND %s", wm, low_bound, predicate);
 	}
 	auto sql = StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE %s", dst_table, src_table, predicate);
 	CheckResult(*apply.Query(sql), "Failed to watermark-sync into " + dst_table);
@@ -1127,6 +1129,10 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 				                                  outcome.watermark_column, pk_columns);
 				if (!pk_columns.empty()) {
 					outcome.pk_columns = StringUtil::Join(pk_columns, ",");
+				}
+				if (!prior) {
+					// Claim the table before its first data commit so a restart can safely reseed it.
+					UpsertTableSyncState(context, dest, job, ref, outcome);
 				}
 
 				auto begin = apply->Query("BEGIN TRANSACTION");

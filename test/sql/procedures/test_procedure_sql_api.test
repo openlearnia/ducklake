@@ -42,6 +42,23 @@ SELECT sum(value) FROM procedure_values;
 ----
 16
 
+# SQL on the procedure's private connection must not silently escape a caller transaction.
+statement ok
+BEGIN;
+
+statement error
+CALL append_and_count(11);
+----
+<REGEX>:.*cannot run inside an explicit transaction.*
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT sum(value) FROM procedure_values;
+----
+16
+
 # Promise.all submits work in order while retaining one serialized invocation connection.
 
 statement ok

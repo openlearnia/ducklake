@@ -7,6 +7,9 @@ namespace duckdb {
 PhysicalOperator &DuckLakeCatalog::PlanMergeInto(ClientContext &context, PhysicalPlanGenerator &planner,
                                                  LogicalMergeInto &op, PhysicalOperator &plan) {
 	VerifyNotMaterializedViewBackingTable(context, op.table.Cast<DuckLakeTableEntry>(), "merge into");
+	Rbac().CheckTablePrivilege(context, static_cast<DuckLakePrivilege>(DUCKLAKE_PRIVILEGE_INSERT | DUCKLAKE_PRIVILEGE_UPDATE |
+	                                                                  DUCKLAKE_PRIVILEGE_DELETE),
+	                           op.table.Cast<DuckLakeTableEntry>());
 	// DuckLake writes a deletion file per data file, so it can apply at most one UPDATE/DELETE to a given row
 	idx_t update_delete_count = 0;
 	for (auto &entry : op.actions) {

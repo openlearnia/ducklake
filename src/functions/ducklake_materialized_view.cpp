@@ -1,6 +1,7 @@
 #include "functions/ducklake_table_functions.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "storage/ducklake_rbac.hpp"
 #include "storage/ducklake_schema_entry.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_insert.hpp"
@@ -1033,6 +1034,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	// resolve the target schema + name conflicts
 	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
 	auto &dl_schema = schema_entry.Cast<DuckLakeSchemaEntry>();
+	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_CREATE, dl_schema);
 
 	bool materialized_view_exists = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name) != nullptr;
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
@@ -1648,6 +1650,8 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	DuckLakeMaterializedViewInfo staged_copy;
 	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
 	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
+	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_UPDATE,
+	                                            schema_entry.Cast<DuckLakeSchemaEntry>());
 	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
 		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
@@ -1680,16 +1684,14 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 
 	// The committed snapshot can remain unchanged while this transaction has modified a dependency.
 	// Snapshot CDC cannot represent those local changes, so continue to the safe full-refresh path.
-	if (has_last_refreshed && last_refreshed == current_snapshot && !local_dependencies_dirty) {
+	bool source_changed = !has_last_refreshed || local_dependencies_dirty;
+	if (!source_changed && last_refreshed != current_snapshot) {
+		source_changed = DependenciesChanged(transaction, *mv, last_refreshed, current_snapshot);
+	}
+	if (if_stale && !source_changed) {
 		return BuildConstantResult(bind_index, schema, view_name, "skipped", 0, return_names);
 	}
-	if (has_last_refreshed && !local_dependencies_dirty &&
-	    !DependenciesChanged(transaction, *mv, last_refreshed, current_snapshot)) {
-		// covers plain REFRESH and REFRESH IF STALE / if_stale := true
-		(void)if_stale;
-		return BuildConstantResult(bind_index, schema, view_name, "skipped", 0, return_names);
-	}
-	(void)if_stale;
+	bool force_full_refresh = !if_stale && !source_changed;
 
 	// resolve the backing table entry
 	auto snapshot = transaction.GetSnapshot();
@@ -1724,7 +1726,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	};
 
 	// join-incremental when fact-only CDC; dim change → full
-	if (analysis.join_eligible && has_last_refreshed && mv->dependencies.size() >= 2) {
+	if (!force_full_refresh && analysis.join_eligible && has_last_refreshed && mv->dependencies.size() >= 2) {
 		auto fact_i = find_dep(analysis.fact_schema, analysis.fact_table);
 		auto dim_i = find_dep(analysis.dim_schema, analysis.dim_table);
 		if (fact_i.IsValid() && dim_i.IsValid()) {
@@ -1754,7 +1756,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	}
 
 	// incremental when eligible, single lake dependency, and no uncommitted base-table changes
-	bool incremental = analysis.eligible && !analysis.join_eligible && mv->dependencies.size() == 1;
+	bool incremental = !force_full_refresh && analysis.eligible && !analysis.join_eligible && mv->dependencies.size() == 1;
 	if (incremental) {
 		auto &dep = mv->dependencies[0];
 		if (dep.IsTransactionLocal() || transaction.HasAnyLocalChanges(dep)) {
@@ -1827,6 +1829,8 @@ static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &conte
 	DuckLakeMaterializedViewInfo staged_copy;
 	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
 	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
+	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_DROP,
+	                                            schema_entry.Cast<DuckLakeSchemaEntry>());
 	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
 		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
