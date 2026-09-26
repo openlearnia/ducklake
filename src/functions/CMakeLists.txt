@@ -21,7 +21,8 @@ add_library(
   ducklake_murmur3.cpp
   ducklake_materialized_view.cpp
   ducklake_materialized_view_parser.cpp
-  ducklake_replicate.cpp)
+  ducklake_replicate.cpp
+  ducklake_rbac_functions.cpp)
 set(ALL_OBJECT_FILES
     ${ALL_OBJECT_FILES} $<TARGET_OBJECTS:ducklake_functions>
     PARENT_SCOPE)
