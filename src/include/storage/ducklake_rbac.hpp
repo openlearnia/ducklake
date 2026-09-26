@@ -102,7 +102,7 @@ public:
 	//! `schema_id` scopes the lookup so a schema-scoped grant matches; an invalid
 	//! id means catalog-wide scope, where only wildcard grants apply.
 	bool CheckDuckDBObject(ClientContext &context, DuckLakePrivilege privilege, const string &object_desc,
-	                        optional_idx schema_id = optional_idx());
+	                       optional_idx schema_id = optional_idx());
 
 private:
 	DuckLakeCatalog &catalog;

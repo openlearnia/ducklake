@@ -1,4 +1,4 @@
-# name: native DuckDB materialized view lifecycle on the PEG parser
+# name: test/sql/materialized_view/native_materialized_view_preview.test
 # group: [materialized_view]
 
 statement ok

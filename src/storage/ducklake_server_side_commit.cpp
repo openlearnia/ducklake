@@ -911,8 +911,8 @@ unique_ptr<QueryResult> DuckLakeServerSideCommit::ScanStagedTable(DuckLakeStaged
 	}
 	StatementProperties properties;
 	properties.return_type = StatementReturnType::QUERY_RESULT;
-	return make_uniq<QueryResult>(StatementType::SELECT_STATEMENT, properties, std::move(names),
-	                                          std::move(collection), context.GetClientProperties());
+	return make_uniq<QueryResult>(StatementType::SELECT_STATEMENT, properties, std::move(names), std::move(collection),
+	                              context.GetClientProperties());
 }
 
 } // namespace duckdb

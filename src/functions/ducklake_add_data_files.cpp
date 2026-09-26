@@ -182,7 +182,7 @@ private:
 	                                                    const string &prefix = string());
 	void CollectLiveFieldIds(const vector<unique_ptr<DuckLakeFieldId>> &field_ids, unordered_set<idx_t> &result);
 	void ValidateFileFieldIds(const ParquetFileMetadata &file, const vector<unique_ptr<ParquetColumn>> &columns,
-	                             const unordered_set<idx_t> &live_field_ids, const string &prefix = string());
+	                          const unordered_set<idx_t> &live_field_ids, const string &prefix = string());
 	void MapColumnStats(ParquetFileMetadata &file_metadata, DuckLakeDataFile &result);
 	unique_ptr<DuckLakeNameMapEntry> MapHiveColumn(ParquetFileMetadata &file_metadata, const DuckLakeFieldId &field_id,
 	                                               const Value &hive_value);
@@ -830,14 +830,12 @@ FROM vortex_full_metadata(%s)
 				stats.has_min = true;
 				stats.min = stats_min_data[metadata_idx].GetString();
 				// Vortex footer stats are exact-or-absent: present bounds are never truncated.
-				stats.min_is_exact = !min_is_exact_validity.RowIsValid(metadata_idx) ||
-				                     min_is_exact_data[metadata_idx];
+				stats.min_is_exact = !min_is_exact_validity.RowIsValid(metadata_idx) || min_is_exact_data[metadata_idx];
 			}
 			if (stats_max_validity.RowIsValid(metadata_idx)) {
 				stats.has_max = true;
 				stats.max = stats_max_data[metadata_idx].GetString();
-				stats.max_is_exact = !max_is_exact_validity.RowIsValid(metadata_idx) ||
-				                     max_is_exact_data[metadata_idx];
+				stats.max_is_exact = !max_is_exact_validity.RowIsValid(metadata_idx) || max_is_exact_data[metadata_idx];
 			}
 			if (stats_null_count_validity.RowIsValid(metadata_idx)) {
 				auto null_count = stats_null_count_data[metadata_idx];
@@ -1588,8 +1586,8 @@ void DuckLakeFileProcessor::CollectLiveFieldIds(const vector<unique_ptr<DuckLake
 }
 
 void DuckLakeFileProcessor::ValidateFileFieldIds(const ParquetFileMetadata &file,
-                                                    const vector<unique_ptr<ParquetColumn>> &columns,
-                                                    const unordered_set<idx_t> &live_field_ids, const string &prefix) {
+                                                 const vector<unique_ptr<ParquetColumn>> &columns,
+                                                 const unordered_set<idx_t> &live_field_ids, const string &prefix) {
 	for (auto &column : columns) {
 		const auto full_name = prefix.empty() ? column->name : StringUtil::Format("%s.%s", prefix, column->name);
 		if (!IsDuckLakeInternalColumn(column->name) && column->field_id.IsValid()) {

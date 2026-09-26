@@ -131,8 +131,9 @@ string BuildRewrite(const ParsedMVStatement &parsed) {
 		    QuoteString(parsed.catalog), QuoteString(parsed.schema), QuoteString(parsed.name),
 		    parsed.if_stale ? "true" : "false");
 	case ParsedMVStatement::Type::DROP:
-		return StringUtil::Format("SELECT * FROM ducklake_drop_materialized_view(%s, schema_name := %s, view_name := %s)",
-		                          QuoteString(parsed.catalog), QuoteString(parsed.schema), QuoteString(parsed.name));
+		return StringUtil::Format(
+		    "SELECT * FROM ducklake_drop_materialized_view(%s, schema_name := %s, view_name := %s)",
+		    QuoteString(parsed.catalog), QuoteString(parsed.schema), QuoteString(parsed.name));
 	}
 	throw InternalException("Unhandled materialized view statement type");
 }
@@ -155,7 +156,8 @@ ParserOverrideResult DuckLakeMaterializedViewParserOverride(ParserExtensionInfo 
 		idx_t if_not_exists = pos;
 		if (MatchKeyword(query, if_not_exists, "if") && MatchKeyword(query, if_not_exists, "not") &&
 		    MatchKeyword(query, if_not_exists, "exists")) {
-			return ExtensionError("IF NOT EXISTS is not supported for CREATE MATERIALIZED VIEW - use CREATE OR REPLACE semantics via "
+			return ExtensionError(
+			    "IF NOT EXISTS is not supported for CREATE MATERIALIZED VIEW - use CREATE OR REPLACE semantics via "
 			    "ducklake_drop_materialized_view + create");
 		}
 		pos = if_not_exists;
@@ -176,7 +178,8 @@ ParserOverrideResult DuckLakeMaterializedViewParserOverride(ParserExtensionInfo 
 		parsed.type = ParsedMVStatement::Type::DROP;
 		idx_t if_exists = pos;
 		if (MatchKeyword(query, if_exists, "if") && MatchKeyword(query, if_exists, "exists")) {
-			return ExtensionError("IF EXISTS is not supported for DROP MATERIALIZED VIEW - use ducklake_drop_materialized_view");
+			return ExtensionError(
+			    "IF EXISTS is not supported for DROP MATERIALIZED VIEW - use ducklake_drop_materialized_view");
 		}
 		pos = if_exists;
 	} else {

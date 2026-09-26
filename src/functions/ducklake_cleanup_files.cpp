@@ -163,7 +163,7 @@ void DuckLakeCleanupExecute(ClientContext &context, TableFunctionInput &data_p, 
 }
 
 DuckLakeCleanupOldFilesFunction::DuckLakeCleanupOldFilesFunction()
-	: TableFunction(Identifier("ducklake_cleanup_old_files"), {LogicalType::VARCHAR}, DuckLakeCleanupExecute,
+    : TableFunction(Identifier("ducklake_cleanup_old_files"), {LogicalType::VARCHAR}, DuckLakeCleanupExecute,
                     DuckLakeCleanupOldFilesBind, DuckLakeCleanupInit) {
 	named_parameters["older_than"] = LogicalType::TIMESTAMP_TZ;
 	named_parameters["cleanup_all"] = LogicalType::BOOLEAN;
@@ -171,7 +171,7 @@ DuckLakeCleanupOldFilesFunction::DuckLakeCleanupOldFilesFunction()
 }
 
 DuckLakeCleanupOrphanedFilesFunction::DuckLakeCleanupOrphanedFilesFunction()
-	: TableFunction(Identifier("ducklake_delete_orphaned_files"), {LogicalType::VARCHAR}, DuckLakeCleanupExecute,
+    : TableFunction(Identifier("ducklake_delete_orphaned_files"), {LogicalType::VARCHAR}, DuckLakeCleanupExecute,
                     DuckLakeCleanupOrphanedFilesBind, DuckLakeCleanupInit) {
 	named_parameters["older_than"] = LogicalType::TIMESTAMP_TZ;
 	named_parameters["cleanup_all"] = LogicalType::BOOLEAN;

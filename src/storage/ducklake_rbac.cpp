@@ -164,7 +164,7 @@ static bool GrantApplies(const optional_idx &grant_schema, const optional_idx &g
 }
 
 uint64_t DuckLakeRbac::GetPrivileges(ClientContext &context, const string &grantee, optional_idx schema_id,
-                                      optional_idx table_id) {
+                                     optional_idx table_id) {
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	auto query_result = transaction.GetMetadataManager().Query(
 	    "SELECT grantee, schema_id, table_id, privileges FROM {METADATA_CATALOG}.ducklake_grant");
@@ -222,8 +222,7 @@ static void ThrowDenied(DuckLakePrivilege privilege, const string &role, const s
 	                          DuckLakeRbac::PrivilegesToString(static_cast<uint64_t>(privilege)), object, catalog);
 }
 
-void DuckLakeRbac::CheckTablePrivilege(ClientContext &context, DuckLakePrivilege privilege,
-                                        DuckLakeTableEntry &table) {
+void DuckLakeRbac::CheckTablePrivilege(ClientContext &context, DuckLakePrivilege privilege, DuckLakeTableEntry &table) {
 	if (!enabled || IsInternalConnection(context)) {
 		return;
 	}
@@ -251,7 +250,7 @@ void DuckLakeRbac::CheckTablePrivilege(ClientContext &context, DuckLakePrivilege
 }
 
 void DuckLakeRbac::CheckSchemaPrivilege(ClientContext &context, DuckLakePrivilege privilege,
-                                         DuckLakeSchemaEntry &schema) {
+                                        DuckLakeSchemaEntry &schema) {
 	if (!enabled || IsInternalConnection(context)) {
 		return;
 	}
@@ -266,7 +265,8 @@ void DuckLakeRbac::CheckSchemaPrivilege(ClientContext &context, DuckLakePrivileg
 	}
 	if ((privileges & static_cast<uint64_t>(privilege)) != static_cast<uint64_t>(privilege) &&
 	    (privileges & DUCKLAKE_PRIVILEGE_ADMIN) == 0) {
-		ThrowDenied(privilege, role, StringUtil::Format("schema %s", schema.name), catalog.GetName().GetIdentifierName());
+		ThrowDenied(privilege, role, StringUtil::Format("schema %s", schema.name),
+		            catalog.GetName().GetIdentifierName());
 	}
 }
 

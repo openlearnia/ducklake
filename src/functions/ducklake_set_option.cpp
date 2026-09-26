@@ -282,9 +282,8 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 			auto local_files = transaction.GetTransactionLocalFiles(config_option.table_id);
 			string persisted_format;
 			bool has_files =
-			    !local_files.empty() ||
-			    transaction.GetMetadataManager().TryGetPersistedDataFileFormat(
-			        config_option.table_id, transaction.GetSnapshot(), persisted_format);
+			    !local_files.empty() || transaction.GetMetadataManager().TryGetPersistedDataFileFormat(
+			                                config_option.table_id, transaction.GetSnapshot(), persisted_format);
 			if (has_files && frozen_format != value) {
 				throw InvalidInputException(
 				    "Cannot change data_file_format for table \"%s\" from \"%s\" to \"%s\" after data files exist",

@@ -353,7 +353,7 @@ unique_ptr<BaseStatistics> DuckLakeTableEntry::GetStatistics(ClientContext &cont
 }
 
 unique_ptr<BaseStatistics> DuckLakeTableEntry::GetStatistics(ClientContext &context,
-                                                              const StorageIndex &storage_index) {
+                                                             const StorageIndex &storage_index) {
 	auto table_stats = GetTableStats(context);
 	if (!table_stats || !storage_index.HasPrimaryIndex()) {
 		return nullptr;

@@ -196,7 +196,8 @@ bool DuckLakeInlinedDataReader::TryEvaluateExpression(ClientContext &context, id
 	}
 	// Virtual-only projections (notably DuckLake rowid) do not contribute an
 	// entry to column_ids. Their mapper-local index is the output position.
-	auto local_id = virtual_col_idx < column_ids.size() ? column_ids[MultiFileLocalIndex(virtual_col_idx)] : virtual_col_idx;
+	auto local_id =
+	    virtual_col_idx < column_ids.size() ? column_ids[MultiFileLocalIndex(virtual_col_idx)] : virtual_col_idx;
 	auto expr_it = expression_executors.find(local_id);
 	if (expr_it == expression_executors.end()) {
 		return false;
@@ -230,10 +231,9 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 					    scan_chunk.data[column_id].GetType().id() == LogicalTypeId::STRUCT) {
 						bool has_common_member = false;
 						for (auto &target_child : StructType::GetChildTypes(chunk.data[c].GetType())) {
-							for (auto &source_child :
-							     StructType::GetChildTypes(scan_chunk.data[column_id].GetType())) {
+							for (auto &source_child : StructType::GetChildTypes(scan_chunk.data[column_id].GetType())) {
 								if (StringUtil::CIEquals(target_child.first.GetIdentifierName(),
-								                       source_child.first.GetIdentifierName())) {
+								                         source_child.first.GetIdentifierName())) {
 									has_common_member = true;
 									break;
 								}
@@ -275,8 +275,8 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 				if (TryEvaluateExpression(context, c, ordinal_vector, LogicalType::BIGINT, chunk.data[c])) {
 					continue;
 				}
-					auto row_id_data = FlatVector::GetDataMutable<int64_t>(chunk.data[c]);
-					for (idx_t r = 0; r < scan_chunk.size(); r++) {
+				auto row_id_data = FlatVector::GetDataMutable<int64_t>(chunk.data[c]);
+				for (idx_t r = 0; r < scan_chunk.size(); r++) {
 					row_id_data[r] = ordinal_data[r];
 				}
 				continue;

@@ -379,10 +379,10 @@ public:
 	vector<DuckLakeMaterializedViewInfo> GetMaterializedViews(DuckLakeTransaction &transaction);
 	//! Look up a persisted materialized view by backing table id.
 	unique_ptr<DuckLakeMaterializedViewInfo> GetMaterializedViewByBackingTable(DuckLakeTransaction &transaction,
-	                                                                          TableIndex backing_table_id);
+	                                                                           TableIndex backing_table_id);
 	//! Look up a persisted materialized view by schema + name.
-	unique_ptr<DuckLakeMaterializedViewInfo> GetMaterializedViewByName(DuckLakeTransaction &transaction,
-	                                                                 const string &schema_name, const string &view_name);
+	unique_ptr<DuckLakeMaterializedViewInfo>
+	GetMaterializedViewByName(DuckLakeTransaction &transaction, const string &schema_name, const string &view_name);
 	//! Resolve a user-facing MV name in schema to its internal backing table entry (nullptr if not an MV).
 	optional_ptr<CatalogEntry> TryResolveMaterializedViewBackingTable(DuckLakeTransaction &transaction,
 	                                                                  const DuckLakeSchemaEntry &schema,
@@ -394,9 +394,8 @@ public:
 	void VerifyNotMaterializedViewBackingTable(ClientContext &context, DuckLakeTableEntry &table,
 	                                           const char *operation);
 	//! Whether any dependency of the MV changed in (start_snapshot, end_snapshot]
-	bool MaterializedViewDependenciesChanged(DuckLakeTransaction &transaction,
-	                                         const DuckLakeMaterializedViewInfo &mv, idx_t start_snapshot,
-	                                         idx_t end_snapshot);
+	bool MaterializedViewDependenciesChanged(DuckLakeTransaction &transaction, const DuckLakeMaterializedViewInfo &mv,
+	                                         idx_t start_snapshot, idx_t end_snapshot);
 	//! Enforce ducklake_mv_stale_read when scanning an MV backing table
 	void VerifyMaterializedViewStaleRead(ClientContext &context, DuckLakeTableEntry &table);
 

@@ -25,7 +25,7 @@ DuckLakeRbac *DuckLakeRbac::FindActiveRbac(ClientContext &context) {
 }
 
 bool DuckLakeRbac::CheckDuckDBObject(ClientContext &context, DuckLakePrivilege privilege, const string &,
-                                    optional_idx schema_id) {
+                                     optional_idx schema_id) {
 	if (!enabled || IsInternalConnection(context) || HasAdminInternal(context)) {
 		return true;
 	}
@@ -100,10 +100,9 @@ public:
 		}
 		if (!Check(context, AUTH_SELECT, DescribeObject(schema_name, object_name))) {
 			auto role = DuckLakeRbac::GetActiveRole(context);
-			throw PermissionException(
-			    "Role \"%s\" does not have SELECT privilege on %s (DuckDB catalog \"%s\")",
-			    role.empty() ? DUCKLAKE_PUBLIC_GRANTEE : role, DescribeObject(schema_name, object_name),
-			    catalog.GetName());
+			throw PermissionException("Role \"%s\" does not have SELECT privilege on %s (DuckDB catalog \"%s\")",
+			                          role.empty() ? DUCKLAKE_PUBLIC_GRANTEE : role,
+			                          DescribeObject(schema_name, object_name), catalog.GetName());
 		}
 	}
 

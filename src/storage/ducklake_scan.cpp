@@ -102,8 +102,7 @@ unique_ptr<BaseStatistics> DuckLakeStatistics(ClientContext &context, const Func
 	return table.GetStatistics(context, column_index);
 }
 
-unique_ptr<BaseStatistics> DuckLakeStatisticsExtended(ClientContext &context,
-                                                      TableFunctionGetStatisticsInput &input) {
+unique_ptr<BaseStatistics> DuckLakeStatisticsExtended(ClientContext &context, TableFunctionGetStatisticsInput &input) {
 	if (input.column_index.IsVirtualColumn()) {
 		return nullptr;
 	}

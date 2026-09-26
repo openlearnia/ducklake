@@ -557,8 +557,7 @@ void GetNewMacroInfo(DuckLakeCommitState &commit_state, reference<CatalogEntry> 
 	result.new_macros.push_back(std::move(new_macro_info));
 }
 
-void GetNewProcedureInfo(DuckLakeCommitState &commit_state, reference<CatalogEntry> entry,
-                         NewProcedureInfo &result) {
+void GetNewProcedureInfo(DuckLakeCommitState &commit_state, reference<CatalogEntry> entry, NewProcedureInfo &result) {
 	DuckLakeProcedureInfo procedure_info;
 	auto &procedure_entry = entry.get().Cast<DuckLakeProcedureEntry>();
 	auto &ducklake_schema = procedure_entry.schema.Cast<DuckLakeSchemaEntry>();

@@ -661,9 +661,9 @@ DuckLakeCompactor::GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry>
 	for (auto &name : copy_options.names) {
 		scan_names.emplace_back(name);
 	}
-	auto ducklake_scan = make_uniq<LogicalGet>(table_idx, std::move(scan_function), std::move(bind_data),
-	                                           copy_options.expected_types, std::move(scan_names),
-	                                           std::move(virtual_columns));
+	auto ducklake_scan =
+	    make_uniq<LogicalGet>(table_idx, std::move(scan_function), std::move(bind_data), copy_options.expected_types,
+	                          std::move(scan_names), std::move(virtual_columns));
 
 	auto &column_ids = ducklake_scan->GetMutableColumnIds();
 	for (idx_t i = 0; i < columns.PhysicalColumnCount(); i++) {
@@ -734,8 +734,8 @@ DuckLakeCompactor::GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry>
 		copy->rotate = copy_options.rotate;
 		copy->preserve_order = PreserveOrderType::DONT_PRESERVE_ORDER;
 	} else {
-		copy->file_path = copy_options.filename_pattern.CreateFilename(fs, copy_options.file_path,
-		                                                               copy_options.file_extension, 0);
+		copy->file_path =
+		    copy_options.filename_pattern.CreateFilename(fs, copy_options.file_path, copy_options.file_extension, 0);
 		copy->batch_size = DEFAULT_ROW_GROUP_SIZE;
 		copy->file_size_bytes = optional_idx();
 		copy->rotate = false;

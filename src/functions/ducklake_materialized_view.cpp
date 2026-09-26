@@ -35,9 +35,9 @@
 namespace duckdb {
 
 static idx_t RefreshClockMillis() {
-	return NumericCast<idx_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-	                              std::chrono::steady_clock::now().time_since_epoch())
-	                              .count());
+	return NumericCast<idx_t>(
+	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+	        .count());
 }
 
 static bool GetSnapshotTime(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot, timestamp_tz_t &result) {
@@ -75,7 +75,7 @@ static string SQLIdentifier(const Identifier &input) {
 
 static string MaterializedViewReference(DuckLakeCatalog &catalog, const string &schema_name, const string &view_name) {
 	return StringUtil::Format("%s.%s.%s", SQLIdentifier(catalog.GetName()), SQLIdentifier(schema_name),
-	                         SQLIdentifier(view_name));
+	                          SQLIdentifier(view_name));
 }
 
 static unique_ptr<SelectStatement> ParseSingleSelect(const string &sql, const string &context) {
@@ -111,21 +111,22 @@ static string BuildLogicalDiffSQL(const string &old_relation, const string &cand
 	if (old_relation.empty()) {
 		// A newly-created MV has no previous relation in the catalog yet. Reuse the
 		// candidate only to obtain the output schema, then force the old side empty.
-		old_select = StringUtil::Format("SELECT %s, TRUE AS __present FROM (%s) AS __empty_old WHERE FALSE",
-		                              columns, candidate_sql);
+		old_select = StringUtil::Format("SELECT %s, TRUE AS __present FROM (%s) AS __empty_old WHERE FALSE", columns,
+		                                candidate_sql);
 	} else {
 		old_select = StringUtil::Format("SELECT %s, TRUE AS __present FROM %s", columns, old_relation);
 	}
-	string new_select = StringUtil::Format("SELECT %s, TRUE AS __present FROM (%s) AS __candidate", columns, candidate_sql);
+	string new_select =
+	    StringUtil::Format("SELECT %s, TRUE AS __present FROM (%s) AS __candidate", columns, candidate_sql);
 
 	string join_condition;
 	for (auto key_position : key_positions) {
 		if (!join_condition.empty()) {
 			join_condition += " AND ";
 		}
-		join_condition += StringUtil::Format("__old.%s IS NOT DISTINCT FROM __new.%s",
-		                                    SQLIdentifier(column_names[key_position]),
-		                                    SQLIdentifier(column_names[key_position]));
+		join_condition +=
+		    StringUtil::Format("__old.%s IS NOT DISTINCT FROM __new.%s", SQLIdentifier(column_names[key_position]),
+		                       SQLIdentifier(column_names[key_position]));
 	}
 
 	string changed_condition;
@@ -144,7 +145,7 @@ static string BuildLogicalDiffSQL(const string &old_relation, const string &cand
 			changed_condition += " OR ";
 		}
 		changed_condition += StringUtil::Format("NOT (__old.%s IS NOT DISTINCT FROM __new.%s)",
-		                                      SQLIdentifier(column_names[i]), SQLIdentifier(column_names[i]));
+		                                        SQLIdentifier(column_names[i]), SQLIdentifier(column_names[i]));
 	}
 	if (changed_condition.empty()) {
 		changed_condition = "FALSE";
@@ -238,7 +239,9 @@ static bool ExpressionReferencesOnlyRelation(const ParsedExpression &expr, const
 			return;
 		}
 		auto &column_names = column.ColumnNames();
-		auto qualifier = column_names.size() > 1 ? StringUtil::Lower(column_names[column_names.size() - 2].GetIdentifierName()) : string();
+		auto qualifier = column_names.size() > 1
+		                     ? StringUtil::Lower(column_names[column_names.size() - 2].GetIdentifierName())
+		                     : string();
 		auto expected_alias = StringUtil::Lower(alias);
 		auto expected_table = StringUtil::Lower(table);
 		if ((!expected_alias.empty() && qualifier == expected_alias) || qualifier == expected_table) {
@@ -352,17 +355,13 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		bool left_dim_column = false;
 		bool right_fact_column = false;
 		auto left_is_fact = ExpressionReferencesOnlyRelation(cmp.Left(), fact_ref->alias.GetIdentifierName(),
-		                                                 fact_ref->Table().GetIdentifierName(),
-		                                                  left_fact_column);
+		                                                     fact_ref->Table().GetIdentifierName(), left_fact_column);
 		auto right_is_dim = ExpressionReferencesOnlyRelation(cmp.Right(), dim_ref->alias.GetIdentifierName(),
-		                                                   dim_ref->Table().GetIdentifierName(),
-		                                                   right_dim_column);
+		                                                     dim_ref->Table().GetIdentifierName(), right_dim_column);
 		auto left_is_dim = ExpressionReferencesOnlyRelation(cmp.Left(), dim_ref->alias.GetIdentifierName(),
-		                                                 dim_ref->Table().GetIdentifierName(),
-		                                                 left_dim_column);
+		                                                    dim_ref->Table().GetIdentifierName(), left_dim_column);
 		auto right_is_fact = ExpressionReferencesOnlyRelation(cmp.Right(), fact_ref->alias.GetIdentifierName(),
-		                                                  fact_ref->Table().GetIdentifierName(),
-		                                                   right_fact_column);
+		                                                      fact_ref->Table().GetIdentifierName(), right_fact_column);
 		if (!((left_is_fact && left_fact_column && right_is_dim && right_dim_column) ||
 		      (left_is_dim && left_dim_column && right_is_fact && right_fact_column))) {
 			result.reason = "definition join equality must connect the fact and dimension relations";
@@ -455,7 +454,7 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 				auto &child = argument.GetExpression();
 				bool saw_column = false;
 				if (!ExpressionReferencesOnlyRelation(child, fact_ref->alias.GetIdentifierName(),
-				                                    fact_ref->Table().GetIdentifierName(), saw_column) ||
+				                                      fact_ref->Table().GetIdentifierName(), saw_column) ||
 				    !saw_column) {
 					result.reason = "join-incremental aggregates must reference only fact-side columns";
 					return result;
@@ -474,7 +473,8 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		info.select_index = select_idx;
 		if (fname == "sum") {
 			info.kind = MVAggKind::SUM;
-			info.child_sql = func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
+			info.child_sql =
+			    func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
 		} else if (fname == "count" || fname == "count_star") {
 			if (fname == "count_star" || func->GetArguments().empty() ||
 			    func->GetArguments()[0].GetExpression().GetExpressionClass() == ExpressionClass::STAR) {
@@ -488,15 +488,18 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 			info.kind = MVAggKind::MIN;
 			only_delta_aggs = false;
 			has_minmax = true;
-			info.child_sql = func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
+			info.child_sql =
+			    func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
 		} else if (fname == "max") {
 			info.kind = MVAggKind::MAX;
 			only_delta_aggs = false;
 			has_minmax = true;
-			info.child_sql = func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
+			info.child_sql =
+			    func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
 		} else if (fname == "avg") {
 			info.kind = MVAggKind::AVG;
-			info.child_sql = func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
+			info.child_sql =
+			    func->GetArguments().empty() ? string() : func->GetArguments()[0].GetExpression().ToString();
 		} else {
 			only_delta_aggs = false;
 			continue;
@@ -537,24 +540,29 @@ static MaterializedViewAnalysis AnalyzeMaterializedView(const SelectStatement &s
 		result.key_expr_sql.push_back(std::move(group_sql));
 	}
 
-	result.base_schema = base.GetQualifiedName().Schema().empty() ? "main" : base.GetQualifiedName().Schema().GetIdentifierName();
+	result.base_schema =
+	    base.GetQualifiedName().Schema().empty() ? "main" : base.GetQualifiedName().Schema().GetIdentifierName();
 	result.base_table = base.Table().GetIdentifierName();
 	result.base_alias = base.alias.GetIdentifierName();
 	result.base_catalog_qualified = !base.GetQualifiedName().Catalog().empty();
 	if (result.join_eligible) {
-		result.fact_schema = fact_ref->GetQualifiedName().Schema().empty() ? "main" : fact_ref->GetQualifiedName().Schema().GetIdentifierName();
+		result.fact_schema = fact_ref->GetQualifiedName().Schema().empty()
+		                         ? "main"
+		                         : fact_ref->GetQualifiedName().Schema().GetIdentifierName();
 		result.fact_table = fact_ref->Table().GetIdentifierName();
 		result.fact_alias = fact_ref->alias.GetIdentifierName();
-		result.dim_schema = dim_ref->GetQualifiedName().Schema().empty() ? "main" : dim_ref->GetQualifiedName().Schema().GetIdentifierName();
+		result.dim_schema = dim_ref->GetQualifiedName().Schema().empty()
+		                        ? "main"
+		                        : dim_ref->GetQualifiedName().Schema().GetIdentifierName();
 		result.dim_table = dim_ref->Table().GetIdentifierName();
 		result.dim_alias = dim_ref->alias.GetIdentifierName();
 		result.join_condition_sql = std::move(join_condition_sql);
 		string fact_alias_sql = result.fact_alias.empty() ? "" : " AS " + SQLIdentifier(result.fact_alias);
 		string dim_alias_sql = result.dim_alias.empty() ? "" : " AS " + SQLIdentifier(result.dim_alias);
-		result.from_sql = StringUtil::Format("%s.%s%s JOIN %s.%s%s ON %s", SQLIdentifier(result.fact_schema),
-		                                     SQLIdentifier(result.fact_table), fact_alias_sql,
-		                                     SQLIdentifier(result.dim_schema), SQLIdentifier(result.dim_table),
-		                                     dim_alias_sql, result.join_condition_sql);
+		result.from_sql =
+		    StringUtil::Format("%s.%s%s JOIN %s.%s%s ON %s", SQLIdentifier(result.fact_schema),
+		                       SQLIdentifier(result.fact_table), fact_alias_sql, SQLIdentifier(result.dim_schema),
+		                       SQLIdentifier(result.dim_table), dim_alias_sql, result.join_condition_sql);
 	}
 	for (auto &item : node.select_list) {
 		if (!result.select_list_sql.empty()) {
@@ -687,7 +695,7 @@ FROM {METADATA_CATALOG}.ducklake_data_file
 WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
   AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
 )",
-			                                              table_id.index);
+			                                             table_id.index);
 			auto result = transaction.Query(snapshot, live_files_query);
 			if (result->HasError()) {
 				result->GetErrorObject().Throw("Failed to query materialized view backing files for refresh: ");
@@ -699,8 +707,7 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 				if (path_is_relative) {
 					path = table.DataPath() + path;
 				}
-				transaction.DropFile(table_id, file_id, std::move(path),
-				                     NumericCast<idx_t>(row.GetValue<uint64_t>(3)),
+				transaction.DropFile(table_id, file_id, std::move(path), NumericCast<idx_t>(row.GetValue<uint64_t>(3)),
 				                     NumericCast<idx_t>(row.GetValue<uint64_t>(4)));
 			}
 		}
@@ -779,7 +786,7 @@ public:
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
 		auto &child = planner.CreatePlan(*children[0]);
 		return planner.Make<DuckLakeMVRefresh>(types, table, mv_view_id, std::move(encryption_key), partition_id,
-	                                       std::move(refresh_mode), std::move(logical_diff_sql), child);
+		                                       std::move(refresh_mode), std::move(logical_diff_sql), child);
 	}
 
 	string GetName() const override {
@@ -869,7 +876,8 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 	projection->children.push_back(std::move(mv_op));
 	projection->ResolveOperatorTypes();
 
-	return_names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_mode"), Identifier("rows_refreshed")};
+	return_names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_mode"),
+	                Identifier("rows_refreshed")};
 	return std::move(projection);
 }
 
@@ -888,12 +896,13 @@ static unique_ptr<LogicalOperator> BuildConstantResult(TableIndex bind_index, co
 	auto projection = make_uniq<LogicalProjection>(bind_index, std::move(projections));
 	projection->children.push_back(std::move(dummy));
 	projection->ResolveOperatorTypes();
-	return_names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_mode"), Identifier("rows_refreshed")};
+	return_names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_mode"),
+	                Identifier("rows_refreshed")};
 	return std::move(projection);
 }
 
-static unique_ptr<LogicalOperator> BindDefinitionPlan(Binder &parent_binder, ClientContext &context,
-                                                      const string &sql, const string &error_context) {
+static unique_ptr<LogicalOperator> BindDefinitionPlan(Binder &parent_binder, ClientContext &context, const string &sql,
+                                                      const string &error_context) {
 	auto statement = ParseSingleSelect(sql, error_context);
 	auto binder = Binder::CreateBinder(context, &parent_binder);
 	auto &sql_statement = static_cast<SQLStatement &>(*statement);
@@ -909,8 +918,8 @@ static void CollectBaseTableRefs(QueryNode &node, vector<reference<BaseTableRef>
 static void CollectBaseTableRefs(ParsedExpression &expression, vector<reference<BaseTableRef>> &out) {
 	if (expression.GetExpressionClass() == ExpressionClass::SUBQUERY) {
 		auto &subquery = expression.Cast<SubqueryExpression>();
-				if (subquery.Subquery() && subquery.Subquery()->node) {
-					CollectBaseTableRefs(*subquery.Subquery()->node, out);
+		if (subquery.Subquery() && subquery.Subquery()->node) {
+			CollectBaseTableRefs(*subquery.Subquery()->node, out);
 		}
 	}
 	ParsedExpressionIterator::EnumerateChildren(expression,
@@ -929,8 +938,8 @@ static void CollectBaseTableRefs(QueryNode &node, vector<reference<BaseTableRef>
 
 //! Qualify base table references that live inside the lake with the lake catalog so the statement
 //! binds correctly regardless of the caller's search path. Also collects the dependency table ids.
-static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &ducklake_catalog,
-                                  SelectStatement &statement, vector<TableIndex> &dependencies) {
+static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &ducklake_catalog, SelectStatement &statement,
+                                  vector<TableIndex> &dependencies) {
 	vector<reference<BaseTableRef>> base_refs;
 	if (statement.node) {
 		CollectBaseTableRefs(*statement.node, base_refs);
@@ -946,13 +955,14 @@ static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &duckl
 		}
 		auto base_schema = qualified_name.Schema().empty() ? "main" : qualified_name.Schema().GetIdentifierName();
 		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(qualified_name.Name()));
-		auto dep_entry = ducklake_catalog.GetEntry(context, Identifier(base_schema), lookup, OnEntryNotFound::RETURN_NULL);
+		auto dep_entry =
+		    ducklake_catalog.GetEntry(context, Identifier(base_schema), lookup, OnEntryNotFound::RETURN_NULL);
 		if (!dep_entry) {
 			// 2-part names parse as schema.table - `<lake>.<table>` lands here with the catalog
 			// name in the schema position. Search the lake's schemas for the table instead.
 			for (auto &schema_entry : ducklake_catalog.GetSchemas(context)) {
-				auto entry = ducklake_catalog.GetEntry(context, schema_entry.get().name, lookup,
-			                                               OnEntryNotFound::RETURN_NULL);
+				auto entry =
+				    ducklake_catalog.GetEntry(context, schema_entry.get().name, lookup, OnEntryNotFound::RETURN_NULL);
 				if (entry) {
 					base_schema = schema_entry.get().name.GetIdentifierName();
 					dep_entry = entry;
@@ -1032,11 +1042,13 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	}
 
 	// resolve the target schema + name conflicts
-	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
+	auto &schema_entry =
+	    ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
 	auto &dl_schema = schema_entry.Cast<DuckLakeSchemaEntry>();
 	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_CREATE, dl_schema);
 
-	bool materialized_view_exists = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name) != nullptr;
+	bool materialized_view_exists =
+	    ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name) != nullptr;
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
 		if (staged.schema_id == dl_schema.GetSchemaId() && StringUtil::CIEquals(staged.name, view_name)) {
 			materialized_view_exists = true;
@@ -1046,8 +1058,8 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	if (materialized_view_exists) {
 		throw CatalogException("Materialized view \"%s.%s\" already exists!", schema, view_name);
 	}
-	auto existing_entry = dl_schema.GetEntry(ducklake_catalog.GetCatalogTransaction(context),
-	                                       CatalogType::TABLE_ENTRY, Identifier(view_name));
+	auto existing_entry = dl_schema.GetEntry(ducklake_catalog.GetCatalogTransaction(context), CatalogType::TABLE_ENTRY,
+	                                         Identifier(view_name));
 	if (existing_entry) {
 		throw CatalogException("%s with name \"%s\" already exists!", CatalogTypeToString(existing_entry->type),
 		                       view_name);
@@ -1071,8 +1083,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	auto bound_create = table_binder->BindCreateTableInfo(std::move(create_info));
 
 	auto table_uuid = transaction.GenerateUUID();
-	auto table_data_path =
-	    dl_schema.DataPath() + ducklake_catalog.GeneratePathFromName(table_uuid, backing_table_name);
+	auto table_data_path = dl_schema.DataPath() + ducklake_catalog.GeneratePathFromName(table_uuid, backing_table_name);
 	auto entry = dl_schema.CreateTableExtended(ducklake_catalog.GetCatalogTransaction(context), *bound_create,
 	                                           table_uuid, table_data_path);
 	if (!entry) {
@@ -1087,8 +1098,8 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	mv_info.uuid = std::move(mv_uuid);
 	mv_info.name = view_name;
 	mv_info.dialect = "duckdb";
-	mv_info.sql = DuckLakeUtil::ReplaceSkippingQuotes(stored_sql, ducklake_catalog.GetName() + ".",
-	                                                  "{DUCKLAKE_CATALOG}.");
+	mv_info.sql =
+	    DuckLakeUtil::ReplaceSkippingQuotes(stored_sql, ducklake_catalog.GetName() + ".", "{DUCKLAKE_CATALOG}.");
 	mv_info.backing_table_id = table.GetTableId();
 	mv_info.last_refreshed_snapshot = transaction.GetSnapshot().snapshot_id;
 
@@ -1098,9 +1109,8 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 
 	// write the initial content: definition plan -> files -> refresh operator
 	auto plan = std::move(bound.plan);
-	auto logical_diff_sql = BuildLogicalDiffSQL(
-	    string(),
-	    ResolveMaterializedViewSQL(stored_sql, ducklake_catalog), bound.names, analysis.key_positions);
+	auto logical_diff_sql = BuildLogicalDiffSQL(string(), ResolveMaterializedViewSQL(stored_sql, ducklake_catalog),
+	                                            bound.names, analysis.key_positions);
 	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(plan), table,
 	                        transaction.GetNewMaterializedViews().back().id, schema, view_name, "full",
 	                        logical_diff_sql, return_names);
@@ -1135,8 +1145,8 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 	string base_alias = " AS " + SQLIdentifier(base_relation_name);
 	string base_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(analysis.base_schema),
 	                                     SQLIdentifier(analysis.base_table));
-	string mv_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(mv_schema_name),
-	                                   SQLIdentifier(mv.name));
+	string mv_ref =
+	    StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(mv_schema_name), SQLIdentifier(mv.name));
 
 	string cdc_key_select;
 	for (idx_t i = 0; i < analysis.key_expr_sql.size(); i++) {
@@ -1145,12 +1155,12 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 		}
 		cdc_key_select += StringUtil::Format("%s AS __k%d", analysis.key_expr_sql[i], i);
 	}
-	string ins_call = StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_insertions", SQLQuote(lake_name),
-	                                     SQLQuote(analysis.base_schema), SQLQuote(analysis.base_table), start_snapshot,
-	                                     end_snapshot);
-	string del_call = StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_deletions", SQLQuote(lake_name),
-	                                     SQLQuote(analysis.base_schema), SQLQuote(analysis.base_table), start_snapshot,
-	                                     end_snapshot);
+	string ins_call =
+	    StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_insertions", SQLQuote(lake_name),
+	                       SQLQuote(analysis.base_schema), SQLQuote(analysis.base_table), start_snapshot, end_snapshot);
+	string del_call =
+	    StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_deletions", SQLQuote(lake_name),
+	                       SQLQuote(analysis.base_schema), SQLQuote(analysis.base_table), start_snapshot, end_snapshot);
 	string cdc_where = analysis.where_sql.empty() ? "" : " WHERE " + analysis.where_sql;
 
 	// measure expressions: one column per aggregate (__d0, __d1, ...)
@@ -1211,9 +1221,8 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 		if (!kept_condition.empty()) {
 			kept_condition += " AND ";
 		}
-		kept_condition +=
-		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
-		                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
+		kept_condition += StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                                     SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
 	string kept_select;
 	for (idx_t col = 0; col < bound_column_names.size(); col++) {
@@ -1222,18 +1231,17 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 		}
 		kept_select += StringUtil::Format("__mv.%s", SQLIdentifier(bound_column_names[col]));
 	}
-	string kept = StringUtil::Format(
-	    R"(SELECT %s FROM %s AS __mv WHERE NOT EXISTS (SELECT 1 FROM __mv_changed ck WHERE %s))", kept_select, mv_ref,
-	    kept_condition);
+	string kept =
+	    StringUtil::Format(R"(SELECT %s FROM %s AS __mv WHERE NOT EXISTS (SELECT 1 FROM __mv_changed ck WHERE %s))",
+	                       kept_select, mv_ref, kept_condition);
 
 	string join_condition;
 	for (idx_t i = 0; i < analysis.key_positions.size(); i++) {
 		if (!join_condition.empty()) {
 			join_condition += " AND ";
 		}
-		join_condition +=
-		    StringUtil::Format("d.__k%d IS NOT DISTINCT FROM __mv.%s", i,
-		                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
+		join_condition += StringUtil::Format("d.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                                     SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
 
 	// build updated select list in bound column order
@@ -1253,9 +1261,9 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 			}
 		}
 		if (key_i.IsValid()) {
-			updated_select += StringUtil::Format("coalesce(__mv.%s, d.__k%d) AS %s",
-			                                    SQLIdentifier(bound_column_names[col]), key_i.GetIndex(),
-			                                    SQLIdentifier(bound_column_names[col]));
+			updated_select +=
+			    StringUtil::Format("coalesce(__mv.%s, d.__k%d) AS %s", SQLIdentifier(bound_column_names[col]),
+			                       key_i.GetIndex(), SQLIdentifier(bound_column_names[col]));
 			continue;
 		}
 		if (next_agg >= analysis.aggregates.size()) {
@@ -1268,11 +1276,11 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 			cnt_guard = StringUtil::Format("CAST(coalesce(__mv.%s, 0) + d.__d%d AS %s)",
 			                               SQLIdentifier(bound_column_names[col]), agg_i, type_sql);
 			updated_select += StringUtil::Format("CAST(coalesce(__mv.%s, 0) + d.__d%d AS %s) AS %s",
-			                                    SQLIdentifier(bound_column_names[col]), agg_i, type_sql,
-			                                    SQLIdentifier(bound_column_names[col]));
+			                                     SQLIdentifier(bound_column_names[col]), agg_i, type_sql,
+			                                     SQLIdentifier(bound_column_names[col]));
 		} else if (agg.kind == MVAggKind::SUM) {
-			auto candidate = StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
-			                                    SQLIdentifier(bound_column_names[col]), agg_i);
+			auto candidate =
+			    StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d", SQLIdentifier(bound_column_names[col]), agg_i);
 			optional_idx count_agg_i;
 			for (idx_t candidate_i = 0; candidate_i < analysis.aggregates.size(); candidate_i++) {
 				auto &count_agg = analysis.aggregates[candidate_i];
@@ -1285,14 +1293,13 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 				throw InternalException("Delta SUM is missing matching COUNT argument state");
 			}
 			auto &count_agg = analysis.aggregates[count_agg_i.GetIndex()];
-			auto non_null_count = StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
-			                                             SQLIdentifier(bound_column_names[count_agg.select_index]),
-			                                             count_agg_i.GetIndex());
-			updated_select += StringUtil::Format(
-			    "CASE WHEN (%s) > 0 "
-			    "THEN CAST(%s AS %s) ELSE CAST(NULL AS %s) END AS %s",
-			    non_null_count, candidate, type_sql, type_sql,
-			    SQLIdentifier(bound_column_names[col]));
+			auto non_null_count =
+			    StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
+			                       SQLIdentifier(bound_column_names[count_agg.select_index]), count_agg_i.GetIndex());
+			updated_select += StringUtil::Format("CASE WHEN (%s) > 0 "
+			                                     "THEN CAST(%s AS %s) ELSE CAST(NULL AS %s) END AS %s",
+			                                     non_null_count, candidate, type_sql, type_sql,
+			                                     SQLIdentifier(bound_column_names[col]));
 		} else if (agg.kind == MVAggKind::MIN || agg.kind == MVAggKind::MAX) {
 			auto fn = agg.kind == MVAggKind::MIN ? "LEAST" : "GREATEST";
 			updated_select += StringUtil::Format(
@@ -1319,19 +1326,19 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 			}
 			auto &sum_agg = analysis.aggregates[sum_agg_i.GetIndex()];
 			auto &count_agg = analysis.aggregates[count_agg_i.GetIndex()];
-			auto sum_value = StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
-			                                        SQLIdentifier(bound_column_names[sum_agg.select_index]),
-			                                        sum_agg_i.GetIndex());
-			auto count_value = StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
-			                                          SQLIdentifier(bound_column_names[count_agg.select_index]),
-			                                          count_agg_i.GetIndex());
+			auto sum_value =
+			    StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
+			                       SQLIdentifier(bound_column_names[sum_agg.select_index]), sum_agg_i.GetIndex());
+			auto count_value =
+			    StringUtil::Format("coalesce(__mv.%s, 0) + d.__d%d",
+			                       SQLIdentifier(bound_column_names[count_agg.select_index]), count_agg_i.GetIndex());
 			updated_select += StringUtil::Format(
 			    "CASE WHEN (%s) > 0 THEN CAST((%s) / (%s) AS %s) ELSE CAST(NULL AS %s) END AS %s", count_value,
 			    sum_value, count_value, type_sql, type_sql, SQLIdentifier(bound_column_names[col]));
 		} else {
 			updated_select += StringUtil::Format("CAST(coalesce(__mv.%s, 0) + d.__d%d AS %s) AS %s",
-			                                    SQLIdentifier(bound_column_names[col]), agg_i, type_sql,
-			                                    SQLIdentifier(bound_column_names[col]));
+			                                     SQLIdentifier(bound_column_names[col]), agg_i, type_sql,
+			                                     SQLIdentifier(bound_column_names[col]));
 		}
 	}
 	if (cnt_guard.empty()) {
@@ -1381,10 +1388,10 @@ __deltas AS (
 )
 SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 )",
-	                          cte_columns, cdc_key_select, ins_call, base_alias, cdc_where, cdc_key_select, del_call,
-	                          base_alias, cdc_where, cdc_key_select, ins_measures, ins_call, base_alias, cdc_where,
-	                          cdc_key_select, del_measures, del_call, base_alias, cdc_where, cte_columns, delta_aggs,
-	                          cte_columns, kept, updated);
+		                          cte_columns, cdc_key_select, ins_call, base_alias, cdc_where, cdc_key_select,
+		                          del_call, base_alias, cdc_where, cdc_key_select, ins_measures, ins_call, base_alias,
+		                          cdc_where, cdc_key_select, del_measures, del_call, base_alias, cdc_where, cte_columns,
+		                          delta_aggs, cte_columns, kept, updated);
 	}
 
 	string invalid_key_join;
@@ -1393,7 +1400,7 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 			invalid_key_join += " AND ";
 		}
 		invalid_key_join += StringUtil::Format("c.__k%d IS NOT DISTINCT FROM __mv.%s", i,
-		                                      SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
+		                                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
 	string extremum_deleted;
 	for (idx_t a = 0; a < analysis.aggregates.size(); a++) {
@@ -1405,7 +1412,7 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 			extremum_deleted += " OR ";
 		}
 		extremum_deleted += StringUtil::Format("c.__m%d IS NOT DISTINCT FROM __mv.%s", a,
-		                                      SQLIdentifier(bound_column_names[agg.select_index]));
+		                                       SQLIdentifier(bound_column_names[agg.select_index]));
 	}
 	string invalid_columns;
 	string invalid_select;
@@ -1463,8 +1470,8 @@ static string BuildIncrementalRefreshSQL(DuckLakeCatalog &catalog, const DuckLak
 	string base_alias = " AS " + SQLIdentifier(base_relation_name);
 	string base_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(analysis.base_schema),
 	                                     SQLIdentifier(analysis.base_table));
-	string mv_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(mv_schema_name),
-	                                     SQLIdentifier(mv.name));
+	string mv_ref =
+	    StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(mv_schema_name), SQLIdentifier(mv.name));
 	// key expressions applied over the CDC output (columns of the base table)
 	string cdc_select_ins, cdc_select_del;
 	for (idx_t i = 0; i < analysis.key_expr_sql.size(); i++) {
@@ -1475,12 +1482,12 @@ static string BuildIncrementalRefreshSQL(DuckLakeCatalog &catalog, const DuckLak
 		cdc_select_ins += StringUtil::Format("%s AS __k%d", analysis.key_expr_sql[i], i);
 		cdc_select_del += analysis.key_expr_sql[i];
 	}
-	string ins_call = StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_insertions", SQLQuote(lake_name),
-	                                     SQLQuote(analysis.base_schema), SQLQuote(analysis.base_table), start_snapshot,
-	                                     end_snapshot);
-	string del_call = StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_deletions", SQLQuote(lake_name),
-	                                     SQLQuote(analysis.base_schema), SQLQuote(analysis.base_table), start_snapshot,
-	                                     end_snapshot);
+	string ins_call =
+	    StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_insertions", SQLQuote(lake_name),
+	                       SQLQuote(analysis.base_schema), SQLQuote(analysis.base_table), start_snapshot, end_snapshot);
+	string del_call =
+	    StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_deletions", SQLQuote(lake_name),
+	                       SQLQuote(analysis.base_schema), SQLQuote(analysis.base_table), start_snapshot, end_snapshot);
 
 	// kept part: backing rows whose keys are NOT in the changed set
 	string kept_condition;
@@ -1488,9 +1495,8 @@ static string BuildIncrementalRefreshSQL(DuckLakeCatalog &catalog, const DuckLak
 		if (!kept_condition.empty()) {
 			kept_condition += " AND ";
 		}
-		kept_condition +=
-		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
-		                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
+		kept_condition += StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                                     SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
 	string kept = StringUtil::Format(
 	    R"(
@@ -1513,11 +1519,11 @@ SELECT * FROM %s AS __mv WHERE NOT EXISTS (SELECT 1 FROM __mv_changed ck WHERE %
 	} else {
 		where_clause = " WHERE EXISTS (SELECT 1 FROM __mv_changed ck WHERE " + rebuild_condition + ")";
 	}
-	string rebuild = StringUtil::Format(R"(
+	string rebuild =
+	    StringUtil::Format(R"(
 SELECT %s FROM %s%s%s GROUP BY %s
 )",
-	                                     analysis.select_list_sql, base_ref, base_alias, where_clause,
-	                                     analysis.group_by_sql);
+	                       analysis.select_list_sql, base_ref, base_alias, where_clause, analysis.group_by_sql);
 
 	// key column list of the CTE
 	string cte_columns;
@@ -1553,8 +1559,8 @@ static string BuildJoinIncrementalRefreshSQL(DuckLakeCatalog &catalog, const Duc
 	                                     SQLIdentifier(analysis.fact_table));
 	string dim_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(analysis.dim_schema),
 	                                    SQLIdentifier(analysis.dim_table));
-	string mv_ref = StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(mv_schema_name),
-	                                   SQLIdentifier(mv.name));
+	string mv_ref =
+	    StringUtil::Format("%s.%s.%s", SQLIdentifier(lake_name), SQLIdentifier(mv_schema_name), SQLIdentifier(mv.name));
 	string join_from = StringUtil::Format("%s%s JOIN %s%s ON %s", fact_ref, fact_alias, dim_ref, dim_alias,
 	                                      analysis.join_condition_sql);
 
@@ -1568,25 +1574,24 @@ static string BuildJoinIncrementalRefreshSQL(DuckLakeCatalog &catalog, const Duc
 		cdc_select_ins += StringUtil::Format("%s AS __k%d", analysis.key_expr_sql[i], i);
 		cdc_select_del += analysis.key_expr_sql[i];
 	}
-	string ins_call = StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_insertions", SQLQuote(lake_name),
-	                                     SQLQuote(analysis.fact_schema), SQLQuote(analysis.fact_table), start_snapshot,
-	                                     end_snapshot);
-	string del_call = StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_deletions", SQLQuote(lake_name),
-	                                     SQLQuote(analysis.fact_schema), SQLQuote(analysis.fact_table), start_snapshot,
-	                                     end_snapshot);
+	string ins_call =
+	    StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_insertions", SQLQuote(lake_name),
+	                       SQLQuote(analysis.fact_schema), SQLQuote(analysis.fact_table), start_snapshot, end_snapshot);
+	string del_call =
+	    StringUtil::Format("%s(%s, %s, %s, %d, %d)", "ducklake_table_deletions", SQLQuote(lake_name),
+	                       SQLQuote(analysis.fact_schema), SQLQuote(analysis.fact_table), start_snapshot, end_snapshot);
 
 	string kept_condition;
 	for (idx_t i = 0; i < analysis.key_positions.size(); i++) {
 		if (!kept_condition.empty()) {
 			kept_condition += " AND ";
 		}
-		kept_condition +=
-		    StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
-		                       SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
+		kept_condition += StringUtil::Format("ck.__k%d IS NOT DISTINCT FROM __mv.%s", i,
+		                                     SQLIdentifier(bound_column_names[analysis.key_positions[i]]));
 	}
-	string kept = StringUtil::Format(
-	    R"(SELECT * FROM %s AS __mv WHERE NOT EXISTS (SELECT 1 FROM __mv_changed ck WHERE %s))", mv_ref,
-	    kept_condition);
+	string kept =
+	    StringUtil::Format(R"(SELECT * FROM %s AS __mv WHERE NOT EXISTS (SELECT 1 FROM __mv_changed ck WHERE %s))",
+	                       mv_ref, kept_condition);
 
 	string rebuild_condition;
 	for (idx_t i = 0; i < analysis.key_expr_sql.size(); i++) {
@@ -1627,7 +1632,8 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 }
 
 static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &context, TableFunctionBindInput &input,
-                                                               TableIndex bind_index, vector<Identifier> &return_names) {
+                                                               TableIndex bind_index,
+                                                               vector<Identifier> &return_names) {
 	input.binder->SetAlwaysRequireRebind();
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
@@ -1649,9 +1655,10 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
 	DuckLakeMaterializedViewInfo staged_copy;
 	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
-	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
+	auto &schema_entry =
+	    ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
 	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_UPDATE,
-	                                            schema_entry.Cast<DuckLakeSchemaEntry>());
+	                                             schema_entry.Cast<DuckLakeSchemaEntry>());
 	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
 		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
@@ -1745,10 +1752,10 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 				auto bound = binder->Bind(sql_statement);
 				auto join_sql = BuildJoinIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 				                                               last_refreshed + 1, current_snapshot);
-					auto join_plan = BindDefinitionPlan(*input.binder, context, join_sql, "join-incremental refresh");
-				auto logical_diff_sql = BuildLogicalDiffSQL(
-				    MaterializedViewReference(ducklake_catalog, schema, view_name), join_sql, bound.names,
-				    analysis.key_positions);
+				auto join_plan = BindDefinitionPlan(*input.binder, context, join_sql, "join-incremental refresh");
+				auto logical_diff_sql =
+				    BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name), join_sql,
+				                        bound.names, analysis.key_positions);
 				return BuildMVWritePlan(context, *input.binder, bind_index, std::move(join_plan), table, mv->id, schema,
 				                        view_name, "join_incremental", logical_diff_sql, return_names);
 			}
@@ -1756,7 +1763,8 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	}
 
 	// incremental when eligible, single lake dependency, and no uncommitted base-table changes
-	bool incremental = !force_full_refresh && analysis.eligible && !analysis.join_eligible && mv->dependencies.size() == 1;
+	bool incremental =
+	    !force_full_refresh && analysis.eligible && !analysis.join_eligible && mv->dependencies.size() == 1;
 	if (incremental) {
 		auto &dep = mv->dependencies[0];
 		if (dep.IsTransactionLocal() || transaction.HasAnyLocalChanges(dep)) {
@@ -1774,18 +1782,16 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 			auto delta_sql = BuildDeltaRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names, bound.types,
 			                                      last_refreshed + 1, current_snapshot);
 			auto delta_plan = BindDefinitionPlan(*input.binder, context, delta_sql, "delta refresh");
-			auto logical_diff_sql = BuildLogicalDiffSQL(
-			    MaterializedViewReference(ducklake_catalog, schema, view_name), delta_sql, bound.names,
-			    analysis.key_positions);
+			auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
+			                                            delta_sql, bound.names, analysis.key_positions);
 			return BuildMVWritePlan(context, *input.binder, bind_index, std::move(delta_plan), table, mv->id, schema,
 			                        view_name, "delta", logical_diff_sql, return_names);
 		}
 		auto incremental_sql = BuildIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 		                                                  last_refreshed + 1, current_snapshot);
 		auto incremental_plan = BindDefinitionPlan(*input.binder, context, incremental_sql, "incremental refresh");
-		auto logical_diff_sql = BuildLogicalDiffSQL(
-		    MaterializedViewReference(ducklake_catalog, schema, view_name), incremental_sql, bound.names,
-		    analysis.key_positions);
+		auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
+		                                            incremental_sql, bound.names, analysis.key_positions);
 		return BuildMVWritePlan(context, *input.binder, bind_index, std::move(incremental_plan), table, mv->id, schema,
 		                        view_name, "incremental", logical_diff_sql, return_names);
 	}
@@ -1793,11 +1799,10 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	auto binder = Binder::CreateBinder(context, input.binder);
 	auto &sql_statement = static_cast<SQLStatement &>(*parsed_definition);
 	auto bound = binder->Bind(sql_statement);
-	auto logical_diff_sql = BuildLogicalDiffSQL(
-	    MaterializedViewReference(ducklake_catalog, schema, view_name), resolved_sql, bound.names,
-	    analysis.key_positions);
-	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), table, mv->id, schema,
-	                        view_name, "full", logical_diff_sql, return_names);
+	auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
+	                                            resolved_sql, bound.names, analysis.key_positions);
+	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), table, mv->id, schema, view_name,
+	                        "full", logical_diff_sql, return_names);
 }
 
 DuckLakeRefreshMaterializedViewFunction::DuckLakeRefreshMaterializedViewFunction()
@@ -1828,9 +1833,10 @@ static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &conte
 	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
 	DuckLakeMaterializedViewInfo staged_copy;
 	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
-	auto &schema_entry = ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
+	auto &schema_entry =
+	    ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
 	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_DROP,
-	                                            schema_entry.Cast<DuckLakeSchemaEntry>());
+	                                             schema_entry.Cast<DuckLakeSchemaEntry>());
 	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	for (auto &staged : transaction.GetNewMaterializedViews()) {
 		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
@@ -1897,15 +1903,20 @@ static unique_ptr<FunctionData> MaterializedViewsBind(ClientContext &context, Ta
 	}
 
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
-	                LogicalType::BIGINT,   LogicalType::BOOLEAN, LogicalType::BIGINT,  LogicalType::VARCHAR};
-	names = {Identifier("schema_name"), Identifier("view_name"), Identifier("sql"), Identifier("view_id"),
-	         Identifier("backing_table_id"), Identifier("is_stale"), Identifier("last_refreshed_snapshot"),
+	                LogicalType::BIGINT,  LogicalType::BOOLEAN, LogicalType::BIGINT,  LogicalType::VARCHAR};
+	names = {Identifier("schema_name"),
+	         Identifier("view_name"),
+	         Identifier("sql"),
+	         Identifier("view_id"),
+	         Identifier("backing_table_id"),
+	         Identifier("is_stale"),
+	         Identifier("last_refreshed_snapshot"),
 	         Identifier("refresh_mode")};
 	for (auto &mv : entries) {
 		string schema_name = "main";
 		// resolve the schema name for the view at the transaction snapshot
-		for (auto &schema_entry : ducklake_catalog.GetSchemaForSnapshot(transaction, transaction.GetSnapshot())
-		                               .GetSchemaIdMap()) {
+		for (auto &schema_entry :
+		     ducklake_catalog.GetSchemaForSnapshot(transaction, transaction.GetSnapshot()).GetSchemaIdMap()) {
 			if (schema_entry.first == mv.schema_id) {
 				schema_name = schema_entry.second.get().name.GetIdentifierName();
 				break;
@@ -1938,21 +1949,21 @@ DuckLakeMaterializedViewsFunction::DuckLakeMaterializedViewsFunction()
 }
 
 static unique_ptr<FunctionData> MaterializedViewRefreshHistoryBind(ClientContext &context,
-                                                                    TableFunctionBindInput &input,
-                                                                    vector<LogicalType> &return_types,
-                                                                    vector<Identifier> &names) {
+                                                                   TableFunctionBindInput &input,
+                                                                   vector<LogicalType> &return_types,
+                                                                   vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 	auto result = make_uniq<MetadataBindData>();
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::TIMESTAMP,
-	                LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
-	                LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
+	return_types = {LogicalType::VARCHAR,   LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::TIMESTAMP,
+	                LogicalType::VARCHAR,   LogicalType::BIGINT,  LogicalType::BIGINT, LogicalType::BIGINT,
+	                LogicalType::BIGINT,    LogicalType::BIGINT,  LogicalType::BIGINT, LogicalType::BIGINT,
 	                LogicalType::TIMESTAMP, LogicalType::BIGINT};
-	names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_snapshot"),
-	         Identifier("refresh_time"), Identifier("refresh_mode"), Identifier("rows_refreshed"),
-	         Identifier("refresh_duration_ms"), Identifier("rows_written"), Identifier("rows_added"),
-	         Identifier("rows_removed"), Identifier("rows_changed"), Identifier("source_snapshot"),
+	names = {Identifier("schema_name"),          Identifier("view_name"),    Identifier("refresh_snapshot"),
+	         Identifier("refresh_time"),         Identifier("refresh_mode"), Identifier("rows_refreshed"),
+	         Identifier("refresh_duration_ms"),  Identifier("rows_written"), Identifier("rows_added"),
+	         Identifier("rows_removed"),         Identifier("rows_changed"), Identifier("source_snapshot"),
 	         Identifier("source_snapshot_time"), Identifier("lag_ms")};
 
 	string query = R"(

@@ -185,8 +185,8 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 		if (!deletes_per_file.empty()) {
 			auto &fs = FileSystem::GetFileSystem(context);
 			vector<DuckLakeDeleteFile> delete_files;
-			auto data_file_format = global_state.table.catalog.Cast<DuckLakeCatalog>().GetDataFileFormat(
-			    context, global_state.table);
+			auto data_file_format =
+			    global_state.table.catalog.Cast<DuckLakeCatalog>().GetDataFileFormat(context, global_state.table);
 
 			auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
 			auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
@@ -342,9 +342,9 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	for (auto &name : copy_options.names) {
 		scan_names.emplace_back(name);
 	}
-	auto ducklake_scan = make_uniq<LogicalGet>(table_idx, std::move(scan_function), std::move(bind_data),
-	                                           copy_options.expected_types, std::move(scan_names),
-	                                           std::move(virtual_columns));
+	auto ducklake_scan =
+	    make_uniq<LogicalGet>(table_idx, std::move(scan_function), std::move(bind_data), copy_options.expected_types,
+	                          std::move(scan_names), std::move(virtual_columns));
 	auto &column_ids = ducklake_scan->GetMutableColumnIds();
 	for (idx_t i = 0; i < columns.PhysicalColumnCount(); i++) {
 		column_ids.emplace_back(i);
@@ -417,8 +417,7 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	// Keep the single large batch when no row_group_size is configured: per-chunk
 	// flushing here would let target_file_size rotation split the flush, which
 	// fragments delete files that must stay consolidated per snapshot.
-	copy->batch_size = configured_batch_size.IsValid() ? configured_batch_size
-	                                                   : optional_idx(DEFAULT_ROW_GROUP_SIZE);
+	copy->batch_size = configured_batch_size.IsValid() ? configured_batch_size : optional_idx(DEFAULT_ROW_GROUP_SIZE);
 	copy->batch_size_bytes = configured_batch_size_bytes;
 	copy->rotate = copy_options.rotate;
 	copy->return_type = copy_options.return_type;
@@ -603,8 +602,8 @@ LEFT JOIN (
 		                                              encryption_key,
 		                                              file_info.file_path,
 		                                              deletions_to_write,
-			                                              DeleteFileSource::FLUSH,
-			                                              data_file_format};
+		                                              DeleteFileSource::FLUSH,
+		                                              data_file_format};
 		auto delete_file = DuckLakeDeleteFileWriter::Write(context, file_input, use_deletion_vectors);
 		delete_file.data_file_id = DataFileIndex(file_id);
 		delete_file.max_snapshot = file_info.max_snapshot;
