@@ -1,0 +1,139 @@
+# name: test/sql/compaction/expire_snapshots_protected.test
+# description: a protected snapshot pins the data file it needs against expiry and orphan cleanup
+# group: [compaction]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/protect_files', METADATA_CATALOG 'metadata', DATA_INLINING_ROW_LIMIT 0)
+
+# snapshot 1
+statement ok
+CREATE TABLE ducklake.tbl (i INTEGER)
+
+# snapshot 2 - the snapshot we hold, and the one whose file we want pinned
+statement ok
+INSERT INTO ducklake.tbl SELECT * FROM range(1,3000)
+
+query I
+SELECT snapshot_id FROM ducklake_protect_snapshots('ducklake', versions => [2])
+----
+2
+
+# snapshot 3
+statement ok
+INSERT INTO ducklake.tbl SELECT * FROM range(3000,6000)
+
+# snapshot 4
+statement ok
+DELETE FROM ducklake.tbl WHERE i < 5000
+
+# snapshot 5: rewriting supersedes the file from snapshot 2 without removing it, since
+# time travel to snapshot 2 still needs it
+statement ok
+CALL ducklake_rewrite_data_files('ducklake', 'tbl', delete_threshold => 0.5)
+
+# snapshot 6
+statement ok
+INSERT INTO ducklake.tbl SELECT * FROM range(6000,7000)
+
+# ---------------------------------------------------------------------------
+# Expiry keeps the file the held snapshot needs
+# ---------------------------------------------------------------------------
+
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+
+# 2 is held and 6 is the newest, so both survive the full expiry
+query II
+SELECT snapshot_id, protected FROM ducklake.snapshots() ORDER BY snapshot_id
+----
+2	true
+6	false
+
+# the held snapshot is still readable, which means its file is still there
+query I
+SELECT sum(i) FROM ducklake.tbl AT (VERSION => 2)
+----
+4498500
+
+# the file that only expired snapshot 3 referenced is gone; the pinned one is not
+query I
+SELECT count(*) FROM metadata.ducklake_data_file
+----
+3
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+query I
+SELECT count(*) FROM GLOB('{DATA_PATH}/protect_files/main/tbl/*')
+----
+3
+
+# ---------------------------------------------------------------------------
+# Releasing the hold lets the pinned file be collected
+# ---------------------------------------------------------------------------
+
+query I
+SELECT snapshot_id FROM ducklake_protect_snapshots('ducklake', versions => [2], protect => false)
+----
+2
+
+statement ok
+CALL ducklake_expire_snapshots('ducklake', versions => [2])
+
+# with no snapshot left in its [begin, end) range, the file is finally unreachable
+query I
+SELECT count(*) FROM metadata.ducklake_data_file
+----
+2
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+query I
+SELECT count(*) FROM GLOB('{DATA_PATH}/protect_files/main/tbl/*')
+----
+2
+
+# the live data was never at risk
+query I
+SELECT sum(i) FROM ducklake.tbl
+----
+11999000
+
+# ---------------------------------------------------------------------------
+# CHECKPOINT-driven expiry respects protection
+# ---------------------------------------------------------------------------
+
+# snapshot 7, so that 6 stops being the newest
+statement ok
+INSERT INTO ducklake.tbl SELECT * FROM range(7000,8000)
+
+query I
+SELECT snapshot_id FROM ducklake_protect_snapshots('ducklake', versions => [6])
+----
+6
+
+statement ok
+CALL ducklake_set_option('ducklake', 'expire_older_than', '0 seconds')
+
+# CHECKPOINT runs ducklake_expire_snapshots with that default, asking for a full expiry.
+# Its own compaction steps add a snapshot, hence 8.
+statement ok
+CHECKPOINT ducklake
+
+# snapshot 6 survived because it is held
+query II
+SELECT snapshot_id, protected FROM ducklake.snapshots() ORDER BY snapshot_id
+----
+6	true
+7	false
+8	false

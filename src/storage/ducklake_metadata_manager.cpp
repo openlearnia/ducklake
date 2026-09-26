@@ -35,6 +35,7 @@
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "storage/ducklake_partition_data.hpp"
+#include "storage/ducklake_rbac.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
@@ -277,6 +278,11 @@ string DuckLakeMetadataManager::GetCreateTableStatements() {
 	    "schema_version BIGINT, next_catalog_id BIGINT, next_file_id BIGINT);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_snapshot_changes(snapshot_id BIGINT PRIMARY KEY, "
 	                     "changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);");
+	// The primary key is deliberately not named snapshot_id: GetAllSnapshots LEFT JOINs this
+	// table, and callers' filter strings plus the ORDER BY reference snapshot_id unqualified.
+	statements.push_back(
+	    "CREATE TABLE {METADATA_CATALOG}.ducklake_snapshot_protection(protected_snapshot_id BIGINT PRIMARY KEY, "
+	    "protected_time TIMESTAMPTZ, author VARCHAR);");
 	statements.push_back(
 	    "CREATE TABLE {METADATA_CATALOG}.ducklake_schema(schema_id BIGINT PRIMARY KEY, schema_uuid UUID, "
 	    "begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);");
@@ -297,8 +303,10 @@ string DuckLakeMetadataManager::GetCreateTableStatements() {
 	    "BIGINT, variant_path VARCHAR, shredded_type VARCHAR, column_size_bytes BIGINT, value_count BIGINT, null_count "
 	    "BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);");
 	statements.push_back(GetDeleteFileTableStatement());
-	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_role(role_id BIGINT PRIMARY KEY, role_name VARCHAR UNIQUE NOT NULL);");
-	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRIMARY KEY, grantee VARCHAR NOT NULL, schema_id BIGINT, table_id BIGINT, privileges BIGINT NOT NULL);");
+	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_role(role_id BIGINT PRIMARY KEY, role_name VARCHAR "
+	                     "UNIQUE NOT NULL);");
+	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRIMARY KEY, grantee VARCHAR "
+	                     "NOT NULL, schema_id BIGINT, table_id BIGINT, privileges BIGINT NOT NULL);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_column(column_id BIGINT, begin_snapshot BIGINT, "
 	                     "end_snapshot BIGINT, table_id BIGINT, column_order BIGINT, column_name VARCHAR, column_type "
 	                     "VARCHAR, initial_default VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, "
@@ -577,6 +585,7 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev1' WHERE key = '
 	MigrateInlinedColumnNames();
 	ExecuteMigration(migrate_query, allow_failures, "1.0", "1.1-dev1");
 	EnsureProcedureSecurityColumn();
+	EnsureSnapshotProtectionTable();
 }
 
 void DuckLakeMetadataManager::EnsureProcedureSecurityColumn() {
@@ -5665,15 +5674,42 @@ static timestamp_tz_t GetTimestampTZFromRow(ClientContext &context, const T &row
 	return val.CastAs(context, LogicalType::TIMESTAMP_TZ).template GetValue<timestamp_tz_t>();
 }
 
-vector<DuckLakeSnapshotInfo> DuckLakeMetadataManager::GetAllSnapshots(const string &filter) {
+vector<DuckLakeSnapshotInfo> DuckLakeMetadataManager::GetAllSnapshots(const string &filter, bool exclude_protected) {
+	string protection_join;
+	string protection_filter;
+	if (EnsureSnapshotProtectionTable()) {
+		protection_join = StringUtil::Format(R"(
+LEFT JOIN {METADATA_CATALOG}.ducklake_snapshot_protection
+       ON {METADATA_CATALOG}.ducklake_snapshot_protection.protected_snapshot_id =
+          {METADATA_CATALOG}.ducklake_snapshot.snapshot_id
+)");
+		if (exclude_protected) {
+			protection_filter = "protected_snapshot_id IS NULL";
+		}
+	} else if (exclude_protected) {
+		// no protection table means no protected snapshot, so there is nothing to exclude
+		return GetAllSnapshots(filter, false);
+	}
+	string filter_clause;
+	if (!filter.empty()) {
+		filter_clause = filter;
+	}
+	if (!protection_filter.empty()) {
+		filter_clause += filter_clause.empty() ? protection_filter : " AND " + protection_filter;
+	}
 	auto res = Query(StringUtil::Format(R"(
-SELECT snapshot_id, snapshot_time, schema_version, next_file_id, changes_made, author, commit_message, commit_extra_info
+SELECT snapshot_id, snapshot_time, schema_version, next_file_id, changes_made,
+       {METADATA_CATALOG}.ducklake_snapshot_changes.author,
+       {METADATA_CATALOG}.ducklake_snapshot_changes.commit_message,
+       {METADATA_CATALOG}.ducklake_snapshot_changes.commit_extra_info,
+       %s AS is_protected
 FROM {METADATA_CATALOG}.ducklake_snapshot
-LEFT JOIN {METADATA_CATALOG}.ducklake_snapshot_changes USING (snapshot_id)
+LEFT JOIN {METADATA_CATALOG}.ducklake_snapshot_changes USING (snapshot_id)%s
 %s %s
 ORDER BY snapshot_id
 )",
-	                                    filter.empty() ? "" : "WHERE", filter));
+	                                    protection_join.empty() ? "false" : "protected_snapshot_id IS NOT NULL",
+	                                    protection_join, filter_clause.empty() ? "" : "WHERE", filter_clause));
 	if (res->HasError()) {
 		res->GetErrorObject().Throw("Failed to get snapshot information from DuckLake: ");
 	}
@@ -5690,6 +5726,7 @@ ORDER BY snapshot_id
 		snapshot_info.author = row.GetChunk().GetValue(5, row.GetRowInChunk());
 		snapshot_info.commit_message = row.GetChunk().GetValue(6, row.GetRowInChunk());
 		snapshot_info.commit_extra_info = row.GetChunk().GetValue(7, row.GetRowInChunk());
+		snapshot_info.is_protected = !row.IsNull(8) && row.GetValue<bool>(8);
 		snapshots.push_back(std::move(snapshot_info));
 	}
 	return snapshots;
@@ -5710,6 +5747,81 @@ unordered_set<string> DuckLakeMetadataManager::GetExternalFilePaths() {
 		paths.insert(StringUtil::Replace(row.GetValue<string>(0), "\\", "/"));
 	}
 	return paths;
+}
+
+bool DuckLakeMetadataManager::MetadataIsReadOnly() {
+	auto &metadata_context = *transaction.GetConnection().context;
+	auto metadata_db = DatabaseManager::Get(metadata_context)
+	                       .GetDatabase(metadata_context, Identifier(transaction.GetCatalog().MetadataDatabaseName()));
+	if (!metadata_db) {
+		return false;
+	}
+	return metadata_db->IsReadOnly();
+}
+
+bool DuckLakeMetadataManager::EnsureSnapshotProtectionTable() {
+	if (snapshot_protection_known) {
+		return snapshot_protection_available;
+	}
+	snapshot_protection_known = true;
+	// A read-only metadata database can neither be given the table nor safely probed for it:
+	// the failed DDL would abort the transaction. Protection still holds on disk, it is simply
+	// not reported, and no read-only session can add or drop a hold anyway.
+	if (MetadataIsReadOnly()) {
+		return false;
+	}
+	auto create_res = Execute(
+	    StringUtil::Format("CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_snapshot_protection("
+	                       "protected_snapshot_id BIGINT PRIMARY KEY, protected_time TIMESTAMPTZ, author VARCHAR);"));
+	if (create_res->HasError()) {
+		create_res->GetErrorObject().Throw("Failed to create DuckLake snapshot-protection table: ");
+	}
+	snapshot_protection_available = true;
+	return true;
+}
+
+void DuckLakeMetadataManager::SetSnapshotProtection(const vector<idx_t> &snapshot_ids, bool protect) {
+	if (snapshot_ids.empty()) {
+		return;
+	}
+	if (!EnsureSnapshotProtectionTable()) {
+		throw InvalidInputException("Cannot record snapshot protection: the DuckLake metadata catalog is read-only.");
+	}
+	string id_list;
+	string values_list;
+	for (auto &snapshot_id : snapshot_ids) {
+		if (!id_list.empty()) {
+			id_list += ", ";
+			values_list += ", ";
+		}
+		id_list += to_string(snapshot_id);
+		values_list += "(" + to_string(snapshot_id) + ")";
+	}
+	auto context = transaction.context.lock();
+	auto author = DuckLakeRbac::GetActiveRole(*context);
+	string query;
+	if (protect) {
+		// Re-protecting an already-protected snapshot is a no-op rather than a PK violation.
+		// Ids with no matching snapshot row are dropped, so a hold can never outlive its snapshot.
+		query = StringUtil::Format(R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_protection(protected_snapshot_id, protected_time, author)
+SELECT id, NOW(), %s FROM (VALUES %s) t(id)
+WHERE id IN (SELECT snapshot_id FROM {METADATA_CATALOG}.ducklake_snapshot)
+ON CONFLICT DO NOTHING;
+)",
+		                           SQLString(author), values_list);
+	} else {
+		query = StringUtil::Format(R"(
+DELETE FROM {METADATA_CATALOG}.ducklake_snapshot_protection
+WHERE protected_snapshot_id IN (%s);
+)",
+		                           id_list);
+	}
+	auto result = Execute(query);
+	if (result->HasError()) {
+		result->GetErrorObject().Throw(protect ? "Failed to protect DuckLake snapshots: "
+		                                       : "Failed to release protection on DuckLake snapshots: ");
+	}
 }
 
 vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetOldFilesForCleanup(const string &filter) {
@@ -6015,13 +6127,20 @@ void DuckLakeMetadataManager::DeleteSnapshots(const vector<DuckLakeSnapshotInfo>
 		stats_table_ids.push_back(TableIndex(row.GetValue<idx_t>(0)));
 	}
 
-	vector<string> tables_to_delete_from {"ducklake_snapshot", "ducklake_snapshot_changes"};
-	for (auto &delete_tbl : tables_to_delete_from) {
+	// A forced expiry drops any protection hold on the snapshot, so the table cannot
+	// accumulate rows for snapshot ids that no longer exist.
+	vector<string> tables_to_delete_from;
+	vector<pair<string, string>> snapshot_tables_to_delete_from {{"ducklake_snapshot", "snapshot_id"},
+	                                                             {"ducklake_snapshot_changes", "snapshot_id"}};
+	if (EnsureSnapshotProtectionTable()) {
+		snapshot_tables_to_delete_from.emplace_back("ducklake_snapshot_protection", "protected_snapshot_id");
+	}
+	for (auto &entry : snapshot_tables_to_delete_from) {
 		result = Execute(StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.%s
-WHERE snapshot_id IN (%s);
+WHERE %s IN (%s);
 )",
-		                                    delete_tbl, snapshot_ids));
+		                                    entry.first, entry.second, snapshot_ids));
 		if (result->HasError()) {
 			result->GetErrorObject().Throw("Failed to delete snapshots in DuckLake: ");
 		}

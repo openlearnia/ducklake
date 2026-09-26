@@ -94,6 +94,11 @@ public:
 	DuckLakeExpireSnapshotsFunction();
 };
 
+class DuckLakeProtectSnapshotsFunction : public TableFunction {
+public:
+	DuckLakeProtectSnapshotsFunction();
+};
+
 class DuckLakeFlushInlinedDataFunction : public TableFunction {
 public:
 	DuckLakeFlushInlinedDataFunction();
@@ -175,12 +180,30 @@ public:
 	DuckLakeMaterializedViewRefreshHistoryFunction();
 };
 
-class DuckLakeCreateRoleFunction : public TableFunction { public: DuckLakeCreateRoleFunction(); };
-class DuckLakeDropRoleFunction : public TableFunction { public: DuckLakeDropRoleFunction(); };
-class DuckLakeGrantFunction : public TableFunction { public: DuckLakeGrantFunction(); };
-class DuckLakeRevokeFunction : public TableFunction { public: DuckLakeRevokeFunction(); };
-class DuckLakeRolesFunction : public DuckLakeBaseMetadataFunction { public: DuckLakeRolesFunction(); };
-class DuckLakeGrantsFunction : public DuckLakeBaseMetadataFunction { public: DuckLakeGrantsFunction(); };
+class DuckLakeCreateRoleFunction : public TableFunction {
+public:
+	DuckLakeCreateRoleFunction();
+};
+class DuckLakeDropRoleFunction : public TableFunction {
+public:
+	DuckLakeDropRoleFunction();
+};
+class DuckLakeGrantFunction : public TableFunction {
+public:
+	DuckLakeGrantFunction();
+};
+class DuckLakeRevokeFunction : public TableFunction {
+public:
+	DuckLakeRevokeFunction();
+};
+class DuckLakeRolesFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeRolesFunction();
+};
+class DuckLakeGrantsFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeGrantsFunction();
+};
 
 class DuckLakeReplicateCreateFunction : public TableFunction {
 public:

@@ -439,6 +439,14 @@ public:
 	//! Lazily creates ducklake_external_file on lakes initialized before the table existed; returns
 	//! the set of normalized absolute paths this catalog references but does not own.
 	unordered_set<string> GetExternalFilePaths();
+	//! Whether ducklake_snapshot_protection is usable, creating it on lakes that predate it.
+	//! False for a read-only metadata database, which can neither gain the table nor safely
+	//! probe for it; protection still applies, it is just not reported.
+	bool EnsureSnapshotProtectionTable();
+	//! Whether the attached metadata database rejects writes.
+	bool MetadataIsReadOnly();
+	//! Add or remove protection holds. Ids in `snapshot_ids` must exist in ducklake_snapshot.
+	virtual void SetSnapshotProtection(const vector<idx_t> &snapshot_ids, bool protect);
 	//! Caller supplies one resolved path per compaction, in the same order.
 	static string WriteMergeAdjacent(const vector<DuckLakeCompactedFileInfo> &compactions,
 	                                 const vector<DuckLakePath> &resolved_paths);
@@ -495,7 +503,8 @@ public:
 	                                               const DuckLakeInlinedColNames &col_names);
 	static string InsertNewSchema(const DuckLakeSnapshot &snapshot, const set<TableIndex> &table_ids);
 
-	virtual vector<DuckLakeSnapshotInfo> GetAllSnapshots(const string &filter = string());
+	virtual vector<DuckLakeSnapshotInfo> GetAllSnapshots(const string &filter = string(),
+	                                                     bool exclude_protected = false);
 	virtual void DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
 	//! After a flush has emptied inlined-data rows, drop any (tid, sv) physical
 	//! table that is superseded by a newer schema_version on the same table_id
@@ -668,6 +677,11 @@ public:
 private:
 	static unordered_map<string /* name */, create_t> metadata_managers;
 	static mutex metadata_managers_lock;
+
+	//! Whether ducklake_snapshot_protection has been probed in this transaction, and whether it
+	//! turned out to be usable. A read-only metadata database cannot gain the table.
+	bool snapshot_protection_known = false;
+	bool snapshot_protection_available = false;
 
 	//! Check which file IDs have inlined deletions (returns set of file IDs that have deletions)
 	unordered_set<idx_t> GetFileIdsWithInlinedDeletions(TableIndex table_id, DuckLakeSnapshot snapshot,

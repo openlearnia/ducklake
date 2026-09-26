@@ -85,7 +85,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("ducklake_mv_stale_read",
 	                          "Behavior when querying a stale DuckLake materialized view: allow, warn, or error",
 	                          LogicalType::VARCHAR, Value("allow"), set_mv_stale_read, SetScope::SESSION);
-	config.AddExtensionOption("ducklake_role", "Active DuckLake RBAC role for this session (empty = PUBLIC grants only)",
+	config.AddExtensionOption("ducklake_role",
+	                          "Active DuckLake RBAC role for this session (empty = PUBLIC grants only)",
 	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::LOCAL);
 	config.AddExtensionOption("ducklake_admin_role", "Name of the DuckLake RBAC role that bypasses privilege checks",
 	                          LogicalType::VARCHAR, Value("admin"), nullptr, SetScope::GLOBAL);
@@ -133,6 +134,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	DuckLakeExpireSnapshotsFunction expire_snapshots;
 	loader.RegisterFunction(expire_snapshots);
+
+	DuckLakeProtectSnapshotsFunction protect_snapshots;
+	loader.RegisterFunction(protect_snapshots);
 
 	DuckLakeFlushInlinedDataFunction flush_inlined_data;
 	loader.RegisterFunction(flush_inlined_data);

@@ -1,0 +1,107 @@
+# name: test/sql/migration/protected_snapshots_lazy_table.test
+# description: ducklake_snapshot_protection is created on demand for catalogs that predate it
+# group: [migration]
+
+require ducklake
+
+require parquet
+
+unzip data/old_ducklake/v12.db.gz {TEST_DIR}/v12.db
+
+# ---------------------------------------------------------------------------
+# Eager path: attaching a v1.2 catalog with AUTOMATIC_MIGRATION runs MigrateV10,
+# which creates the protection table as part of the attach.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/v12.db' AS ducklake (DATA_PATH '{TEST_DIR}/protect_lazy_files', OVERRIDE_DATA_PATH TRUE, AUTOMATIC_MIGRATION TRUE)
+
+query I
+SELECT value FROM __ducklake_metadata_ducklake.ducklake_metadata WHERE key = 'version'
+----
+1.3
+
+query I
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_snapshot_protection
+----
+0
+
+# the migrated catalog accepts protection like any other
+query I
+SELECT count(*) FROM ducklake_protect_snapshots('ducklake', versions => [0])
+----
+1
+
+query I
+SELECT count(*) FROM ducklake.snapshots() WHERE protected
+----
+1
+
+# a hold taken here still governs expiry: snapshot 0 is excluded from the
+# expirable set while 1-4 (5 being the newest) are not
+query I
+SELECT list(snapshot_id) FROM ducklake_expire_snapshots('ducklake', older_than => NOW(), dry_run => true)
+----
+[1, 2, 3, 4]
+
+query I
+SELECT count(*) FROM ducklake_protect_snapshots('ducklake', versions => [0], protect => false)
+----
+1
+
+query I
+SELECT count(*) FROM ducklake.snapshots() WHERE protected
+----
+0
+
+# ---------------------------------------------------------------------------
+# Lazy path: a catalog that is already current, but attached without
+# AUTOMATIC_MIGRATION, never runs MigrateV10 - so the table has to be created
+# on demand by the first read or write that needs it.
+# ---------------------------------------------------------------------------
+
+statement ok
+DROP TABLE __ducklake_metadata_ducklake.ducklake_snapshot_protection
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/v12.db' AS ducklake (DATA_PATH '{TEST_DIR}/protect_lazy_files', OVERRIDE_DATA_PATH TRUE)
+
+statement error
+SELECT * FROM __ducklake_metadata_ducklake.ducklake_snapshot_protection
+----
+does not exist
+
+# reading snapshots creates it
+query I
+SELECT count(*) FROM ducklake.snapshots() WHERE protected
+----
+0
+
+query I
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_snapshot_protection
+----
+0
+
+# and protection works on the lazily created table
+query I
+SELECT count(*) FROM ducklake_protect_snapshots('ducklake', versions => [0])
+----
+1
+
+query I
+SELECT count(*) FROM ducklake.snapshots() WHERE protected
+----
+1
+
+query I
+SELECT list(snapshot_id) FROM ducklake_expire_snapshots('ducklake', older_than => NOW(), dry_run => true)
+----
+[1, 2, 3, 4]
+
+query I
+SELECT count(*) FROM ducklake_protect_snapshots('ducklake', versions => [0], protect => false)
+----
+1

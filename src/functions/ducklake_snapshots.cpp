@@ -56,6 +56,9 @@ void DuckLakeSnapshotsFunction::GetSnapshotTypes(vector<LogicalType> &return_typ
 
 	names.emplace_back("commit_extra_info");
 	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("protected");
+	return_types.emplace_back(LogicalType::BOOLEAN);
 }
 
 template <class T>
@@ -165,6 +168,7 @@ vector<Value> DuckLakeSnapshotsFunction::GetSnapshotValues(const DuckLakeSnapsho
 	row_values.push_back(snapshot.author);
 	row_values.push_back(snapshot.commit_message);
 	row_values.push_back(snapshot.commit_extra_info);
+	row_values.push_back(Value::BOOLEAN(snapshot.is_protected));
 	return row_values;
 }
 

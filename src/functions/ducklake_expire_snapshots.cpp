@@ -27,6 +27,7 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	string snapshot_list;
 	bool has_timestamp = false;
 	bool has_versions = false;
+	bool force = false;
 	auto &ducklake_catalog = reinterpret_cast<DuckLakeCatalog &>(catalog);
 	DuckLakeSnapshotsFunction::GetSnapshotTypes(return_types, names);
 
@@ -58,6 +59,11 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 			}
 			from_timestamp = entry.second.GetValue<timestamp_tz_t>();
 			has_timestamp = true;
+		} else if (entry.first == "force") {
+			if (entry.second.IsNull()) {
+				throw BinderException("The force option must be a non-null boolean.");
+			}
+			force = BooleanValue::Get(entry.second);
 		} else {
 			throw InternalException("Unsupported named parameter for ducklake_expire_snapshots");
 		}
@@ -99,7 +105,9 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	auto &metadata_manager = transaction.GetMetadataManager();
-	result->snapshots = metadata_manager.GetAllSnapshots(filter);
+	// Protection is applied here rather than at the call site so it also covers the expiry
+	// that CHECKPOINT runs on the operator's behalf.
+	result->snapshots = metadata_manager.GetAllSnapshots(filter, !force);
 
 	return std::move(result);
 }
@@ -149,11 +157,12 @@ void DuckLakeExpireSnapshotsExecute(ClientContext &context, TableFunctionInput &
 }
 
 DuckLakeExpireSnapshotsFunction::DuckLakeExpireSnapshotsFunction()
-	: TableFunction(Identifier("ducklake_expire_snapshots"), {LogicalType::VARCHAR}, DuckLakeExpireSnapshotsExecute,
+    : TableFunction(Identifier("ducklake_expire_snapshots"), {LogicalType::VARCHAR}, DuckLakeExpireSnapshotsExecute,
                     DuckLakeExpireSnapshotsBind, DuckLakeExpireSnapshotsInit) {
 	named_parameters["older_than"] = LogicalType::TIMESTAMP_TZ;
 	named_parameters["versions"] = LogicalType::LIST(LogicalType::UBIGINT);
 	named_parameters["dry_run"] = LogicalType::BOOLEAN;
+	named_parameters["force"] = LogicalType::BOOLEAN;
 }
 
 } // namespace duckdb

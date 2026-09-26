@@ -1,0 +1,52 @@
+# name: test/sql/migration/protected_snapshots_read_only.test
+# description: a read-only attach keeps working when the catalog predates snapshot protection
+# group: [migration]
+
+require ducklake
+
+require parquet
+
+unzip data/old_ducklake/v12.db.gz {TEST_DIR}/v12.db
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/v12.db' AS ducklake (DATA_PATH '{TEST_DIR}/ro_files', OVERRIDE_DATA_PATH TRUE, AUTOMATIC_MIGRATION TRUE)
+
+# simulate a catalog written before protection existed
+statement ok
+DROP TABLE __ducklake_metadata_ducklake.ducklake_snapshot_protection
+
+statement ok
+DETACH ducklake
+
+# already at the current version, so no migration runs and the table stays absent
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/v12.db' AS ducklake (DATA_PATH '{TEST_DIR}/ro_files', OVERRIDE_DATA_PATH TRUE, READ_ONLY)
+
+# reading snapshots must not try to create the table, which would abort the transaction
+query I
+SELECT count(*) FROM ducklake.snapshots()
+----
+6
+
+query I
+SELECT count(*) FROM ducklake.snapshots() WHERE protected
+----
+0
+
+# ordinary reads are unaffected (this fixture ships an empty table)
+query I
+SELECT count(*) FROM ducklake.sales
+----
+0
+
+# view resolution works too
+query I
+SELECT count(*) FROM ducklake.mv_by_region
+----
+0
+
+# a read-only session cannot place a hold, and says so cleanly
+statement error
+SELECT * FROM ducklake_protect_snapshots('ducklake', versions => [0])
+----
+read-only

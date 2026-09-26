@@ -351,6 +351,8 @@ struct DuckLakeSnapshotInfo {
 	Value author;
 	Value commit_message;
 	Value commit_extra_info;
+	//! True when ducklake_expire_snapshots will not drop this snapshot.
+	bool is_protected = false;
 };
 
 struct DuckLakeViewColumnTag {

@@ -1,0 +1,95 @@
+# name: test/sql/rbac/rbac_protect_snapshots.test
+# description: taking and releasing a snapshot protection hold requires ADMIN
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/protect_rbac.db' AS lake (DATA_PATH '{TEST_DIR}/protect_rbac_files')
+
+statement ok
+CREATE TABLE lake.tbl (i INTEGER)
+
+statement ok
+INSERT INTO lake.tbl VALUES (1)
+
+statement ok
+INSERT INTO lake.tbl VALUES (2)
+
+# RBAC is off by default, so an ordinary session may place a hold
+query I
+SELECT count(*) FROM ducklake_protect_snapshots('lake', versions => [1])
+----
+1
+
+query I
+SELECT count(*) FROM lake.snapshots() WHERE protected
+----
+1
+
+# ---------------------------------------------------------------------------
+# With RBAC enabled, PUBLIC holds no ADMIN, so the same call is refused
+# ---------------------------------------------------------------------------
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement error
+SELECT * FROM ducklake_protect_snapshots('lake', versions => [2])
+----
+does not have ADMIN privileges
+
+# a refused call must not have written anything
+query I
+SELECT count(*) FROM lake.snapshots() WHERE protected
+----
+1
+
+# ---------------------------------------------------------------------------
+# An admin may place and release holds
+# ---------------------------------------------------------------------------
+
+statement ok
+SET ducklake_admin_role = 'root'
+
+statement ok
+SET ducklake_role = 'root'
+
+query I
+SELECT snapshot_id FROM ducklake_protect_snapshots('lake', versions => [2])
+----
+2
+
+query I
+SELECT list(snapshot_id) FROM lake.snapshots() WHERE protected
+----
+[1, 2]
+
+# releasing is equally privileged
+statement ok
+SET ducklake_role = 'nobody'
+
+statement error
+SELECT * FROM ducklake_protect_snapshots('lake', versions => [1], protect => false)
+----
+does not have ADMIN privileges
+
+query I
+SELECT list(snapshot_id) FROM lake.snapshots() WHERE protected
+----
+[1, 2]
+
+statement ok
+SET ducklake_role = 'root'
+
+query I
+SELECT snapshot_id FROM ducklake_protect_snapshots('lake', versions => [1], protect => false)
+----
+1
+
+query I
+SELECT list(snapshot_id) FROM lake.snapshots() WHERE protected
+----
+[2]
