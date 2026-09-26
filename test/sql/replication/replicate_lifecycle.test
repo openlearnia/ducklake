@@ -35,10 +35,7 @@ SELECT status FROM ducklake_replicate_status('repl_life')
 running
 
 # the supervisor performs the initial sync without a manual catchup
-statement ok
-SELECT sleep_ms(1500)
-
-query I
+waitfor 30000 I
 SELECT count(*) FROM repl_life.app.t
 ----
 5
@@ -52,10 +49,7 @@ snapshot
 statement ok
 INSERT INTO repl_src.app.t VALUES (6, 'v6')
 
-statement ok
-SELECT sleep_ms(1200)
-
-query I
+waitfor 30000 I
 SELECT count(*) FROM repl_life.app.t
 ----
 6
@@ -69,8 +63,8 @@ SELECT replication_id, status FROM ducklake_replicate_pause('repl_life', 1)
 statement ok
 INSERT INTO repl_src.app.t VALUES (7, 'v7')
 
-statement ok
-SELECT sleep_ms(1200)
+# paused: the supervisor must not pick this up within several cycle intervals
+sleep 2 second
 
 query I
 SELECT count(*) FROM repl_life.app.t
@@ -88,10 +82,7 @@ SELECT replication_id, status FROM ducklake_replicate_resume('repl_life', 1)
 ----
 1	running
 
-statement ok
-SELECT sleep_ms(1200)
-
-query I
+waitfor 30000 I
 SELECT count(*) FROM repl_life.app.t
 ----
 7
@@ -112,8 +103,8 @@ SELECT * FROM ducklake_replicate_stop('repl_life')
 statement ok
 INSERT INTO repl_src.app.t VALUES (8, 'v8')
 
-statement ok
-SELECT sleep_ms(1000)
+# stopped: the supervisor is shut down, so nothing must propagate
+sleep 2 second
 
 query I
 SELECT count(*) FROM repl_life.app.t
@@ -131,10 +122,7 @@ stopped	1	1	1
 statement ok
 SELECT * FROM ducklake_replicate_start('repl_life')
 
-statement ok
-SELECT sleep_ms(1200)
-
-query I
+waitfor 30000 I
 SELECT count(*) FROM repl_life.app.t
 ----
 8
@@ -163,8 +151,8 @@ SELECT * FROM ducklake_replicate_drop('repl_life', 1)
 statement ok
 INSERT INTO repl_src.app.t VALUES (9, 'v9')
 
-statement ok
-SELECT sleep_ms(1000)
+# dropped: no longer scheduled, so the new write must not arrive
+sleep 2 second
 
 query I
 SELECT count(*) FROM repl_life.app.t
