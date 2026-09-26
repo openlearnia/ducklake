@@ -1,0 +1,193 @@
+# name: test/sql/rbac/rbac_lifecycle.test
+# description: DuckLake RBAC — role/grant lifecycle and per-privilege enforcement in the binder
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_files')
+
+statement ok
+SET ducklake_default_data_file_format = 'parquet'
+
+# With RBAC not yet enabled the metadata views are readable and empty.
+query I
+SELECT count(*) FROM ducklake_roles('lake')
+----
+0
+
+query I
+SELECT count(*) FROM ducklake_grants('lake')
+----
+0
+
+# ---------------------------------------------------------------------------
+# Enabling RBAC requires an admin. Without ducklake_role set, the active role
+# is PUBLIC, which has no ADMIN privilege, so role creation is refused. This
+# exercises DuckLakeRbac::CheckAdmin.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement error
+SELECT * FROM ducklake_create_role('lake', 'analyst')
+----
+does not have ADMIN privileges
+
+# ---------------------------------------------------------------------------
+# Admin lifecycle
+# ---------------------------------------------------------------------------
+
+statement ok
+SET ducklake_admin_role = 'root'
+
+statement ok
+SET ducklake_role = 'root'
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'analyst')
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'reader')
+
+query I
+SELECT count(*) FROM ducklake_roles('lake')
+----
+2
+
+# Roles exist but carry no grants until one is issued.
+query I
+SELECT count(*) FROM ducklake_grants('lake')
+----
+0
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'analyst', 'SELECT, INSERT', table_name := NULL, "schema" := 'main')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'SELECT', table_name := NULL, "schema" := 'main')
+
+query TT
+SELECT grantee, privileges FROM ducklake_grants('lake') ORDER BY grantee
+----
+analyst
+SELECT,INSERT
+reader
+SELECT
+
+# Revoke narrows the privilege set rather than dropping the row.
+statement ok
+SELECT * FROM ducklake_revoke('lake', 'analyst', 'INSERT', table_name := NULL, "schema" := 'main')
+
+query TT
+SELECT grantee, privileges FROM ducklake_grants('lake') ORDER BY grantee
+----
+analyst
+SELECT
+reader
+SELECT
+
+# Dropping the role removes its grants.
+statement ok
+SELECT * FROM ducklake_drop_role('lake', 'analyst')
+
+query I
+SELECT count(*) FROM ducklake_roles('lake')
+----
+1
+
+query I
+SELECT count(*) FROM ducklake_grants('lake')
+----
+1
+
+# ---------------------------------------------------------------------------
+# Seed a table as admin, then hand a table-scoped SELECT grant to `reader`.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET ducklake_role = 'root'
+
+statement ok
+CREATE TABLE lake.t AS SELECT 1 AS i
+
+statement ok
+INSERT INTO lake.t VALUES (2)
+
+query I
+SELECT count(*) FROM lake.t
+----
+2
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'SELECT', table_name := 't', "schema" := 'main')
+
+# ---------------------------------------------------------------------------
+# Enforcement as the non-admin `reader` role.
+#
+# `reader` holds SELECT on lake.t only. Each statement below must be refused by
+# the corresponding binder check; these are the call sites that were adapted
+# from Identifier-based core APIs.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET ducklake_role = 'reader'
+
+# Allowed: the granted privilege.
+query I
+SELECT count(*) FROM lake.t
+----
+2
+
+# Denied: CheckModifyTable via bind_insert.cpp
+statement error
+INSERT INTO lake.t VALUES (9)
+----
+does not have INSERT privilege on table "main"."t"
+
+# Denied: CheckModifyTable via bind_update.cpp
+statement error
+UPDATE lake.t SET i = 5
+----
+does not have UPDATE privilege on table "main"."t"
+
+# Denied: CheckModifyTable via bind_delete.cpp
+statement error
+DELETE FROM lake.t
+----
+does not have DELETE privilege on table "main"."t"
+
+# Denied: CheckModifySchema via bind_create.cpp. The default schema is reported
+# as "main" when the statement is unqualified.
+statement error
+CREATE TABLE lake.t2 AS SELECT 1 AS i
+----
+does not have CREATE privilege on schema "main"
+
+# Denied: CheckModifySchema via bind_drop.cpp
+statement error
+DROP TABLE lake.t
+----
+does not have DROP privilege on table "main"."t"
+
+# The denied statements must not have taken effect.
+statement ok
+SET ducklake_role = 'root'
+
+query I
+SELECT count(*) FROM lake.t
+----
+2
+
+# The denied CREATE must not have taken effect.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'lake' AND table_name = 't2'
+----
+0
