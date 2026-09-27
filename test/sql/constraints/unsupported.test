@@ -14,8 +14,14 @@ test-env DATA_PATH {TEST_DIR}
 statement ok
 ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_unsupported_files')
 
+# PRIMARY KEY and UNIQUE are accepted as unenforced metadata - see
+# test/sql/constraints/unenforced_primary_key.test. FOREIGN KEY is still
+# unsupported because recording it needs core support.
+statement ok
+CREATE TABLE ducklake.main.other(i INTEGER PRIMARY KEY);
+
 statement error
-CREATE TABLE ducklake.test(i INTEGER PRIMARY KEY, j INTEGER);
+CREATE TABLE ducklake.main.test(i INTEGER, j INTEGER, FOREIGN KEY (j) REFERENCES ducklake.main.other(i));
 ----
 not supported
 

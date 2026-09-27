@@ -1,4 +1,5 @@
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "common/ducklake_types.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -129,7 +130,9 @@ DuckLakeTableEntry::DuckLakeTableEntry(Catalog &catalog, SchemaCatalogEntry &sch
 		case ConstraintType::CHECK:
 			throw NotImplementedException("CHECK constraints are not supported in DuckLake");
 		case ConstraintType::UNIQUE:
-			throw NotImplementedException("PRIMARY KEY/UNIQUE constraints are not supported in DuckLake");
+			// accepted but never enforced: DuckLake builds no index, so there is nothing
+			// to reject a violating row. The constraint is metadata only.
+			break;
 		case ConstraintType::FOREIGN_KEY:
 			throw NotImplementedException("FOREIGN KEY constraints are not supported in DuckLake");
 		default:
@@ -182,6 +185,22 @@ DuckLakeTableEntry::DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableIn
 	auto changed_id = local_change.field_index;
 	field_data = DuckLakeFieldData::SetDefault(*field_data, changed_id, GetColumnByFieldId(changed_id),
 	                                           local_change.is_column_new);
+}
+
+DuckLakeTableEntry::DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info,
+                                       AddConstraintLocalChange local_change)
+    : DuckLakeTableEntry(parent.ParentCatalog(), parent.ParentSchema(), info, parent.GetTableId(),
+                         parent.GetTableUUID(), parent.DataPath(), parent.field_data, parent.next_column_id,
+                         parent.inlined_data_tables, LocalChange(LocalChangeType::ADD_CONSTRAINT)) {
+	if (parent.partition_data) {
+		partition_data = make_uniq<DuckLakePartition>(*parent.partition_data);
+	}
+	if (parent.sort_data) {
+		sort_data = make_uniq<DuckLakeSort>(*parent.sort_data);
+	}
+	CheckSupportedTypes();
+	// LocalChange is held by value, so keep the constraint definition to persist at commit
+	added_constraint = make_uniq<AddConstraintLocalChange>(std::move(local_change));
 }
 
 static void ReplaceColumnRefName(ParsedExpression &expr, const string &old_name, const string &new_name) {
@@ -785,6 +804,64 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, 
 	table_info.constraints.push_back(make_uniq<NotNullConstraint>(col.Logical()));
 
 	auto new_entry = make_uniq<DuckLakeTableEntry>(*this, table_info, LocalChange::SetNull(field_id.GetFieldIndex()));
+	return std::move(new_entry);
+}
+
+unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &transaction, AddConstraintInfo &info) {
+	if (!info.constraint || info.constraint->type != ConstraintType::UNIQUE) {
+		throw BinderException("Only PRIMARY KEY and UNIQUE constraints can be added to a DuckLake table");
+	}
+	auto &unique = info.constraint->Cast<UniqueConstraint>();
+	auto create_info = GetInfo();
+	auto &table_info = create_info->Cast<CreateTableInfo>();
+
+	vector<string> column_names;
+	if (unique.HasIndex()) {
+		column_names.push_back(table_info.columns.GetColumn(unique.GetIndex()).Name().GetIdentifierName());
+	} else {
+		for (auto &name : unique.GetColumnNames()) {
+			column_names.push_back(name.GetIdentifierName());
+		}
+	}
+	if (column_names.empty()) {
+		throw BinderException("Cannot add a constraint without columns to table %s", name);
+	}
+	auto constraint_type = unique.IsPrimaryKey() ? "PRIMARY KEY" : "UNIQUE";
+	// reject a second PRIMARY KEY, and an identical constraint on the same columns
+	bool has_primary_key = false;
+	for (auto &constraint : table_info.constraints) {
+		if (constraint->type != ConstraintType::UNIQUE) {
+			continue;
+		}
+		auto &existing = constraint->Cast<UniqueConstraint>();
+		vector<string> existing_names;
+		if (existing.HasIndex()) {
+			existing_names.push_back(table_info.columns.GetColumn(existing.GetIndex()).Name().GetIdentifierName());
+		} else {
+			for (auto &existing_name : existing.GetColumnNames()) {
+				existing_names.push_back(existing_name.GetIdentifierName());
+			}
+		}
+		if (existing.IsPrimaryKey()) {
+			has_primary_key = true;
+		}
+		if (existing_names == column_names) {
+			throw CatalogException("Table %s already has a %s constraint on these columns", name, constraint_type);
+		}
+	}
+	if (unique.IsPrimaryKey() && has_primary_key) {
+		throw CatalogException("Table %s already has a PRIMARY KEY constraint", name);
+	}
+	vector<Identifier> key_names;
+	for (auto &column_name : column_names) {
+		key_names.emplace_back(column_name);
+	}
+	table_info.constraints.push_back(make_uniq<UniqueConstraint>(std::move(key_names), unique.IsPrimaryKey()));
+	// unlike CREATE TABLE, this does not imply NOT NULL on the key columns: recording that
+	// needs its own column local change, and an entry carries only one
+
+	auto new_entry = make_uniq<DuckLakeTableEntry>(*this, table_info,
+	                                                AddConstraintLocalChange(constraint_type, column_names));
 	return std::move(new_entry);
 }
 
@@ -1484,6 +1561,8 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::Alter(ClientContext &context, DuckL
 		return AlterTable(transaction, info.Cast<SetDefaultInfo>());
 	case AlterTableType::SET_SORTED_BY:
 		return AlterTable(transaction, info.Cast<SetSortedByInfo>());
+	case AlterTableType::ADD_CONSTRAINT:
+		return AlterTable(transaction, info.Cast<AddConstraintInfo>());
 	default:
 		throw BinderException("Unsupported ALTER TABLE type in DuckLake");
 	}

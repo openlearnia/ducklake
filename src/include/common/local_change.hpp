@@ -27,7 +27,8 @@ enum class LocalChangeType {
 	REMOVE_COLUMN,
 	CHANGE_COLUMN_TYPE,
 	SET_DEFAULT,
-	SET_SORT_KEY
+	SET_SORT_KEY,
+	ADD_CONSTRAINT
 };
 
 struct LocalChange {
@@ -71,6 +72,16 @@ struct LocalChange {
 		result.field_index = field_idx;
 		return result;
 	}
+};
+
+//! Carries the constraint definition for ALTER TABLE ... ADD CONSTRAINT
+struct AddConstraintLocalChange : LocalChange {
+	explicit AddConstraintLocalChange(string constr_type, vector<string> constr_columns)
+	    : LocalChange(LocalChangeType::ADD_CONSTRAINT), constraint_type(std::move(constr_type)),
+	      column_names(std::move(constr_columns)) {};
+
+	string constraint_type;
+	vector<string> column_names;
 };
 
 struct SetDefaultLocalChange : LocalChange {

@@ -106,6 +106,15 @@ struct DuckLakeInlinedTableInfo {
 	idx_t schema_version;
 };
 
+//! Unenforced PRIMARY KEY / UNIQUE constraint, stored as metadata only
+struct DuckLakeConstraintInfo {
+	TableIndex table_id;
+	//! "PRIMARY KEY" or "UNIQUE"
+	string constraint_type;
+	//! key columns, in declaration order
+	vector<string> column_names;
+};
+
 struct DuckLakeTableInfo {
 	TableIndex id;
 	SchemaIndex schema_id;
@@ -115,6 +124,7 @@ struct DuckLakeTableInfo {
 	vector<DuckLakeColumnInfo> columns;
 	vector<DuckLakeTag> tags;
 	vector<DuckLakeInlinedTableInfo> inlined_data_tables;
+	vector<DuckLakeConstraintInfo> constraints;
 };
 
 //! Stores the information on macro parameters
@@ -442,6 +452,8 @@ struct DuckLakeNewColumn {
 struct DuckLakeCatalogInfo {
 	vector<DuckLakeSchemaInfo> schemas;
 	vector<DuckLakeTableInfo> tables;
+	//! unenforced constraints, keyed by the table they belong to
+	map<TableIndex, vector<DuckLakeConstraintInfo>> constraints;
 	vector<DuckLakeViewInfo> views;
 	vector<DuckLakeMacroInfo> macros;
 	vector<DuckLakeProcedureInfo> procedures;

@@ -136,6 +136,10 @@ public:
 
 	DuckLakeColumnInfo GetColumnInfo(FieldIndex field_index) const;
 	DuckLakeColumnInfo GetAddColumnInfo() const;
+	//! Set for ADD_CONSTRAINT: the unenforced constraint this ALTER will persist
+	const AddConstraintLocalChange *GetAddedConstraint() const {
+		return added_constraint ? &*added_constraint : nullptr;
+	}
 
 	static DuckLakeColumnInfo ConvertColumn(const string &name, const LogicalType &type,
 	                                        const DuckLakeFieldId &field_id);
@@ -163,7 +167,8 @@ private:
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, RenameTableInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, SetPartitionedByInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(ClientContext &context, DuckLakeTransaction &transaction, SetNotNullInfo &info);
-	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, DropNotNullInfo &info);
+	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, AddConstraintInfo &info);
+unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, DropNotNullInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(ClientContext &context, DuckLakeTransaction &transaction,
 	                                    RenameColumnInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(ClientContext &context, DuckLakeTransaction &transaction, AddColumnInfo &info);
@@ -186,6 +191,7 @@ public:
 	// ! Create a DuckLakeTableEntry from an ALTER
 	DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info, LocalChange local_change);
 	DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info, SetDefaultLocalChange local_change);
+	DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info, AddConstraintLocalChange local_change);
 
 	// ! Create a DuckLakeTableEntry from a RENAME COLUMN
 	DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info, LocalChange local_change,
@@ -216,6 +222,8 @@ private:
 	unique_ptr<DuckLakeSort> sort_data;
 	// only set for REMOVED_COLUMN
 	unique_ptr<ColumnChangeInfo> changed_fields;
+	// only set for ADD_CONSTRAINT - LocalChange is stored by value, so the definition lives here
+	unique_ptr<AddConstraintLocalChange> added_constraint;
 };
 
 } // namespace duckdb

@@ -1,0 +1,168 @@
+# name: test/sql/constraints/unenforced_primary_key.test
+# description: PRIMARY KEY / UNIQUE are recorded but never enforced, matching BigQuery
+# group: [constraints]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/unenforced_pk.db' AS lake (DATA_PATH '{TEST_DIR}/unenforced_pk_files')
+
+statement ok
+SET ducklake_default_data_file_format = 'parquet'
+
+statement ok
+USE lake
+
+# both the column-level and the table-level spelling are accepted
+statement ok
+CREATE TABLE col_pk(id INTEGER PRIMARY KEY, v VARCHAR)
+
+statement ok
+CREATE TABLE tbl_pk(id INTEGER, v VARCHAR, PRIMARY KEY (id))
+
+statement ok
+CREATE TABLE tbl_uq(id INTEGER, v VARCHAR, UNIQUE (id, v))
+
+statement ok
+CREATE TABLE comp_pk(a INTEGER, b INTEGER, v VARCHAR, PRIMARY KEY (a, b))
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE constraint_type != 'NOT NULL' ORDER BY table_name
+----
+col_pk	PRIMARY KEY(id)
+comp_pk	PRIMARY KEY(a, b)
+tbl_pk	PRIMARY KEY(id)
+tbl_uq	UNIQUE(id, v)
+
+# the constraints are metadata only: violating rows are accepted
+statement ok
+INSERT INTO col_pk VALUES (1, 'a'), (1, 'duplicate pk')
+
+statement ok
+INSERT INTO comp_pk VALUES (1, 1, 'x'), (1, 1, 'duplicate composite key')
+
+statement ok
+INSERT INTO tbl_uq VALUES (5, 'e'), (5, 'e')
+
+query III
+SELECT (SELECT count(*) FROM col_pk), (SELECT count(*) FROM comp_pk), (SELECT count(*) FROM tbl_uq)
+----
+2	2	2
+
+# PRIMARY KEY columns are still NOT NULL, as in BigQuery
+statement error
+INSERT INTO col_pk VALUES (NULL, 'null pk')
+----
+NOT NULL constraint failed
+
+statement error
+INSERT INTO comp_pk VALUES (NULL, 1, 'null composite key')
+----
+NOT NULL constraint failed
+
+# a table privilege does not imply anything about constraints
+query TT
+SELECT constraint_name, constraint_type FROM information_schema.table_constraints
+WHERE table_name IN ('col_pk', 'tbl_uq') AND constraint_type != 'CHECK' ORDER BY constraint_name
+----
+col_pk_id_pkey	PRIMARY KEY
+tbl_uq_id_v_key	UNIQUE
+
+# the constraints survive a detach/reattach
+statement ok
+USE memory
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/unenforced_pk.db' AS lake (DATA_PATH '{TEST_DIR}/unenforced_pk_files')
+
+statement ok
+USE lake
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE constraint_type != 'NOT NULL' ORDER BY table_name
+----
+col_pk	PRIMARY KEY(id)
+comp_pk	PRIMARY KEY(a, b)
+tbl_pk	PRIMARY KEY(id)
+tbl_uq	UNIQUE(id, v)
+
+# still unenforced after the round trip
+statement ok
+INSERT INTO col_pk VALUES (1, 'third duplicate')
+
+query I
+SELECT count(*) FROM col_pk
+----
+3
+
+# the recreated DDL round-trips the key
+query I
+SELECT sql LIKE '%PRIMARY KEY(id)%' FROM duckdb_tables() WHERE table_name = 'col_pk'
+----
+true
+
+# CHECK and FOREIGN KEY remain unsupported
+statement error
+CREATE TABLE bad_check(id INTEGER, CHECK (id > 0))
+----
+CHECK constraints are not supported in DuckLake
+
+statement error
+CREATE TABLE bad_fk(id INTEGER, pid INTEGER REFERENCES col_pk(id))
+----
+FOREIGN KEY constraints are not supported in DuckLake
+
+# ---------------------------------------------------------------------------
+# ALTER TABLE ... ADD CONSTRAINT records the key without enforcing it
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE added_pk(id INTEGER, v VARCHAR)
+
+statement ok
+CREATE TABLE added_uq(id INTEGER, v VARCHAR, w INTEGER)
+
+statement ok
+ALTER TABLE added_pk ADD PRIMARY KEY(id)
+
+statement ok
+ALTER TABLE added_uq ADD UNIQUE(id, v)
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name IN ('added_pk', 'added_uq') AND constraint_type != 'NOT NULL' ORDER BY table_name
+----
+added_pk	PRIMARY KEY(id)
+added_uq	UNIQUE(id, v)
+
+# unlike CREATE TABLE, ADD PRIMARY KEY does not imply NOT NULL on the key column
+statement ok
+INSERT INTO added_pk VALUES (NULL, 'null key is accepted')
+
+# but the key itself is still unenforced
+statement ok
+INSERT INTO added_pk VALUES (1, 'a'), (1, 'duplicate')
+
+query I
+SELECT count(*) FROM added_pk
+----
+3
+
+# a second PRIMARY KEY on the same table is rejected
+statement error
+ALTER TABLE added_pk ADD PRIMARY KEY(v)
+----
+already has a PRIMARY KEY constraint
+
+# re-adding the identical constraint is rejected
+statement error
+ALTER TABLE added_pk ADD PRIMARY KEY(id)
+----
+already has a PRIMARY KEY constraint on these columns

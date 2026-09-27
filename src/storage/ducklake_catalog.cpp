@@ -1,5 +1,7 @@
 #include "storage/ducklake_catalog.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/operator/logical_alter.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/main/database_manager.hpp"
 
@@ -14,6 +16,7 @@
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
@@ -626,6 +629,27 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			auto &col = create_table_info->columns.GetColumn(Identifier(not_null_col));
 			create_table_info->constraints.push_back(make_uniq<NotNullConstraint>(col.Logical()));
 		}
+		// restore the unenforced PRIMARY KEY / UNIQUE constraints recorded for this table
+		auto constraint_entry = catalog.constraints.find(table.id);
+		if (constraint_entry != catalog.constraints.end()) {
+			for (auto &constraint : constraint_entry->second) {
+				vector<Identifier> key_names;
+				bool resolved = true;
+				for (auto &column_name : constraint.column_names) {
+					if (!create_table_info->columns.ColumnExists(Identifier(column_name))) {
+						resolved = false;
+						break;
+					}
+					key_names.emplace_back(column_name);
+				}
+				if (!resolved || key_names.empty()) {
+					// a key column is gone - skip rather than fail the whole catalog load
+					continue;
+				}
+				create_table_info->constraints.push_back(
+				    make_uniq<UniqueConstraint>(std::move(key_names), constraint.constraint_type == "PRIMARY KEY"));
+			}
+		}
 		// create the table and add it to the schema set
 		auto table_entry = make_uniq<DuckLakeTableEntry>(
 		    *this, schema_entry, *create_table_info, table.id, std::move(table.uuid), std::move(table.path),
@@ -1229,7 +1253,13 @@ unique_ptr<LogicalOperator> DuckLakeCatalog::BindAlterAddIndex(Binder &binder, T
                                                                unique_ptr<LogicalOperator> plan,
                                                                unique_ptr<CreateIndexInfo> create_info,
                                                                unique_ptr<AlterTableInfo> alter_info) {
-	throw NotImplementedException("Adding indexes or constraints is not supported in DuckLake");
+	if (!alter_info || alter_info->alter_table_type != AlterTableType::ADD_CONSTRAINT) {
+		throw NotImplementedException("Adding indexes is not supported in DuckLake");
+	}
+	// PRIMARY KEY / UNIQUE are unenforced metadata: skip the index entirely and let the
+	// LogicalAlter plan drive the catalog change when the statement executes
+	unique_ptr<AlterInfo> alter_plan_info = std::move(alter_info);
+	return make_uniq<LogicalAlter>(std::move(alter_plan_info));
 }
 
 InlinedDeletionCacheResult DuckLakeCatalog::CheckInlinedDeletionTableCache(TableIndex table_id,

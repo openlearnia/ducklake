@@ -289,6 +289,9 @@ string DuckLakeMetadataManager::GetCreateTableStatements() {
 	statements.push_back(
 	    "CREATE TABLE {METADATA_CATALOG}.ducklake_table(table_id BIGINT, table_uuid UUID, begin_snapshot BIGINT, "
 	    "end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);");
+	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_table_constraint(table_id BIGINT, "
+	                     "constraint_index BIGINT, column_index BIGINT, constraint_type VARCHAR, column_name "
+	                     "VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_view(view_id BIGINT, view_uuid UUID, begin_snapshot "
 	                     "BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql "
 	                     "VARCHAR, column_aliases VARCHAR);");
@@ -589,8 +592,17 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev1' WHERE key = '
 }
 
 void DuckLakeMetadataManager::EnsureProcedureSecurityColumn() {
-	// ducklake_procedure only exists from v1.1 onwards, so this runs for catalogs that are
-	// already past the versioned migrations and would otherwise never see the new column.
+	// ducklake_table_constraint and ducklake_procedure only exist from v1.1 onwards, so this runs
+	// for catalogs that are already past the versioned migrations.
+	auto constraint_probe = Query("SELECT * FROM {METADATA_CATALOG}.ducklake_table LIMIT 0");
+	if (!constraint_probe->HasError()) {
+		auto constraint_result = Execute(StringUtil::Format(R"(
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_table_constraint(table_id BIGINT, constraint_index BIGINT, column_index BIGINT, constraint_type VARCHAR, column_name VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT);
+		)"));
+		if (constraint_result->HasError()) {
+			constraint_result->GetErrorObject().Throw("Failed to create ducklake_table_constraint: ");
+		}
+	}
 	auto probe = Query("SELECT * FROM {METADATA_CATALOG}.ducklake_procedure LIMIT 0");
 	if (probe->HasError()) {
 		return;
@@ -1301,6 +1313,35 @@ WHERE {SNAPSHOT_ID} >= ducklake_procedure.begin_snapshot
 				}
 			}
 			catalog.procedures.push_back(std::move(procedure_info));
+		}
+	}
+
+	// load unenforced PRIMARY KEY / UNIQUE constraints for the tables in this snapshot
+	if (load_procedures) {
+		auto constraint_result = query_executor(snapshot, R"(
+SELECT table_id, constraint_index, constraint_type, column_name
+FROM {METADATA_CATALOG}.ducklake_table_constraint
+WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
+ORDER BY table_id, constraint_index, column_index
+)");
+		if (!constraint_result->HasError()) {
+			map<pair<TableIndex, idx_t>, DuckLakeConstraintInfo> by_key;
+			for (auto &row : *constraint_result) {
+				auto table_id = TableIndex(row.GetValue<uint64_t>(0));
+				auto constraint_index = row.GetValue<uint64_t>(1);
+				auto key = std::make_pair(table_id, constraint_index);
+				auto entry = by_key.find(key);
+				if (entry == by_key.end()) {
+					DuckLakeConstraintInfo constraint_info;
+					constraint_info.table_id = table_id;
+					constraint_info.constraint_type = row.GetValue<string>(2);
+					entry = by_key.emplace(key, std::move(constraint_info)).first;
+				}
+				entry->second.column_names.push_back(row.GetValue<string>(3));
+			}
+			for (auto &entry : by_key) {
+				catalog.constraints[entry.first.first].push_back(std::move(entry.second));
+			}
 		}
 	}
 
@@ -3263,6 +3304,24 @@ string DuckLakeMetadataManager::GetInlinedTableQuery(const DuckLakeTableInfo &ta
 	return InlinedTableDdlSql(table_name, column_defs, InlinedColNames());
 }
 
+string DuckLakeMetadataManager::WriteNewConstraints(const vector<DuckLakeConstraintInfo> &new_constraints) {
+	if (new_constraints.empty()) {
+		return {};
+	}
+	string insert_sql;
+	for (auto &constraint : new_constraints) {
+		for (idx_t col_idx = 0; col_idx < constraint.column_names.size(); col_idx++) {
+			if (!insert_sql.empty()) {
+				insert_sql += ", ";
+			}
+			insert_sql += StringUtil::Format("(%d, 0, %llu, %s, %s, {SNAPSHOT_ID}, NULL)", constraint.table_id.index,
+			                                 col_idx, SQLString(constraint.constraint_type),
+			                                 SQLString(constraint.column_names[col_idx]));
+		}
+	}
+	return "INSERT INTO {METADATA_CATALOG}.ducklake_table_constraint VALUES " + insert_sql + ";";
+}
+
 string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &new_tables,
                                                const vector<DuckLakePath> &resolved_paths) {
 	if (new_tables.empty()) {
@@ -3274,6 +3333,7 @@ string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &
 
 	string column_insert_sql;
 	string table_insert_sql;
+	string constraint_insert_sql;
 
 	for (idx_t i = 0; i < new_tables.size(); ++i) {
 		auto &table = new_tables[i];
@@ -3288,11 +3348,26 @@ string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &
 		for (auto &column : table.columns) {
 			ColumnToSQLRecursive(column, table.id, optional_idx(), column_insert_sql);
 		}
+		for (idx_t constr_idx = 0; constr_idx < table.constraints.size(); constr_idx++) {
+			auto &constraint = table.constraints[constr_idx];
+			for (idx_t col_idx = 0; col_idx < constraint.column_names.size(); col_idx++) {
+				if (!constraint_insert_sql.empty()) {
+					constraint_insert_sql += ", ";
+				}
+				constraint_insert_sql +=
+				    StringUtil::Format("(%d, %llu, %llu, %s, %s, {SNAPSHOT_ID}, NULL)", table.id.index,
+				                       constr_idx, col_idx, SQLString(constraint.constraint_type),
+				                       SQLString(constraint.column_names[col_idx]));
+			}
+		}
 	}
 	string batch_query;
 	// Batch table and column inserts into a single multi-statement query
 	if (!table_insert_sql.empty()) {
 		batch_query += "INSERT INTO {METADATA_CATALOG}.ducklake_table VALUES " + table_insert_sql + ";";
+	}
+	if (!constraint_insert_sql.empty()) {
+		batch_query += "INSERT INTO {METADATA_CATALOG}.ducklake_table_constraint VALUES " + constraint_insert_sql + ";";
 	}
 	if (!column_insert_sql.empty()) {
 		batch_query += "INSERT INTO {METADATA_CATALOG}.ducklake_column VALUES " + column_insert_sql + ";";

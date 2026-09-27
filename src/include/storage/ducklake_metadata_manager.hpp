@@ -369,6 +369,7 @@ public:
 	                                    const vector<DuckLakePartitionInfo> &new_partitions);
 	//! Emits the sort-key diff SQL. Caller supplies the existing sort state (fetched via
 	//! GetCatalogForSnapshot) since the diff is computed against it.
+	static string WriteNewConstraints(const vector<DuckLakeConstraintInfo> &new_constraints);
 	static string WriteNewSortKeys(const vector<DuckLakeSortInfo> &existing_sorts,
 	                               const vector<DuckLakeSortInfo> &new_sorts);
 	static string WriteDroppedColumns(const vector<DuckLakeDroppedColumn> &dropped_columns);

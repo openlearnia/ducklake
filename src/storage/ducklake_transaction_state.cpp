@@ -1,4 +1,5 @@
 #include "storage/ducklake_transaction_state.hpp"
+#include "common/local_change.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 
 #include "common/ducklake_types.hpp"
@@ -1380,6 +1381,20 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			column_schema_change = true;
 			break;
 		}
+		case LocalChangeType::ADD_CONSTRAINT: {
+			auto constraint_change = table.GetAddedConstraint();
+			if (!constraint_change) {
+				break;
+			}
+			DuckLakeConstraintInfo constraint_info;
+			constraint_info.table_id = commit_state.GetTableId(table);
+			constraint_info.constraint_type = constraint_change->constraint_type;
+			constraint_info.column_names = constraint_change->column_names;
+			result.new_constraints.push_back(std::move(constraint_info));
+			transaction_changes.altered_tables.insert(table_id);
+			transaction_changes.altered_tables_with_schema_version_changes.insert(table_id);
+			break;
+		}
 		case LocalChangeType::SET_SORT_KEY: {
 			auto sort_key = DuckLakeTransaction::GetNewSortKey(commit_state, table);
 			result.new_sort_keys.push_back(std::move(sort_key));
@@ -1800,6 +1815,7 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 		batch_queries += DuckLakeMetadataManager::WriteNewColumns(result.new_columns);
 		batch_queries += context.write_inlined_tables(commit_snapshot, result.new_inlined_data_tables);
 		batch_queries += DuckLakeMetadataManager::WriteNewSortKeys(existing_catalog.sorts, result.new_sort_keys);
+		batch_queries += DuckLakeMetadataManager::WriteNewConstraints(result.new_constraints);
 		new_tables_result = result.new_tables;
 		new_inlined_data_tables_result = result.new_inlined_data_tables;
 	}

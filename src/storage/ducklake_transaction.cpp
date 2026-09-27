@@ -1,5 +1,6 @@
 #include "storage/ducklake_transaction.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/file_system.hpp"
 
@@ -954,6 +955,9 @@ void GetTransactionTableChanges(reference<CatalogEntry> table_entry, Transaction
 			changes.created_tables[schema.name.GetIdentifierName()].insert(table);
 			break;
 		}
+		case LocalChangeType::ADD_CONSTRAINT:
+			// the constraint is persisted as metadata when the transaction commits
+			break;
 		default:
 			throw NotImplementedException("Unsupported transaction local change in GetTransactionTableChanges");
 		}
@@ -1274,6 +1278,26 @@ DuckLakeTableInfo DuckLakeTransaction::GetNewTable(DuckLakeCommitState &commit_s
 	if (is_new_table) {
 		// if this is a new table - write the columns
 		table_entry.columns = table.GetTableColumns();
+		// PRIMARY KEY / UNIQUE are stored as metadata only and never enforced
+		for (auto &constraint : table.GetConstraints()) {
+			if (constraint->type != ConstraintType::UNIQUE) {
+				continue;
+			}
+			auto &unique = constraint->Cast<UniqueConstraint>();
+			DuckLakeConstraintInfo constraint_info;
+			constraint_info.table_id = table_entry.id;
+			constraint_info.constraint_type = unique.IsPrimaryKey() ? "PRIMARY KEY" : "UNIQUE";
+			if (unique.HasIndex()) {
+				constraint_info.column_names.push_back(table.GetColumn(unique.GetIndex()).Name().GetIdentifierName());
+			} else {
+				for (auto &name : unique.GetColumnNames()) {
+					constraint_info.column_names.push_back(name.GetIdentifierName());
+				}
+			}
+			if (!constraint_info.column_names.empty()) {
+				table_entry.constraints.push_back(std::move(constraint_info));
+			}
+		}
 	}
 	return table_entry;
 }
@@ -2225,6 +2249,7 @@ void DuckLakeTransaction::AlterEntryInternal(DuckLakeTableEntry &table, unique_p
 	case LocalChangeType::CHANGE_COLUMN_TYPE:
 	case LocalChangeType::SET_DEFAULT:
 	case LocalChangeType::SET_SORT_KEY:
+	case LocalChangeType::ADD_CONSTRAINT:
 		break;
 	default:
 		throw NotImplementedException("Alter type not supported in DuckLakeTransaction::AlterEntry");
