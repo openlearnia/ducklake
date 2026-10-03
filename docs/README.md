@@ -96,6 +96,11 @@ FROM my_ducklake.table_changes('my_table', 2, 2);
 
 See the [Usage](https://ducklake.select/docs/stable/duckdb/introduction) guide for more information.
 
+### Extension documentation
+
+- [Materialized views: creation, refresh modes, and eligibility](materialized-view-eligibility.md)
+- [SQL access from JavaScript stored procedures](javascript-procedure-sql-api.md)
+
 ## Building & Loading the Extension
 
 To build, type
