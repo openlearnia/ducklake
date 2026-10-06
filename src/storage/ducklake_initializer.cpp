@@ -244,16 +244,17 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 				metadata_manager.MigrateV04();
 				catalog_version = DuckLakeVersion::V1_0;
 			}
-			if ((catalog_version == DuckLakeVersion::V1_1_DEV_1 || catalog_version >= DuckLakeVersion::V1_1) &&
-			    options.automatic_migration) {
-				// dev schemas evolve in place
-				metadata_manager.MigrateV10(true);
-				if (catalog_version >= DuckLakeVersion::V1_1) {
-					// lakes tagged with this port's own versions (1.1/1.2/1.3) may predate the
-					// upstream 1.1-dev1 metadata layout - evolve the shape in place, then the
-					// versioned migrations below re-run on top (they are all idempotent)
-					catalog_version = DuckLakeVersion::V1_1_DEV_1;
+			if (catalog_version == DuckLakeVersion::V1_1_DEV_1) {
+				// Evolve upstream development catalogs without making plain attach fail.
+				if (options.automatic_migration) {
+					metadata_manager.MigrateV10(true);
+				} else if (options.access_mode != AccessMode::READ_ONLY) {
+					metadata_manager.MigrateV10Dev();
 				}
+			} else if (catalog_version >= DuckLakeVersion::V1_1 && options.automatic_migration) {
+				// Older custom 1.1/1.2/1.3 catalogs also need the upstream metadata shape.
+				metadata_manager.MigrateV10(true);
+				catalog_version = DuckLakeVersion::V1_1_DEV_1;
 			}
 			if (catalog_version >= target_version) {
 				resolved_version = catalog_version;

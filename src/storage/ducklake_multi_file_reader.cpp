@@ -577,7 +577,7 @@ ReaderInitializeType DuckLakeMultiFileReader::CreateMappingWithGlobalState(
 		auto entry = file_options.find("mapping_id");
 		if (entry != file_options.end()) {
 			auto mapping_id = MappingIndex(entry->second.GetValue<idx_t>());
-			auto transaction = read_info.transaction.lock();
+			auto transaction = read_info.GetTransaction();
 			auto mapping = transaction->GetMappingById(mapping_id);
 			// use the mapping to generate a new set of global columns for this file
 			auto mapped_columns = CreateNewMapping(context, reader_data, global_columns, *mapping);

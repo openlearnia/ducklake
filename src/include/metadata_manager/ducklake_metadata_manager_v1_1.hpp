@@ -21,6 +21,7 @@ public:
 	    : Base(transaction), version_tag(std::move(version_tag_p)) {
 	}
 
+	string GetSchemaTableStatement() override;
 	string GetDataFileTableStatement() override;
 	string GetDeleteFileTableStatement() override;
 	string GetFileColumnStatsTableStatement() override;

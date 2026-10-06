@@ -57,12 +57,32 @@ unique_ptr<QueryResult> QuackMetadataManager::Query(DuckLakeSnapshot snapshot, s
 }
 
 unique_ptr<QueryResult> QuackMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
-	return Query(snapshot, query);
+	lock_guard<std::recursive_mutex> guard(transaction.GetCatalog().GetMetadataQueryLock());
+	// the server commits each statement on its own, so the statements run in a server transaction
+	auto batch = "BEGIN TRANSACTION;\n" + query + "\nCOMMIT;";
+	auto result = Query(snapshot, batch);
+	if (result->HasError()) {
+		// a failed statement keeps the server transaction open until it is rolled back
+		string rollback = "ROLLBACK;";
+		Query(rollback);
+	}
+	return result;
 }
 
 string QuackMetadataManager::MetadataExistsQuery() const {
 	return "SELECT COUNT(*) FROM information_schema.tables "
 	       "WHERE table_name = 'ducklake_metadata' AND table_schema = {METADATA_SCHEMA_NAME_LITERAL}";
+}
+
+bool QuackMetadataManager::InlinedDeletionTableExists(const string &table_name) {
+	auto query = StringUtil::Format("SELECT 1 FROM duckdb_tables() WHERE database_name = current_database() "
+	                                "AND schema_name = {METADATA_SCHEMA_NAME_LITERAL} AND table_name = %s",
+	                                DuckLakeUtil::SQLLiteralToString(table_name));
+	auto result = Query(query);
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to probe for DuckLake inlined-deletion table: ");
+	}
+	return result->Fetch() != nullptr;
 }
 
 void QuackMetadataManager::ClearCache() {
@@ -93,9 +113,15 @@ static bool IsDataOnlyCommit(const TransactionChangeInformation &c) {
 	       c.dropped_table_macros.empty();
 }
 
+//! Whether the commit has to take the client-side path
+static bool RequiresClientSideCommit(DuckLakeTransaction &transaction) {
+	// the server-side commit cannot create the inlined-data table or delete the inlined data this transaction flushed
+	return transaction.GetRequiresNewInlinedTable() || !transaction.GetFlushedInlinedTables().empty() ||
+	       !transaction.GetFlushedInlinedFileDeletions().empty();
+}
+
 bool QuackMetadataManager::CanSkipSnapshotFetch(const TransactionChangeInformation &changes) const {
-	if (transaction.GetRequiresNewInlinedTable()) {
-		// the server-side commit cannot create the inlined-data table, take the client-side path instead
+	if (RequiresClientSideCommit(transaction)) {
 		return false;
 	}
 	return ExecuteRetrialsServerSide() && IsDataOnlyCommit(changes);
@@ -105,7 +131,7 @@ void QuackMetadataManager::FlushChangesServerSide(DuckLakeTransaction &flush_tra
                                                   DuckLakeSnapshot transaction_snapshot,
                                                   const TransactionChangeInformation &transaction_changes,
                                                   const DuckLakeRetryConfig &retry_config) {
-	if (!IsDataOnlyCommit(transaction_changes) || flush_transaction.GetRequiresNewInlinedTable()) {
+	if (!IsDataOnlyCommit(transaction_changes) || RequiresClientSideCommit(flush_transaction)) {
 		flush_transaction.RunCommitLoop(transaction_snapshot, transaction_changes, retry_config);
 		return;
 	}

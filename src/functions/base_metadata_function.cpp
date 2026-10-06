@@ -2,15 +2,22 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/planner/binder.hpp"
 
 namespace duckdb {
 
-Catalog &DuckLakeBaseMetadataFunction::GetCatalog(ClientContext &context, const Value &input) {
-	if (input.IsNull()) {
+Catalog &DuckLakeBaseMetadataFunction::GetCatalog(ClientContext &context, TableFunctionBindInput &input,
+                                                  bool require_rebind) {
+	if (input.binder && require_rebind) {
+		// the bind result depends on the transaction so prepared statements are rebound on every execution
+		input.binder->SetAlwaysRequireRebind();
+	}
+	auto &catalog_name = input.inputs[0];
+	if (catalog_name.IsNull()) {
 		throw BinderException("Catalog cannot be NULL");
 	}
 	// look up the database to query
-	auto db_name = input.GetValue<string>();
+	auto db_name = catalog_name.GetValue<string>();
 	auto &db_manager = DatabaseManager::Get(context);
 	auto db = db_manager.GetDatabase(context, Identifier(db_name));
 	if (!db) {
@@ -62,6 +69,10 @@ static void MetadataFunctionExecute(ClientContext &context, TableFunctionInput &
 		count++;
 	}
 	output.SetChildCardinality(count);
+}
+
+unique_ptr<GlobalTableFunctionState> DuckLakeRunOnceState::Init(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<DuckLakeRunOnceState>();
 }
 
 DuckLakeBaseMetadataFunction::DuckLakeBaseMetadataFunction(Identifier name_p, table_function_bind_t bind)

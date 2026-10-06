@@ -30,6 +30,7 @@ struct NewTableInfo {
 	vector<DuckLakeTableInfo> new_inlined_data_tables;
 	vector<DuckLakeSortInfo> new_sort_keys;
 	vector<DuckLakeConstraintInfo> new_constraints;
+	vector<DuckLakeConfigOption> new_table_options;
 };
 
 struct NewMacroInfo {

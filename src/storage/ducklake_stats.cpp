@@ -110,6 +110,24 @@ DuckLakeColumnStats DuckLakeColumnStats::FromGlobalStats(const LogicalType &type
 	return stats;
 }
 
+DuckLakeColumnStats DuckLakeColumnStats::FromConstant(const LogicalType &type, const Value &value, idx_t count) {
+	DuckLakeColumnStats stats(type);
+	stats.has_num_values = true;
+	stats.num_values = count;
+	stats.has_null_count = true;
+	if (value.IsNull()) {
+		stats.null_count = count;
+		stats.any_valid = false;
+	} else if (count == 0) {
+		stats.any_valid = false;
+	} else {
+		stats.min = stats.max = value.ToString();
+		stats.has_min = stats.has_max = true;
+		stats.min_is_exact = stats.max_is_exact = true;
+	}
+	return stats;
+}
+
 void DuckLakeColumnStats::ClearBounds() {
 	min.clear();
 	max.clear();

@@ -995,7 +995,7 @@ static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &duckl
 static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &context, TableFunctionBindInput &input,
                                                               TableIndex bind_index, vector<Identifier> &return_names) {
 	input.binder->SetAlwaysRequireRebind();
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 
@@ -1635,7 +1635,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
                                                                TableIndex bind_index,
                                                                vector<Identifier> &return_names) {
 	input.binder->SetAlwaysRequireRebind();
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 
@@ -1819,7 +1819,7 @@ DuckLakeRefreshMaterializedViewFunction::DuckLakeRefreshMaterializedViewFunction
 
 static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &context, TableFunctionBindInput &input,
                                                             TableIndex bind_index, vector<Identifier> &return_names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input, false);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 
@@ -1881,7 +1881,7 @@ DuckLakeDropMaterializedViewFunction::DuckLakeDropMaterializedViewFunction()
 
 static unique_ptr<FunctionData> MaterializedViewsBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 
@@ -1952,7 +1952,7 @@ static unique_ptr<FunctionData> MaterializedViewRefreshHistoryBind(ClientContext
                                                                    TableFunctionBindInput &input,
                                                                    vector<LogicalType> &return_types,
                                                                    vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 	auto result = make_uniq<MetadataBindData>();

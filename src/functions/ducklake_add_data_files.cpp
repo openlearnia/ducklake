@@ -38,7 +38,7 @@ struct DuckLakeAddDataFilesData : public TableFunctionData {
 
 static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context, TableFunctionBindInput &input,
                                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	string schema_name;
 	if (input.inputs[1].IsNull()) {
 		throw InvalidInputException("Table name cannot be NULL");
@@ -49,7 +49,7 @@ static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context,
 	const auto table_name = StringValue::Get(input.inputs[1]);
 
 	auto entry = catalog.GetEntry<TableCatalogEntry>(
-	    context, QualifiedName(catalog.GetName(), Identifier(schema_name), Identifier(table_name)),
+	    context, DuckLakeUtil::QualifiedEntryName(context, catalog, schema_name, table_name),
 	    OnEntryNotFound::THROW_EXCEPTION);
 	auto &table = entry->Cast<DuckLakeTableEntry>();
 
@@ -87,18 +87,6 @@ static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context,
 	return std::move(result);
 }
 
-struct DuckLakeAddDataFilesState : public GlobalTableFunctionState {
-	DuckLakeAddDataFilesState() {
-	}
-
-	bool finished = false;
-};
-
-static unique_ptr<GlobalTableFunctionState> DuckLakeAddDataFilesInit(ClientContext &context,
-                                                                     TableFunctionInitInput &input) {
-	return make_uniq<DuckLakeAddDataFilesState>();
-}
-
 struct ParquetColumn {
 	idx_t column_id;
 	string name;
@@ -125,6 +113,26 @@ struct HivePartition {
 	DuckLakeTransform transform;
 	optional_idx partition_key_index;
 };
+
+struct MissingColumn {
+	FieldIndex field_index;
+	LogicalType field_type;
+	bool reads_null;
+	//! Whether the column is inside a list or map element, so it does not have one value per row
+	bool repeated;
+};
+
+static void CollectMissingColumns(const DuckLakeFieldId &field_id, bool reads_null, bool repeated,
+                                  vector<MissingColumn> &result) {
+	if (!field_id.HasChildren()) {
+		result.push_back(MissingColumn {field_id.GetFieldIndex(), field_id.Type(), reads_null, repeated});
+		return;
+	}
+	// the fields of a missing parent read as NULL
+	for (auto &child : field_id.Children()) {
+		CollectMissingColumns(*child, true, repeated, result);
+	}
+}
 
 static bool IsValidTransformedHivePartitionValue(const HivePartition &hive_partition,
                                                  const DuckLakePartitionField &partition_field) {
@@ -156,6 +164,8 @@ struct ParquetFileMetadata {
 	unordered_map<idx_t, pair<FieldIndex, LogicalType>> column_id_to_field_map;
 	// Map from field ID to hive partition statistics (for partition columns)
 	vector<HivePartition> hive_partition_values;
+	// Columns absent from the file and the value they read as
+	vector<MissingColumn> missing_columns;
 };
 
 struct DuckLakeFileProcessor {
@@ -175,15 +185,17 @@ private:
 	void ReadVortexFullMetadata(const string &glob, vector<DuckLakeDataFile> &result);
 	DuckLakeDataFile AddFileToTable(ParquetFileMetadata &file);
 	unique_ptr<DuckLakeNameMapEntry> MapColumn(ParquetFileMetadata &file_metadata, ParquetColumn &column,
-	                                           const DuckLakeFieldId &field_id, string prefix);
+	                                           const DuckLakeFieldId &field_id, string prefix, bool repeated);
 	vector<unique_ptr<DuckLakeNameMapEntry>> MapColumns(ParquetFileMetadata &file,
 	                                                    vector<unique_ptr<ParquetColumn>> &parquet_columns,
 	                                                    const vector<unique_ptr<DuckLakeFieldId>> &field_ids,
-	                                                    const string &prefix = string());
+	                                                    const string &prefix = string(), bool repeated = false);
 	void CollectLiveFieldIds(const vector<unique_ptr<DuckLakeFieldId>> &field_ids, unordered_set<idx_t> &result);
 	void ValidateFileFieldIds(const ParquetFileMetadata &file, const vector<unique_ptr<ParquetColumn>> &columns,
 	                          const unordered_set<idx_t> &live_field_ids, const string &prefix = string());
 	void MapColumnStats(ParquetFileMetadata &file_metadata, DuckLakeDataFile &result);
+	DuckLakeColumnStats ConstantColumnStats(const ParquetFileMetadata &file_metadata, FieldIndex field_index,
+	                                        const LogicalType &field_type, const Value &value) const;
 	unique_ptr<DuckLakeNameMapEntry> MapHiveColumn(ParquetFileMetadata &file_metadata, const DuckLakeFieldId &field_id,
 	                                               const Value &hive_value);
 	void DetermineMapping(ParquetFileMetadata &file);
@@ -1229,7 +1241,8 @@ void DuckLakeParquetTypeChecker::CheckMatchingType() {
 
 unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapColumn(ParquetFileMetadata &file_metadata,
                                                                   ParquetColumn &column,
-                                                                  const DuckLakeFieldId &field_id, string prefix) {
+                                                                  const DuckLakeFieldId &field_id, string prefix,
+                                                                  bool repeated) {
 	// check if types of the columns are compatible
 	DuckLakeParquetTypeChecker type_checker(table, file_metadata, field_id.Type(), column, prefix);
 	type_checker.CheckMatchingType();
@@ -1253,37 +1266,33 @@ unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapColumn(ParquetFileMet
 		auto &field_children = field_id.Children();
 		switch (field_id.Type().id()) {
 		case LogicalTypeId::STRUCT:
-			map_entry->child_entries = MapColumns(file_metadata, column.child_columns, field_id.Children(), prefix);
+			map_entry->child_entries =
+			    MapColumns(file_metadata, column.child_columns, field_id.Children(), prefix, repeated);
 			break;
 		case LogicalTypeId::LIST:
 			if (column.child_columns[0]->name == "array") {
 				// With legacy avro list layout, we just access directly
 				map_entry->child_entries.push_back(
-				    MapColumn(file_metadata, *column.child_columns[0], *field_children[0], prefix));
+				    MapColumn(file_metadata, *column.child_columns[0], *field_children[0], prefix, true));
 			} else if (column.child_columns[0]->name == "element" || column.has_duckdb_type) {
 				// Vortex / DuckDB-native list layout: list → element
 				map_entry->child_entries.push_back(
-				    MapColumn(file_metadata, *column.child_columns[0], *field_children[0], prefix));
+				    MapColumn(file_metadata, *column.child_columns[0], *field_children[0], prefix, true));
 			} else {
 				// for lists we don't need to do any name mapping - the child element always maps to each other
 				// (1) Parquet has an extra element in between the list and its child ("REPEATED") - strip it
 				// (2) Parquet has a different convention on how to name list children - rename them to "list" here
 				column.child_columns[0]->child_columns[0]->name = "list";
-				map_entry->child_entries.push_back(
-				    MapColumn(file_metadata, *column.child_columns[0]->child_columns[0], *field_children[0], prefix));
+				map_entry->child_entries.push_back(MapColumn(file_metadata, *column.child_columns[0]->child_columns[0],
+				                                             *field_children[0], prefix, true));
 			}
 
 			break;
 		case LogicalTypeId::MAP:
 			// for maps we don't need to do any name mapping - the child elements are always key/value
-			if (!column.child_columns.empty() && column.child_columns[0]->name == "key_value") {
-				map_entry->child_entries =
-				    MapColumns(file_metadata, column.child_columns[0]->child_columns, field_id.Children(), prefix);
-			} else {
-				// (1) Parquet has an extra element in between the list and its child ("REPEATED") - strip it
-				map_entry->child_entries =
-				    MapColumns(file_metadata, column.child_columns[0]->child_columns, field_id.Children(), prefix);
-			}
+			// (1) Parquet has an extra element in between the list and its child ("REPEATED") - strip it
+			map_entry->child_entries =
+			    MapColumns(file_metadata, column.child_columns[0]->child_columns, field_id.Children(), prefix, true);
 			break;
 		default:
 			throw InvalidInputException("Unsupported nested type %s for add files", field_id.Type());
@@ -1480,43 +1489,52 @@ void DuckLakeFileProcessor::MapColumnStats(ParquetFileMetadata &file_metadata, D
 
 	// Process statistics for hive partition columns
 	for (auto &entry : file_metadata.hive_partition_values) {
-		if (entry.transform.type == DuckLakeTransformType::BUCKET ||
-		    DuckLakePartitionUtils::IsEpochTransform(entry.transform.type)) {
-			// Hash/epoch-ordinal folder values are not source column values, so no statistics from them
+		if (entry.transform.type != DuckLakeTransformType::IDENTITY) {
+			// Transformed folder values are not source column values, so no statistics from them
 			continue;
 		}
 
-		auto field_index = entry.field_index;
-		auto &field_type = entry.field_type;
-		auto &hive_value = entry.hive_value;
+		result.column_stats.emplace(entry.field_index, ConstantColumnStats(file_metadata, entry.field_index,
+		                                                                   entry.field_type, entry.hive_value));
+	}
 
-		DuckLakeColumnStats column_stats(field_type);
-		// num_values and null_count both needed to write count
-		// metadata in DuckLakeColumnStatsInfo::FromColumnStats
-		column_stats.has_num_values = true;
-		column_stats.num_values = file_metadata.row_count.GetIndex();
-		column_stats.has_null_count = true;
-		if (hive_value.IsNull()) {
-			// All rows in this file have NULL for this partition column
-			column_stats.null_count = file_metadata.row_count.GetIndex();
-			column_stats.any_valid = false;
-		} else if (!skipped_fields.count(field_index.index)) {
-			// a skipped column records counts but not the folder value
-			column_stats.min = column_stats.max = hive_value.ToString();
-			column_stats.has_min = column_stats.has_max = true;
-			column_stats.min_is_exact = column_stats.max_is_exact = true;
-		};
-
-		result.column_stats.emplace(field_index, std::move(column_stats));
+	for (auto &missing : file_metadata.missing_columns) {
+		if (missing.reads_null) {
+			auto column_stats =
+			    ConstantColumnStats(file_metadata, missing.field_index, missing.field_type, Value(missing.field_type));
+			if (missing.repeated) {
+				column_stats.has_num_values = false;
+				column_stats.has_null_count = false;
+			}
+			result.column_stats.emplace(missing.field_index, std::move(column_stats));
+			continue;
+		}
+		// the statistics of a non NULL default are left unknown
+		DuckLakeColumnStats unknown_stats(missing.field_type);
+		if (unknown_stats.extra_stats) {
+			// extra statistics cannot be unknown, so the column gets no statistics
+			continue;
+		}
+		result.column_stats.emplace(missing.field_index, std::move(unknown_stats));
 	}
 }
 
 static bool IsDuckLakeInternalColumn(const string &name);
 
-vector<unique_ptr<DuckLakeNameMapEntry>>
-DuckLakeFileProcessor::MapColumns(ParquetFileMetadata &file_metadata,
-                                  vector<unique_ptr<ParquetColumn>> &parquet_columns,
-                                  const vector<unique_ptr<DuckLakeFieldId>> &field_ids, const string &prefix) {
+DuckLakeColumnStats DuckLakeFileProcessor::ConstantColumnStats(const ParquetFileMetadata &file_metadata,
+                                                               FieldIndex field_index, const LogicalType &field_type,
+                                                               const Value &value) const {
+	auto column_stats = DuckLakeColumnStats::FromConstant(field_type, value, file_metadata.row_count.GetIndex());
+	if (skipped_fields.count(field_index.index)) {
+		// a skipped column records counts but not the value
+		column_stats.ClearBounds();
+	}
+	return column_stats;
+}
+
+vector<unique_ptr<DuckLakeNameMapEntry>> DuckLakeFileProcessor::MapColumns(
+    ParquetFileMetadata &file_metadata, vector<unique_ptr<ParquetColumn>> &parquet_columns,
+    const vector<unique_ptr<DuckLakeFieldId>> &field_ids, const string &prefix, bool repeated) {
 	// create a top-level map of columns
 	case_insensitive_map_t<const_reference<DuckLakeFieldId>> field_id_map;
 	for (auto &field_id : field_ids) {
@@ -1548,7 +1566,7 @@ DuckLakeFileProcessor::MapColumns(ParquetFileMetadata &file_metadata,
 			field_id_map.erase(entry);
 			continue;
 		}
-		column_maps.push_back(MapColumn(file_metadata, *col, entry->second.get(), prefix));
+		column_maps.push_back(MapColumn(file_metadata, *col, entry->second.get(), prefix, repeated));
 		field_id_map.erase(entry);
 	}
 	for (auto &entry : field_id_map) {
@@ -1569,6 +1587,8 @@ DuckLakeFileProcessor::MapColumns(ParquetFileMetadata &file_metadata,
 			    prefix.empty() ? prefix : prefix + ".", entry.second.get().Name(), table.name.GetIdentifierName(),
 			    file_metadata.filepath);
 		}
+		CollectMissingColumns(field_id, field_id.GetColumnData().initial_default.IsNull(), repeated,
+		                      file_metadata.missing_columns);
 	}
 	return column_maps;
 }
@@ -1776,7 +1796,7 @@ vector<DuckLakeDataFile> DuckLakePrepareExternalFiles(DuckLakeTransaction &trans
 }
 
 static void DuckLakeAddDataFilesExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &state = data_p.global_state->Cast<DuckLakeAddDataFilesState>();
+	auto &state = data_p.global_state->Cast<DuckLakeRunOnceState>();
 	auto &bind_data = data_p.bind_data->Cast<DuckLakeAddDataFilesData>();
 	auto &transaction = DuckLakeTransaction::Get(context, bind_data.catalog);
 
@@ -1797,7 +1817,7 @@ TableFunctionSet DuckLakeAddDataFilesFunction::GetFunctions() {
 	vector<LogicalType> at_types {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR)};
 	for (auto &type : at_types) {
 		TableFunction function("ducklake_add_data_files", {LogicalType::VARCHAR, LogicalType::VARCHAR, type},
-		                       DuckLakeAddDataFilesExecute, DuckLakeAddDataFilesBind, DuckLakeAddDataFilesInit);
+		                       DuckLakeAddDataFilesExecute, DuckLakeAddDataFilesBind, DuckLakeRunOnceState::Init);
 		function.named_parameters["allow_missing"] = LogicalType::BOOLEAN;
 		function.named_parameters["ignore_extra_columns"] = LogicalType::BOOLEAN;
 		function.named_parameters["hive_partitioning"] = LogicalType::BOOLEAN;

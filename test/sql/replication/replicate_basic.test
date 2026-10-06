@@ -41,6 +41,13 @@ SELECT (SELECT COUNT(*) FROM repl_dest.app.orders), (SELECT COUNT(*) FROM repl_d
 ----
 100	20
 
+# Replication preserves the source's top-level schema, including after refresh.
+query II
+SELECT schema_name, parent_schema FROM duckdb_schemas()
+WHERE database_name = 'repl_dest' AND schema_name = 'app'
+----
+app	NULL
+
 # excluded staging table must not be replicated
 query I
 SELECT count(*) FROM duckdb_tables() WHERE database_name = 'repl_dest' AND table_name = 'staging_scratch'
@@ -66,7 +73,7 @@ SELECT replication_id, tables_synced, rows_copied, 1 FROM ducklake_replicate_cat
 1	2	111	1
 
 query I
-SELECT COUNT(*) FROM repl_dest.main.app.orders
+SELECT COUNT(*) FROM repl_dest.app.orders
 ----
 91
 

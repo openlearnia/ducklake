@@ -98,7 +98,7 @@ struct ReplicateCreateData : public TableFunctionData {
 
 static unique_ptr<FunctionData> ReplicateCreateBind(ClientContext &context, TableFunctionBindInput &input,
                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto result = make_uniq<ReplicateCreateData>();
 	result->dest_catalog = &catalog;
 	if (input.inputs[1].IsNull()) {
@@ -182,7 +182,7 @@ struct ReplicateCatchupData : public TableFunctionData {
 
 static unique_ptr<FunctionData> ReplicateCatchupBind(ClientContext &context, TableFunctionBindInput &input,
                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	EnsureParquetLoaded(context);
 	auto result = make_uniq<ReplicateCatchupData>();
 	result->dest_catalog = &catalog;
@@ -303,7 +303,7 @@ static vector<Value> JobStatusValues(const DuckLakeReplicationJob &job, const Va
 
 static unique_ptr<FunctionData> ReplicateStatusBind(ClientContext &context, TableFunctionBindInput &input,
                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto result = make_uniq<ReplicateStatusData>();
 	result->dest_catalog = &catalog;
 	GetReplicationStatusColumns(return_types, names);
@@ -353,7 +353,7 @@ struct ReplicateTablesData : public TableFunctionData {
 
 static unique_ptr<FunctionData> ReplicateTablesBind(ClientContext &context, TableFunctionBindInput &input,
                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto result = make_uniq<ReplicateTablesData>();
 	result->dest_catalog = &catalog;
 	if (input.inputs[1].IsNull()) {
@@ -433,7 +433,7 @@ struct ReplicateDropData : public TableFunctionData {
 
 static unique_ptr<FunctionData> ReplicateDropBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto result = make_uniq<ReplicateDropData>();
 	result->dest_catalog = &catalog;
 	if (input.inputs[1].IsNull()) {
@@ -493,7 +493,7 @@ static vector<Value> ActionRow(const DuckLakeReplicationJobAction &action) {
 //! Bind helper shared by start/stop: catalog arg + optional named job_id for start.
 static unique_ptr<FunctionData> ReplicateStartBind(ClientContext &context, TableFunctionBindInput &input,
                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto result = make_uniq<ReplicateDropData>();
 	result->dest_catalog = &catalog;
 	for (auto &entry : input.named_parameters) {
@@ -539,7 +539,7 @@ DuckLakeReplicateStartFunction::DuckLakeReplicateStartFunction()
 static unique_ptr<FunctionData> ReplicateLifecycleBind(ClientContext &context, TableFunctionBindInput &input,
                                                        vector<LogicalType> &return_types, vector<Identifier> &names,
                                                        bool needs_job) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto result = make_uniq<ReplicateDropData>();
 	result->dest_catalog = &catalog;
 	if (needs_job) {

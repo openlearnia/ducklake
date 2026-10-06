@@ -25,8 +25,12 @@ namespace duckdb {
 struct AlterTableInfo;
 struct DuckLakeColumnInfo;
 struct SetPartitionedByInfo;
+struct SetTableOptionsInfo;
+struct ResetTableOptionsInfo;
 struct SetCommentInfo;
 class DuckLakeTransaction;
+class DuckLakeCatalog;
+class ParsedExpression;
 
 struct ColumnChangeInfo {
 	vector<DuckLakeNewColumn> new_fields;
@@ -90,6 +94,9 @@ public:
 	const vector<DuckLakeInlinedTableInfo> &GetInlinedDataTables() const {
 		return inlined_data_tables;
 	}
+	//! The inlined data tables to read at the snapshot, skipping the flushed and dropped ones
+	vector<DuckLakeInlinedTableInfo> GetInlinedDataTables(DuckLakeTransaction &transaction,
+	                                                      DuckLakeSnapshot snapshot) const;
 	const ColumnDefinition &GetColumnByFieldId(FieldIndex field_index) const;
 	//! Returns the root field id of a column
 	const DuckLakeFieldId &GetFieldId(PhysicalIndex column_index) const;
@@ -101,10 +108,19 @@ public:
 	//! Returns the field id of a column by a column path if it exists (and nullptr otherwise)
 	optional_ptr<const DuckLakeFieldId> TryGetFieldId(const vector<Identifier> &column_names,
 	                                                  optional_ptr<optional_idx> name_offset = nullptr) const;
+	static optional_ptr<const DuckLakeFieldId> TryGetFieldId(const ColumnList &columns,
+	                                                         const DuckLakeFieldData &field_data,
+	                                                         const vector<Identifier> &column_names,
+	                                                         optional_ptr<optional_idx> name_offset = nullptr);
 	//! Returns the field id of a column by a field index
 	optional_ptr<const DuckLakeFieldId> GetFieldId(FieldIndex field_index) const;
 	void SetPartitionData(unique_ptr<DuckLakePartition> partition_data);
 	void SetSortData(unique_ptr<DuckLakeSort> sort_data);
+	//! CREATE TABLE WITH options, persisted at commit
+	const map<string, string> &GetTableOptions() const {
+		return table_options;
+	}
+	void SetTableOptions(map<string, string> options);
 	shared_ptr<DuckLakeTableStats> GetTableStats(ClientContext &context);
 	shared_ptr<DuckLakeTableStats> GetTableStats(DuckLakeTransaction &transaction);
 	idx_t GetNetDataFileRowCount(DuckLakeTransaction &transaction);
@@ -151,6 +167,17 @@ public:
 
 	//! Validate that every sort-expression column reference exists in the column list.
 	static void ValidateSortExpressionColumns(const ColumnList &columns, const vector<OrderByNode> &orders);
+	//! Resolves skip_stats_columns names to the stored field ids
+	static string ResolveSkippedStatsColumns(DuckLakeTableEntry &table, const Value &val);
+	static string ResolveSkippedStatsColumns(const ColumnList &columns, const DuckLakeFieldData &field_data,
+	                                         optional_ptr<const DuckLakePartition> partition_data,
+	                                         const string &table_name, const Value &val);
+	//! Validates table options and normalizes their values
+	static map<string, string> ParseTableOptions(ClientContext &context, DuckLakeCatalog &catalog,
+	                                             const case_insensitive_map_t<unique_ptr<ParsedExpression>> &options,
+	                                             const ColumnList &columns, const DuckLakeFieldData &field_data,
+	                                             optional_ptr<const DuckLakePartition> partition_data,
+	                                             const string &table_name);
 
 	//! Build a DuckLakePartition from raw partition expressions (allocates a transaction-local id).
 	static unique_ptr<DuckLakePartition> BuildPartitionData(DuckLakeTransaction &transaction, const ColumnList &columns,
@@ -164,11 +191,12 @@ public:
 	                                              const vector<unique_ptr<ParsedExpression>> &sort_keys);
 
 private:
+	bool CanUseGlobalStats(DuckLakeTransaction &transaction) const;
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, RenameTableInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, SetPartitionedByInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(ClientContext &context, DuckLakeTransaction &transaction, SetNotNullInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, AddConstraintInfo &info);
-unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, DropNotNullInfo &info);
+	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, DropNotNullInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(ClientContext &context, DuckLakeTransaction &transaction,
 	                                    RenameColumnInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(ClientContext &context, DuckLakeTransaction &transaction, AddColumnInfo &info);
@@ -179,6 +207,10 @@ unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, DropNotNul
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, RenameFieldInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, SetDefaultInfo &info);
 	unique_ptr<CatalogEntry> AlterTable(DuckLakeTransaction &transaction, SetSortedByInfo &info);
+	unique_ptr<CatalogEntry> AlterTable(ClientContext &context, DuckLakeTransaction &transaction,
+	                                    SetTableOptionsInfo &info);
+	unique_ptr<CatalogEntry> AlterTable(ClientContext &context, DuckLakeTransaction &transaction,
+	                                    ResetTableOptionsInfo &info);
 
 	unique_ptr<DuckLakeFieldId> GetNestedEvolution(const DuckLakeFieldId &source_id, const LogicalType &target,
 	                                               ColumnChangeInfo &result, optional_idx parent_idx);
@@ -220,6 +252,7 @@ private:
 	LocalChange local_change;
 	unique_ptr<DuckLakePartition> partition_data;
 	unique_ptr<DuckLakeSort> sort_data;
+	map<string, string> table_options;
 	// only set for REMOVED_COLUMN
 	unique_ptr<ColumnChangeInfo> changed_fields;
 	// only set for ADD_CONSTRAINT - LocalChange is stored by value, so the definition lives here

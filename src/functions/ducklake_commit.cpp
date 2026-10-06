@@ -8,7 +8,6 @@ struct DuckLakeCommitBindData : public TableFunctionData {
 	string metadata_schema_name;
 	int64_t schema_version = 0;
 	DuckLakeRetryConfig retry_config;
-	bool emitted = false;
 };
 
 static unique_ptr<FunctionData> DuckLakeCommitBind(ClientContext &, TableFunctionBindInput &input,
@@ -45,17 +44,14 @@ static unique_ptr<FunctionData> DuckLakeCommitBind(ClientContext &, TableFunctio
 	return std::move(result);
 }
 
-static unique_ptr<GlobalTableFunctionState> DuckLakeCommitInit(ClientContext &, TableFunctionInitInput &) {
-	return make_uniq<GlobalTableFunctionState>();
-}
-
 static void DuckLakeCommitExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &data = data_p.bind_data->CastNoConst<DuckLakeCommitBindData>();
-	if (data.emitted) {
+	auto &state = data_p.global_state->Cast<DuckLakeRunOnceState>();
+	auto &data = data_p.bind_data->Cast<DuckLakeCommitBindData>();
+	if (state.finished) {
 		output.SetChildCardinality(0);
 		return;
 	}
-	data.emitted = true;
+	state.finished = true;
 
 	DuckLakeServerSideCommit commit(context, data.metadata_schema_name, data.schema_version);
 	commit.SetRetryConfigOverride(data.retry_config);
@@ -69,7 +65,7 @@ static void DuckLakeCommitExecute(ClientContext &context, TableFunctionInput &da
 
 DuckLakeCommitFunction::DuckLakeCommitFunction()
     : TableFunction(Identifier("ducklake_commit"), {LogicalType::VARCHAR, LogicalType::BIGINT}, DuckLakeCommitExecute,
-                    DuckLakeCommitBind, DuckLakeCommitInit) {
+                    DuckLakeCommitBind, DuckLakeRunOnceState::Init) {
 	named_parameters["max_retry_count"] = LogicalType::BIGINT;
 	named_parameters["retry_wait_ms"] = LogicalType::BIGINT;
 	named_parameters["retry_backoff"] = LogicalType::DOUBLE;

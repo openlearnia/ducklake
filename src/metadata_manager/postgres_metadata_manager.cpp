@@ -5,6 +5,7 @@
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_metadata_info.hpp"
 #include "storage/ducklake_table_entry.hpp"
+#include "common/ducklake_types.hpp"
 
 namespace duckdb {
 
@@ -204,13 +205,6 @@ bool PostgresMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 	}
 }
 
-bool PostgresMetadataManager::SupportsInlining(const LogicalType &type) {
-	if (type.id() == LogicalTypeId::VARIANT) {
-		return false;
-	}
-	return DuckLakeMetadataManager::SupportsInlining(type);
-}
-
 string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_type) {
 	switch (column_type.id()) {
 	case LogicalTypeId::DOUBLE:
@@ -241,6 +235,106 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 		return "VARCHAR";
 	default:
 		return column_type.ToString();
+	}
+}
+
+bool PostgresMetadataManager::InlinedDeletionTableExists(const string &table_name) {
+	auto &catalog = transaction.GetCatalog();
+	auto remote_query =
+	    StringUtil::Format("SELECT 1 FROM pg_catalog.pg_tables WHERE schemaname = %s AND tablename = %s LIMIT 1",
+	                       DuckLakeUtil::SQLLiteralToString(catalog.MetadataSchemaName().GetIdentifierName()),
+	                       DuckLakeUtil::SQLLiteralToString(table_name));
+	auto query =
+	    StringUtil::Format("SELECT 1 FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s, use_transaction = true)",
+	                       DuckLakeUtil::SQLLiteralToString(remote_query));
+	auto result = DuckLakeMetadataManager::Query(query);
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to probe for DuckLake inlined-deletion table: ");
+	}
+	return result->Fetch() != nullptr;
+}
+
+void PostgresMetadataManager::MigrateInlinedDataTypes() {
+	// the user columns of every inlined table with their types at the schema version of that table
+	auto columns = DuckLakeMetadataManager::Query(R"(
+WITH inlined AS (
+	SELECT idt.table_id, idt.table_name, COALESCE(sv.begin_snapshot, (
+		SELECT MIN(t.begin_snapshot) FROM {METADATA_CATALOG}.ducklake_table t WHERE t.table_id = idt.table_id
+	)) AS snapshot_id
+	FROM {METADATA_CATALOG}.ducklake_inlined_data_tables idt
+	LEFT JOIN {METADATA_CATALOG}.ducklake_schema_versions sv
+		ON sv.table_id = idt.table_id AND sv.schema_version = idt.schema_version
+)
+SELECT inlined.table_name, col.column_name, col.column_type
+FROM inlined
+JOIN {METADATA_CATALOG}.ducklake_column col ON col.table_id = inlined.table_id AND col.parent_column IS NULL
+WHERE col.begin_snapshot <= inlined.snapshot_id AND (col.end_snapshot IS NULL OR col.end_snapshot > inlined.snapshot_id)
+)");
+	if (columns->HasError()) {
+		columns->GetErrorObject().Throw("Failed to read the columns of inlined-data tables while migrating: ");
+	}
+	map<string, case_insensitive_map_t<string>> inlined_tables;
+	for (auto &row : *columns) {
+		inlined_tables[row.GetValue<string>(0)][row.GetValue<string>(1)] = row.GetValue<string>(2);
+	}
+	for (auto &inlined_table : inlined_tables) {
+		auto &table_name = inlined_table.first;
+		auto probe = DuckLakeMetadataManager::Query(
+		    StringUtil::Format("SELECT * FROM {METADATA_CATALOG}.%s LIMIT 0", SQLIdentifier(table_name)));
+		if (probe->HasError() || probe->GetNames().size() < 3) {
+			continue;
+		}
+		// the metadata columns are always the first three columns, user columns follow
+		auto &names = probe->GetNames();
+		DuckLakeInlinedColNames col_names(false);
+		col_names.row_id = names[0].GetIdentifierName();
+		col_names.begin_snapshot = names[1].GetIdentifierName();
+		col_names.end_snapshot = names[2].GetIdentifierName();
+		vector<string> select_list;
+		for (idx_t i = 0; i < 3; i++) {
+			select_list.push_back(SQLIdentifier::ToString(names[i].GetIdentifierName()));
+		}
+		string column_defs;
+		bool rewrite = false;
+		for (idx_t i = 3; i < names.size(); i++) {
+			auto name = names[i].GetIdentifierName();
+			auto column_type = inlined_table.second.find(name);
+			if (column_type == inlined_table.second.end()) {
+				rewrite = false;
+				break;
+			}
+			DuckLakeColumnInfo column;
+			column.type = column_type->second;
+			auto storage_type_name = GetColumnType(column);
+			auto storage_type = UnboundType::TryParseAndDefaultBind(storage_type_name);
+			auto type = DuckLakeTypes::FromString(column.type);
+			auto native_type = type.HasAlias() ? LogicalType(type.id()) : type;
+			// DuckLake 0.3 stored values with the native type of their DuckLake type, other columns are kept
+			auto &stored_type = probe->GetTypes()[i];
+			bool convert = stored_type != storage_type && stored_type == native_type;
+			auto column_name = SQLIdentifier::ToString(name);
+			column_defs += StringUtil::Format("%s%s %s", column_defs.empty() ? "" : ", ", column_name,
+			                                  convert ? storage_type_name : stored_type.ToString());
+			select_list.push_back(convert ? DuckLakeUtil::InlinedStorageExpression(*this, column_name, type)
+			                              : column_name);
+			rewrite = rewrite || convert;
+		}
+		if (!rewrite) {
+			continue;
+		}
+		auto migrated_name = table_name + "_migrated";
+		auto migrate_query = InlinedTableDdlSql(migrated_name, column_defs, col_names);
+		migrate_query += StringUtil::Format("INSERT INTO {METADATA_CATALOG}.%s SELECT %s FROM {METADATA_CATALOG}.%s;",
+		                                    SQLIdentifier(migrated_name), StringUtil::Join(select_list, ", "),
+		                                    SQLIdentifier(table_name));
+		migrate_query += StringUtil::Format("DROP TABLE {METADATA_CATALOG}.%s;", SQLIdentifier(table_name));
+		migrate_query += StringUtil::Format("ALTER TABLE {METADATA_CATALOG}.%s RENAME TO %s;",
+		                                    SQLIdentifier(migrated_name), SQLIdentifier(table_name));
+		auto result = DuckLakeMetadataManager::Execute(migrate_query);
+		if (result->HasError()) {
+			result->GetErrorObject().Throw(
+			    StringUtil::Format("Failed to migrate the column types of inlined-data table \"%s\": ", table_name));
+		}
 	}
 }
 
@@ -286,10 +380,18 @@ unique_ptr<QueryResult> PostgresMetadataManager::Query(DuckLakeSnapshot snapshot
 	return DuckLakeMetadataManager::Query(snapshot, query);
 }
 
+void PostgresMetadataManager::ClearCache() {
+	auto result = transaction.ExecuteRaw("CALL pg_clear_cache();");
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to clear the PostgreSQL metadata cache: ");
+	}
+}
+
 string PostgresMetadataManager::GetLatestSnapshotQuery() const {
 	return R"(
 	SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL},
-		'SELECT snapshot_id, schema_version, next_catalog_id, next_file_id
+		'SELECT snapshot_id, schema_version, next_catalog_id, next_file_id,
+		 (SELECT MAX(value) FROM {METADATA_SCHEMA_ESCAPED}.ducklake_metadata WHERE key = ''version'')
 		 FROM {METADATA_SCHEMA_ESCAPED}.ducklake_snapshot WHERE snapshot_id = (
 		     SELECT MAX(snapshot_id) FROM {METADATA_SCHEMA_ESCAPED}.ducklake_snapshot
 		 );')
@@ -314,55 +416,6 @@ string PostgresMetadataManager::GenerateFileListQuery(DuckLakeTableEntry &table,
 
 	return StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s)",
 	                          SQLString(remote_query));
-}
-
-// We need a specialized function here to do a reinterpret for postgres from BLOB to VARCHAR
-shared_ptr<DuckLakeInlinedData> PostgresMetadataManager::TransformInlinedData(QueryResult &result,
-                                                                              const vector<LogicalType> &expected_types,
-                                                                              const string &inlined_table_name) {
-	CheckInlinedDataReadError(result, inlined_table_name);
-	bool needs_reinterpret = false;
-	if (!expected_types.empty()) {
-		auto &result_types = result.GetTypes();
-		if (result_types.size() < expected_types.size()) {
-			throw InvalidInputException(
-			    "Failed to read inlined data from DuckLake: expected %llu columns but read %llu", expected_types.size(),
-			    result_types.size());
-		}
-		for (idx_t i = 0; i < expected_types.size(); i++) {
-			if (result_types[i] != expected_types[i]) {
-				D_ASSERT(result_types[i].id() == LogicalTypeId::BLOB &&
-				         expected_types[i].id() == LogicalTypeId::VARCHAR);
-				needs_reinterpret = true;
-			}
-		}
-	}
-	if (!needs_reinterpret) {
-		return DuckLakeMetadataManager::TransformInlinedData(result, expected_types, inlined_table_name);
-	}
-
-	auto context = transaction.context.lock();
-	auto data = make_uniq<ColumnDataCollection>(*context, expected_types);
-	DataChunk reinterpret_chunk;
-	reinterpret_chunk.Initialize(*context, expected_types);
-	while (true) {
-		auto chunk = result.Fetch();
-		if (!chunk) {
-			break;
-		}
-		for (idx_t i = 0; i < expected_types.size(); i++) {
-			reinterpret_chunk.data[i].Reinterpret(chunk->data[i]);
-		}
-		// Use SetChildCardinality (not SetCardinality): on current duckdb SetCardinality only updates the
-		// chunk count, while ColumnDataCollection::Append reads each vector via ToUnifiedFormat(), which
-		// relies on the vector's own size. SetChildCardinality also FlatVector::SetSize()s every vector, so
-		// the reinterpreted (BLOB->VARCHAR) vectors are sized to the row count and the rows are appended.
-		reinterpret_chunk.SetChildCardinality(chunk->size());
-		data->Append(reinterpret_chunk);
-	}
-	auto inlined_data = make_shared_ptr<DuckLakeInlinedData>();
-	inlined_data->data = std::move(data);
-	return inlined_data;
 }
 
 } // namespace duckdb

@@ -193,7 +193,7 @@ static unique_ptr<GlobalTableFunctionState> RbacMutateInit(ClientContext &, Tabl
 
 static unique_ptr<FunctionData> RoleBind(RbacAction action, ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto role = StringValue::Get(input.inputs[1]);
 	if (role.empty() || StringUtil::CIEquals(role, DUCKLAKE_PUBLIC_GRANTEE)) {
 		throw InvalidInputException("Invalid role name \"%s\"", role);
@@ -232,7 +232,7 @@ DuckLakeDropRoleFunction::DuckLakeDropRoleFunction()
 
 static unique_ptr<FunctionData> GrantBind(RbacAction action, ClientContext &context, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto grantee = StringValue::Get(input.inputs[1]);
 	if (grantee.empty()) {
 		throw InvalidInputException("Grantee cannot be empty");
@@ -305,7 +305,7 @@ DuckLakeRevokeFunction::DuckLakeRevokeFunction()
 
 static unique_ptr<FunctionData> RolesBind(ClientContext &context, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	string query = "SELECT role_id, role_name FROM {METADATA_CATALOG}.ducklake_role ORDER BY role_id";
 	auto result = transaction.GetMetadataManager().Query(query);
@@ -328,7 +328,7 @@ static unique_ptr<FunctionData> RolesBind(ClientContext &context, TableFunctionB
 
 static unique_ptr<FunctionData> GrantsBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	string query =
 	    "SELECT grantee, schema_id, table_id, privileges FROM {METADATA_CATALOG}.ducklake_grant ORDER BY grantee, "

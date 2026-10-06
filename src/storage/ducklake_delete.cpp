@@ -476,7 +476,8 @@ void DuckLakeDelete::FlushDeleteWithSnapshots(DuckLakeTransaction &transaction, 
 	auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
 	// Vortex-managed tables always use positional deletes; never write new Puffin DVs.
 	bool use_deletion_vectors =
-	    data_file_format != "vortex" && catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId());
+	    data_file_format != "vortex" &&
+	    catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId(), &table.GetTableOptions());
 	auto written_file = DuckLakeDeleteFileWriter::Write(context, input, use_deletion_vectors);
 
 	written_file.data_file_id = delete_file.data_file_id;
@@ -556,7 +557,8 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
 	if (data_file_info.file_id.IsValid()) {
 		auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
 		auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
-		auto threshold = catalog.DataInliningRowLimit(context, schema.GetSchemaId(), table.GetTableId());
+		auto threshold =
+		    catalog.DataInliningRowLimit(context, schema.GetSchemaId(), table.GetTableId(), &table.GetTableOptions());
 		if (threshold > 0 && sorted_deletes.size() <= threshold) {
 			// use inlined file deletions
 			if (catalog.CheckInlinedDeletionTableCache(table.GetTableId(), transaction.GetSnapshot()) !=
@@ -604,7 +606,8 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
 	auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
 	auto data_file_format = catalog.GetDataFileFormat(context, table);
 	bool use_deletion_vectors =
-	    data_file_format != "vortex" && catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId());
+	    data_file_format != "vortex" &&
+	    catalog.WriteDeletionVectors(schema.GetSchemaId(), table.GetTableId(), &table.GetTableOptions());
 
 	WriteDeleteFileInput input {context,
 	                            transaction,

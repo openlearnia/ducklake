@@ -1,0 +1,43 @@
+# name: benchmark/micro/show_all_tables.benchmark
+# description: Run SHOW ALL TABLES on a freshly attached catalog with many tables
+# group: [micro]
+
+argument tables 2000
+
+name Show All Tables
+group micro
+
+require ducklake
+
+cache_file show_all_tables_${tables}_ready.marker
+
+load
+EXPORT DATABASE '${BENCHMARK_DIR}/show_all_tables_${tables}_ddl';
+COPY (SELECT 'CREATE TABLE ducklake.tbl_' || i || ' (id INTEGER, random_data VARCHAR);' FROM range(${tables}) t(i))
+TO '${BENCHMARK_DIR}/show_all_tables_${tables}_ddl/schema.sql' (HEADER false, QUOTE '');
+@create show_all_tables_${tables}
+@attach show_all_tables_${tables} AS ducklake (DATA_PATH '${BENCHMARK_DIR}/show_all_tables_${tables}_files')
+BEGIN;
+IMPORT DATABASE '${BENCHMARK_DIR}/show_all_tables_${tables}_ddl';
+COMMIT;
+CALL ducklake_delete_orphaned_files('ducklake', cleanup_all => true);
+DETACH ducklake;
+@seal show_all_tables_${tables}
+COPY (SELECT 1) TO '${BENCHMARK_DIR}/show_all_tables_${tables}_ready.marker' (FORMAT CSV);
+@attach show_all_tables_${tables} AS ducklake
+
+reload
+@attach show_all_tables_${tables} AS ducklake
+
+run
+SHOW ALL TABLES;
+
+# Reattaching clears the catalog cache
+cleanup
+DETACH ducklake;
+@attach show_all_tables_${tables} AS ducklake
+
+result_query I
+SELECT count(*) FROM __answer WHERE database = 'ducklake'
+----
+${tables}

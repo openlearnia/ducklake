@@ -1,3 +1,4 @@
+#include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "storage/ducklake_transaction.hpp"
@@ -22,7 +23,11 @@ TableCatalogEntry &GetTableEntry(ClientContext &context, Catalog &catalog, const
 		throw BinderException("Schema cannot be NULL");
 	}
 	auto schema_name = schema.GetValue<string>();
-	auto entry = catalog.GetEntry(context, Identifier(schema_name), lookup, OnEntryNotFound::THROW_EXCEPTION);
+	EntryLookupInfo qualified_lookup(
+	    lookup, DuckLakeUtil::QualifiedEntryName(context, catalog, schema_name, lookup.GetEntryName(),
+	                                             lookup.GetCatalogType(), lookup.GetAtClause()));
+	CatalogEntryRetriever retriever(context);
+	auto entry = catalog.LookupEntry(retriever, qualified_lookup, OnEntryNotFound::THROW_EXCEPTION).entry;
 	if (entry->type != CatalogType::TABLE_ENTRY) {
 		throw BinderException("\"%s\" is a %s, not a table. Data change feed functions only support tables.",
 		                      lookup.GetEntryName(), CatalogTypeToString(entry->type));
@@ -50,7 +55,7 @@ static unique_ptr<FunctionData> DuckLakeTableChangesBind(ClientContext &context,
 	auto start_at_clause = AtClauseFromValue(input.inputs[3]);
 	auto end_at_clause = AtClauseFromValue(input.inputs[4]);
 
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto table_name = GetTableName(input.inputs[2]);
 	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, Identifier(table_name), end_at_clause, QueryErrorContext());
 	auto &table = GetTableEntry(context, catalog, lookup, input.inputs[1]);

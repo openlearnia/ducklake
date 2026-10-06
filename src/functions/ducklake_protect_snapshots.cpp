@@ -21,7 +21,7 @@ struct ProtectSnapshotsBindData : public TableFunctionData {
 static unique_ptr<FunctionData> DuckLakeProtectSnapshotsBind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
                                                              vector<Identifier> &names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto result = make_uniq<ProtectSnapshotsBindData>(catalog);
 	DuckLakeSnapshotsFunction::GetSnapshotTypes(return_types, names);
 

@@ -68,6 +68,8 @@ struct DuckLakeColumnStats {
 public:
 	static DuckLakeColumnStats FromGlobalStats(const LogicalType &type, const DuckLakeGlobalColumnStatsInfo &col,
 	                                           bool table_has_rows);
+	//! The statistics of count values that are all the given value
+	static DuckLakeColumnStats FromConstant(const LogicalType &type, const Value &value, idx_t count);
 	//! Discards the min/max bounds, leaving the counts intact
 	void ClearBounds();
 	static bool BoundsSurviveTypePromotion(const LogicalType &source, const LogicalType &target);

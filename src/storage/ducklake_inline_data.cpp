@@ -1,5 +1,6 @@
 #include "storage/ducklake_inline_data.hpp"
 #include "storage/ducklake_stats.hpp"
+#include "common/ducklake_types.hpp"
 
 #include "duckdb/common/type_visitor.hpp"
 #include "storage/ducklake_insert.hpp"
@@ -272,7 +273,7 @@ void UpdateStats(vector<DuckLakeBaseColumnStats> &stats, idx_t c, Vector &data, 
 	}
 	auto &column_stats = stats[c];
 	auto &type = data.GetType();
-	if (type.IsNested() && type.id() != LogicalTypeId::VARIANT) {
+	if (DuckLakeTypes::IsNested(type)) {
 		// nested - recurse into children
 		switch (data.GetType().id()) {
 		case LogicalTypeId::STRUCT: {

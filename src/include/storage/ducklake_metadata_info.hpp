@@ -83,6 +83,7 @@ struct DuckLakeMetadata {
 
 struct DuckLakeSchemaInfo {
 	SchemaIndex id;
+	SchemaIndex parent_id;
 	string uuid;
 	string name;
 	string path;
@@ -663,6 +664,7 @@ struct DuckLakeConfigOptionUndo {
 	DuckLakeConfigOption option;
 	string previous_value;
 	bool was_set = false;
+	bool reset = false;
 };
 
 struct DuckLakeNameMapColumnInfo {
