@@ -118,19 +118,22 @@ struct MissingColumn {
 	FieldIndex field_index;
 	LogicalType field_type;
 	bool reads_null;
+	//! The column default, when the missing field reads as that value rather than as NULL
+	Value default_value;
 	//! Whether the column is inside a list or map element, so it does not have one value per row
 	bool repeated;
 };
 
-static void CollectMissingColumns(const DuckLakeFieldId &field_id, bool reads_null, bool repeated,
-                                  vector<MissingColumn> &result) {
+static void CollectMissingColumns(const DuckLakeFieldId &field_id, bool reads_null, const Value &default_value,
+                                  bool repeated, vector<MissingColumn> &result) {
 	if (!field_id.HasChildren()) {
-		result.push_back(MissingColumn {field_id.GetFieldIndex(), field_id.Type(), reads_null, repeated});
+		result.push_back(
+		    MissingColumn {field_id.GetFieldIndex(), field_id.Type(), reads_null, default_value, repeated});
 		return;
 	}
 	// the fields of a missing parent read as NULL
 	for (auto &child : field_id.Children()) {
-		CollectMissingColumns(*child, true, repeated, result);
+		CollectMissingColumns(*child, true, Value(), repeated, result);
 	}
 }
 
@@ -1509,13 +1512,21 @@ void DuckLakeFileProcessor::MapColumnStats(ParquetFileMetadata &file_metadata, D
 			result.column_stats.emplace(missing.field_index, std::move(column_stats));
 			continue;
 		}
-		// the statistics of a non NULL default are left unknown
-		DuckLakeColumnStats unknown_stats(missing.field_type);
-		if (unknown_stats.extra_stats) {
-			// extra statistics cannot be unknown, so the column gets no statistics
+		// a missing column with a non-NULL default reads as that default for every row, so its
+		// statistics are constant. Leaving them unknown instead would both fail to prune and,
+		// because an unknown null count claims both HasNull and HasNoNull, let filter pushdown
+		// both wrongly include and wrongly exclude rows.
+		if (DuckLakeColumnStats(missing.field_type).extra_stats) {
+			// extra statistics cannot describe a constant default, so the column gets none
 			continue;
 		}
-		result.column_stats.emplace(missing.field_index, std::move(unknown_stats));
+		auto column_stats = ConstantColumnStats(file_metadata, missing.field_index, missing.field_type,
+		                                        missing.default_value);
+		if (missing.repeated) {
+			column_stats.has_num_values = false;
+			column_stats.has_null_count = false;
+		}
+		result.column_stats.emplace(missing.field_index, std::move(column_stats));
 	}
 }
 
@@ -1587,8 +1598,9 @@ vector<unique_ptr<DuckLakeNameMapEntry>> DuckLakeFileProcessor::MapColumns(
 			    prefix.empty() ? prefix : prefix + ".", entry.second.get().Name(), table.name.GetIdentifierName(),
 			    file_metadata.filepath);
 		}
-		CollectMissingColumns(field_id, field_id.GetColumnData().initial_default.IsNull(), repeated,
-		                      file_metadata.missing_columns);
+		const auto &initial_default = field_id.GetColumnData().initial_default;
+	CollectMissingColumns(field_id, initial_default.IsNull(), initial_default, repeated,
+	                      file_metadata.missing_columns);
 	}
 	return column_maps;
 }

@@ -41,6 +41,11 @@ old_schema	NULL
 statement ok
 ALTER TABLE meta.ducklake_schema DROP COLUMN parent_schema_id;
 
+# the tag must be rewound too: leaving it at 1.3 makes the 1.1-dev1 attach below a downgrade,
+# which the initializer rejects
+statement ok
+UPDATE meta.ducklake_metadata SET value = '1.1-dev1' WHERE key = 'version';
+
 statement ok
 DETACH ducklake;
 
