@@ -204,6 +204,7 @@ DuckLakeTableEntry::DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableIn
 	if (parent.sort_data) {
 		sort_data = make_uniq<DuckLakeSort>(*parent.sort_data);
 	}
+	table_options = parent.table_options;
 	CheckSupportedTypes();
 	// LocalChange is held by value, so keep the constraint definition to persist at commit
 	added_constraint = make_uniq<AddConstraintLocalChange>(std::move(local_change));

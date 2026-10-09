@@ -154,7 +154,128 @@ ALTER TABLE two_keys ADD UNIQUE(a)
 ----
 already has a UNIQUE constraint on these columns
 
+# ---------------------------------------------------------------------------
+# table options survive ADD CONSTRAINT in the same transaction
+# ---------------------------------------------------------------------------
+
+# create + SET options + ADD PRIMARY KEY in one transaction
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CREATE TABLE opt_txn(a INTEGER, b INTEGER)
+
+statement ok
+ALTER TABLE opt_txn SET (target_file_size = '128MB', data_inlining_row_limit = 42)
+
+statement ok
+ALTER TABLE opt_txn ADD PRIMARY KEY(a)
+
+statement ok
+COMMIT
+
+query TT
+SELECT option_name, value FROM lake.options()
+WHERE scope = 'TABLE' AND scope_entry = 'main.opt_txn' ORDER BY option_name
+----
+data_inlining_row_limit	42
+target_file_size	128000000
+
+# the control without an ALTER keeps its options too
+statement ok
+CREATE TABLE opt_ctl(a INTEGER, b INTEGER)
+
+statement ok
+ALTER TABLE opt_ctl SET (target_file_size = '128MB', data_inlining_row_limit = 42)
+
+query TT
+SELECT option_name, value FROM lake.options()
+WHERE scope = 'TABLE' AND scope_entry = 'main.opt_ctl' ORDER BY option_name
+----
+data_inlining_row_limit	42
+target_file_size	128000000
+
+# ADD UNIQUE and chained ALTERs keep the options
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CREATE TABLE opt_chain(a INTEGER, b INTEGER)
+
+statement ok
+ALTER TABLE opt_chain SET (target_file_size = '128MB')
+
+statement ok
+ALTER TABLE opt_chain ADD UNIQUE(a)
+
+statement ok
+ALTER TABLE opt_chain ADD PRIMARY KEY(b)
+
+statement ok
+COMMIT
+
+query TT
+SELECT option_name, value FROM lake.options()
+WHERE scope = 'TABLE' AND scope_entry = 'main.opt_chain' ORDER BY option_name
+----
+target_file_size	128000000
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'opt_chain' AND constraint_type != 'NOT NULL' ORDER BY constraint_text
+----
+opt_chain	PRIMARY KEY(b)
+opt_chain	UNIQUE(a)
+
+# options set in the same transaction as a rolled-back ADD survive the rollback
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+ALTER TABLE opt_ctl ADD UNIQUE(b)
+
+statement ok
+ROLLBACK
+
+query TT
+SELECT option_name, value FROM lake.options()
+WHERE scope = 'TABLE' AND scope_entry = 'main.opt_ctl' ORDER BY option_name
+----
+data_inlining_row_limit	42
+target_file_size	128000000
+
+# a partitioned table keeps working through ADD CONSTRAINT
+statement ok
+CREATE TABLE opt_part(a INTEGER, b INTEGER) PARTITIONED BY (b)
+
+statement ok
+ALTER TABLE opt_part SET (target_file_size = '128MB')
+
+statement ok
+ALTER TABLE opt_part ADD PRIMARY KEY(a)
+
+query TT
+SELECT option_name, value FROM lake.options()
+WHERE scope = 'TABLE' AND scope_entry = 'main.opt_part' ORDER BY option_name
+----
+target_file_size	128000000
+
+statement ok
+INSERT INTO opt_part VALUES (1, 10), (2, 20)
+
+query II
+SELECT a, b FROM opt_part ORDER BY a
+----
+1	10
+2	20
+
 # the complete sets survive a detach/reattach
+query T
+SELECT value FROM lake.options() WHERE scope = 'TABLE' AND scope_entry = 'main.opt_txn'
+AND option_name = 'target_file_size'
+----
+128000000
+
 statement ok
 USE memory
 
@@ -169,17 +290,27 @@ USE lake
 
 query TT
 SELECT table_name, constraint_text FROM duckdb_constraints()
-WHERE table_name IN ('two_keys', 'uq_pair', 'one_txn', 'created_txn') AND constraint_type != 'NOT NULL'
+WHERE table_name IN ('two_keys', 'uq_pair', 'one_txn', 'created_txn', 'opt_chain', 'opt_part')
+AND constraint_type != 'NOT NULL'
 ORDER BY table_name, constraint_text
 ----
 created_txn	PRIMARY KEY(a)
 created_txn	UNIQUE(b, a)
 one_txn	UNIQUE(b)
 one_txn	UNIQUE(c, a)
+opt_chain	PRIMARY KEY(b)
+opt_chain	UNIQUE(a)
+opt_part	PRIMARY KEY(a)
 two_keys	PRIMARY KEY(b)
 two_keys	UNIQUE(a)
 uq_pair	UNIQUE(a)
 uq_pair	UNIQUE(b, c)
+
+query T
+SELECT value FROM lake.options() WHERE scope = 'TABLE' AND scope_entry = 'main.opt_txn'
+AND option_name = 'target_file_size'
+----
+128000000
 
 statement ok
 USE memory
