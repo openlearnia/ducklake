@@ -1,0 +1,233 @@
+# name: test/sql/replication/replicate_source_identity.test
+# description: source table recreation (incarnation change) invalidates cursors and reseeds
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_dest.db' AS repl_dest (DATA_PATH '{TEST_DIR}/repl_dest_files')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_src.db' AS repl_src (DATA_PATH '{TEST_DIR}/repl_src_files')
+
+statement ok
+CREATE TABLE repl_src.main.t (id INTEGER)
+
+statement ok
+INSERT INTO repl_src.main.t VALUES (1), (2)
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'repl_src', include := 'main.t')
+----
+1
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query II
+SELECT source_table, row_count_dest FROM ducklake_replicate_tables('repl_dest', 1)
+----
+t	2
+
+# the source identity is persisted next to the cursor after the data commit
+query I
+SELECT source_table_uuid IS NOT NULL FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table
+----
+1
+
+# drop and recreate the source with identical columns and no rows: the new incarnation
+# must invalidate the snapshot cursor and reseed the replica to zero rows
+statement ok
+DROP TABLE repl_src.main.t
+
+statement ok
+CREATE TABLE repl_src.main.t (id INTEGER)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query I
+SELECT count(*) FROM repl_dest.main.t
+----
+0
+
+# a subsequent catchup is a no-op fast path
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query I
+SELECT count(*) FROM repl_dest.main.t
+----
+0
+
+# recreate again with replacement rows
+statement ok
+DROP TABLE repl_src.main.t
+
+statement ok
+CREATE TABLE repl_src.main.t (id INTEGER)
+
+statement ok
+INSERT INTO repl_src.main.t VALUES (8), (9)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.t
+----
+2	17
+
+# identity persisted and stable: incremental catchup resumes without reseeding
+statement ok
+INSERT INTO repl_src.main.t VALUES (10)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.t
+----
+3	27
+
+# upgrade: a lake whose state predates the identity column migrates on demand.
+# a bogus destination row proves the migration cycle reseeds exactly once
+statement ok
+INSERT INTO repl_dest.main.t VALUES (999)
+
+statement ok
+ALTER TABLE __ducklake_metadata_repl_dest.main.ducklake_replication_table DROP COLUMN source_table_uuid
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.t
+----
+3	27
+
+query I
+SELECT source_table_uuid IS NOT NULL FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table
+----
+1
+
+# the cycle after the migration must be incremental, not another reseed
+statement ok
+INSERT INTO repl_dest.main.t VALUES (999)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.t
+----
+4	1026
+
+statement ok
+DELETE FROM repl_dest.main.t WHERE id = 999
+
+# a NULL saved identity with an existing cursor is treated as unknown and reseeds once
+statement ok
+INSERT INTO repl_dest.main.t VALUES (999)
+
+statement ok
+UPDATE __ducklake_metadata_repl_dest.main.ducklake_replication_table SET source_table_uuid = NULL
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.t
+----
+3	27
+
+query I
+SELECT source_table_uuid IS NOT NULL FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table
+----
+1
+
+# cursor-write replay after a lost state write stays idempotent
+statement ok
+UPDATE __ducklake_metadata_repl_dest.main.ducklake_replication_table
+SET last_source_snapshot = last_source_snapshot - 1
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.t
+----
+3	27
+
+# destination reattach keeps the job, the identity and the data
+statement ok
+DETACH repl_dest
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/repl_dest.db' AS repl_dest (DATA_PATH '{TEST_DIR}/repl_dest_files')
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.t
+----
+3	27
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 1)
+
+query II
+SELECT count(*), sum(id) FROM repl_dest.main.t
+----
+3	27
+
+query I
+SELECT source_table_uuid IS NOT NULL FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table
+----
+1
+
+# a table-level failure preserves the saved identity and cursor of the failed table
+statement ok
+CREATE TABLE repl_src.main.other (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO repl_src.main.other VALUES (1, 'x')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'repl_src', include := 'main.other',
+    watermark_columns := 'main.other=seq')
+----
+2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query III
+SELECT source_table, strategy, row_count_dest FROM ducklake_replicate_tables('repl_dest', 2)
+----
+other	watermark	1
+
+query I
+SELECT source_table_uuid IS NOT NULL FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table
+WHERE replication_id = 2
+----
+1
+
+# breaking the watermark column fails only that table; identity and cursor survive
+statement ok
+ALTER TABLE repl_src.main.other DROP COLUMN seq
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query III
+SELECT last_error LIKE '%watermark column%', last_watermark IS NOT NULL, source_table_uuid IS NOT NULL
+FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table WHERE replication_id = 2
+----
+1	1	1
+
+statement ok
+DETACH repl_dest
+
+statement ok
+DETACH repl_src

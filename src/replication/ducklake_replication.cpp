@@ -314,6 +314,7 @@ struct TableSyncOutcome {
 	string strategy = "full";
 	string watermark_column;
 	string pk_columns;
+	Value source_table_uuid;
 	Value last_watermark;
 	Value last_source_snapshot;
 	Value last_full_sync_snapshot;
@@ -467,19 +468,21 @@ static void UpsertTableSyncState(ClientContext &context, DuckLakeCatalog &dest, 
 	auto state_table = MetaTableName(dest, "ducklake_replication_table");
 	auto insert_sql = StringUtil::Format(
 	    "INSERT INTO %s (replication_id, source_schema, source_table, dest_schema, dest_table, strategy, "
-	    "watermark_column, pk_columns, last_watermark, last_source_snapshot, last_full_sync_snapshot, "
-	    "row_count_dest, last_error, synced_at) "
-	    "VALUES (%llu, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %lld, NULL, now()) "
+	    "watermark_column, pk_columns, source_table_uuid, last_watermark, last_source_snapshot, "
+	    "last_full_sync_snapshot, row_count_dest, last_error, synced_at) "
+	    "VALUES (%llu, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %lld, NULL, now()) "
 	    "ON CONFLICT (replication_id, source_schema, source_table) DO UPDATE SET "
 	    "strategy = excluded.strategy, watermark_column = excluded.watermark_column, "
-	    "pk_columns = excluded.pk_columns, last_watermark = excluded.last_watermark, "
+	    "pk_columns = excluded.pk_columns, source_table_uuid = excluded.source_table_uuid, "
+	    "last_watermark = excluded.last_watermark, "
 	    "last_source_snapshot = excluded.last_source_snapshot, "
 	    "last_full_sync_snapshot = excluded.last_full_sync_snapshot, "
 	    "row_count_dest = excluded.row_count_dest, last_error = NULL, synced_at = excluded.synced_at",
 	    state_table, job.replication_id, SQLLit(ref.schema), SQLLit(ref.table), SQLLit(ref.schema), SQLLit(ref.table),
 	    SQLLit(outcome.strategy), outcome.watermark_column.empty() ? "NULL" : SQLLit(outcome.watermark_column),
-	    outcome.pk_columns.empty() ? "NULL" : SQLLit(outcome.pk_columns), ValueSql(outcome.last_watermark),
-	    ValueSql(outcome.last_source_snapshot), ValueSql(outcome.last_full_sync_snapshot), outcome.row_count);
+	    outcome.pk_columns.empty() ? "NULL" : SQLLit(outcome.pk_columns), ValueSql(outcome.source_table_uuid),
+	    ValueSql(outcome.last_watermark), ValueSql(outcome.last_source_snapshot),
+	    ValueSql(outcome.last_full_sync_snapshot), outcome.row_count);
 	auto ins_res = con->Query(insert_sql);
 	CheckResult(*ins_res, "Failed to insert replication table state");
 }
@@ -491,9 +494,9 @@ static void MarkTableError(ClientContext &context, DuckLakeCatalog &dest, const 
 	auto state_table = MetaTableName(dest, "ducklake_replication_table");
 	auto insert_sql = StringUtil::Format(
 	    "INSERT INTO %s (replication_id, source_schema, source_table, dest_schema, dest_table, strategy, "
-	    "watermark_column, pk_columns, last_watermark, last_source_snapshot, last_full_sync_snapshot, "
-	    "row_count_dest, last_error, synced_at) "
-	    "VALUES (%llu, %s, %s, %s, %s, 'full', NULL, NULL, NULL, NULL, NULL, NULL, %s, now()) "
+	    "watermark_column, pk_columns, source_table_uuid, last_watermark, last_source_snapshot, "
+	    "last_full_sync_snapshot, row_count_dest, last_error, synced_at) "
+	    "VALUES (%llu, %s, %s, %s, %s, 'full', NULL, NULL, NULL, NULL, NULL, NULL, NULL, %s, now()) "
 	    "ON CONFLICT (replication_id, source_schema, source_table) DO UPDATE SET last_error = "
 	    "excluded.last_error, synced_at = excluded.synced_at",
 	    state_table, job.replication_id, SQLLit(ref.schema), SQLLit(ref.table), SQLLit(ref.schema), SQLLit(ref.table),
@@ -604,10 +607,17 @@ void DuckLakeReplication::EnsureStateTables(ClientContext &context, DuckLakeCata
 	    "source_table VARCHAR NOT NULL, dest_schema VARCHAR NOT NULL, dest_table VARCHAR NOT NULL, strategy "
 	    "VARCHAR NOT NULL, watermark_column VARCHAR, pk_columns VARCHAR, last_watermark VARCHAR, "
 	    "last_source_snapshot BIGINT, last_full_sync_snapshot BIGINT, row_count_dest BIGINT, last_error VARCHAR, "
-	    "synced_at TIMESTAMPTZ, PRIMARY KEY (replication_id, source_schema, source_table))",
+	    "synced_at TIMESTAMPTZ, source_table_uuid VARCHAR, PRIMARY KEY (replication_id, source_schema, "
+	    "source_table))",
 	    table_table);
 	auto table_res = con->Query(table_sql);
 	CheckResult(*table_res, "Failed to create DuckLake replication table-state table");
+	// Upgrade lakes whose state table predates source identity tracking. Rows keep a NULL
+	// identity until their next successful sync, which reseeds once and persists it.
+	auto uuid_alter =
+	    StringUtil::Format("ALTER TABLE %s ADD COLUMN IF NOT EXISTS source_table_uuid VARCHAR", table_table);
+	auto uuid_res = con->Query(uuid_alter);
+	CheckResult(*uuid_res, "Failed to migrate DuckLake replication table-state table");
 }
 
 //===--------------------------------------------------------------------===//
@@ -730,8 +740,9 @@ DuckLakeReplication::ListTableStates(ClientContext &context, DuckLakeCatalog &de
 	auto table = MetaTableName(dest, "ducklake_replication_table");
 	auto query = StringUtil::Format(
 	    "SELECT replication_id, source_schema, source_table, dest_schema, dest_table, strategy, watermark_column, "
-	    "pk_columns, last_watermark, last_source_snapshot, last_full_sync_snapshot, row_count_dest, last_error, "
-	    "synced_at FROM %s WHERE replication_id = %llu ORDER BY source_schema, source_table",
+	    "pk_columns, source_table_uuid, last_watermark, last_source_snapshot, last_full_sync_snapshot, "
+	    "row_count_dest, last_error, synced_at FROM %s WHERE replication_id = %llu ORDER BY source_schema, "
+	    "source_table",
 	    table, replication_id);
 	auto result = con->Query(query);
 	CheckResult(*result, "Failed to list replication table states");
@@ -746,12 +757,13 @@ DuckLakeReplication::ListTableStates(ClientContext &context, DuckLakeCatalog &de
 		state.strategy = row.IsNull(5) ? "" : row.GetValue<string>(5);
 		state.watermark_column = row.IsNull(6) ? "" : row.GetValue<string>(6);
 		state.pk_columns = row.IsNull(7) ? "" : row.GetValue<string>(7);
-		state.last_watermark = row.GetBaseValue(8);
-		state.last_source_snapshot = row.GetBaseValue(9);
-		state.last_full_sync_snapshot = row.GetBaseValue(10);
-		state.row_count_dest = row.IsNull(11) ? 0 : row.GetValue<int64_t>(11);
-		state.last_error = row.IsNull(12) ? "" : row.GetValue<string>(12);
-		state.synced_at = row.GetBaseValue(13);
+		state.source_table_uuid = row.GetBaseValue(8);
+		state.last_watermark = row.GetBaseValue(9);
+		state.last_source_snapshot = row.GetBaseValue(10);
+		state.last_full_sync_snapshot = row.GetBaseValue(11);
+		state.row_count_dest = row.IsNull(12) ? 0 : row.GetValue<int64_t>(12);
+		state.last_error = row.IsNull(13) ? "" : row.GetValue<string>(13);
+		state.synced_at = row.GetBaseValue(14);
 		states.push_back(std::move(state));
 	}
 	return states;
@@ -1139,6 +1151,30 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 				CheckResult(*begin, "Failed to start replication transaction");
 				in_transaction = true;
 
+				// Source identity (DuckLake sources): the table UUID changes whenever the source
+				// table is dropped and recreated. A missing (pre-upgrade) or changed identity
+				// invalidates the prior cursors and forces a fresh seed. Read it on the apply
+				// transaction so schema, identity and cursor bounds describe one source point.
+				Value source_uuid;
+				bool identity_changed = false;
+				if (source_is_ducklake) {
+					auto entry = source_catalog.GetEntry<TableCatalogEntry>(
+					    *apply->context,
+					    QualifiedName(source_catalog.GetName(), Identifier(ref.schema), Identifier(ref.table)),
+					    OnEntryNotFound::THROW_EXCEPTION);
+					source_uuid = Value(entry->Cast<DuckLakeTableEntry>().GetTableUUID());
+					outcome.source_table_uuid = source_uuid;
+					if (prior &&
+					    (prior->source_table_uuid.IsNull() ||
+					     prior->source_table_uuid.GetValue<string>() != source_uuid.GetValue<string>())) {
+						identity_changed = true;
+						// Never pair the previous incarnation's schema with the new identity.
+						source_columns =
+						    ListColumns(context, source_catalog, job.source_catalog, ref.schema, ref.table);
+						dest_columns = ListColumns(context, dest, dest_name, ref.schema, ref.table);
+					}
+				}
+
 				auto schema_sql = StringUtil::Format("CREATE SCHEMA IF NOT EXISTS %s.%s", dst_id, SQLId(ref.schema));
 				auto schema_res = apply->Query(schema_sql);
 				CheckResult(*schema_res, "Failed to create schema " + ref.schema + " on destination");
@@ -1209,6 +1245,11 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 					reseed = true;
 				}
 				if (outcome.strategy == "snapshot" && (!prior || prior->last_source_snapshot.IsNull())) {
+					reseed = true;
+				}
+				// The source table was recreated (or its identity predates this column): prior
+				// watermark/snapshot cursors belong to a different incarnation of the table.
+				if (identity_changed) {
 					reseed = true;
 				}
 				// Merge backfills extended columns via its diff; watermark/snapshot must re-seed.

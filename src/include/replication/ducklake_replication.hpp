@@ -43,6 +43,9 @@ struct DuckLakeReplicationTableState {
 	string strategy;
 	string watermark_column;
 	string pk_columns;
+	//! Identity of the source table incarnation (DuckLake sources); NULL when unknown.
+	//! A change invalidates the saved cursors and forces a fresh seed.
+	Value source_table_uuid;
 	Value last_watermark;
 	Value last_source_snapshot;
 	Value last_full_sync_snapshot;
