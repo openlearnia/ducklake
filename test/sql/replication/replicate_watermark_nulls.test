@@ -1,0 +1,151 @@
+# name: test/sql/replication/replicate_watermark_nulls.test
+# description: NULL watermark values fail the table explicitly instead of vanishing
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/wm_dest.db' AS wm_dest (DATA_PATH '{TEST_DIR}/wm_dest_files')
+
+statement ok
+CREATE TABLE wm_mixed (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO wm_mixed VALUES (NULL, 'null'), (1, 'one')
+
+statement ok
+CREATE TABLE wm_allnull (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO wm_allnull VALUES (NULL, 'a'), (NULL, 'b')
+
+statement ok
+CREATE TABLE wm_ok (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO wm_ok VALUES (1, 'x'), (2, 'y')
+
+# a nullable column with only non-NULL values is fine
+statement ok
+CREATE TABLE wm_nullable (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO wm_nullable VALUES (1, 'n1'), (2, 'n2')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('wm_dest', 'memory',
+    watermark_columns := 'main.wm_mixed=seq,main.wm_allnull=seq,main.wm_ok=seq,main.wm_nullable=seq')
+----
+1
+
+# the two NULL tables fail; the healthy tables sync - one cycle, isolated failures
+query IIII
+SELECT replication_id, tables_synced, tables_failed, message LIKE '%contains NULL values%'
+FROM ducklake_replicate_catchup('wm_dest', 1)
+----
+1	2	2	1
+
+query III
+SELECT source_table, coalesce(last_error LIKE '%watermark column seq contains NULL values%', false), row_count_dest
+FROM ducklake_replicate_tables('wm_dest', 1) ORDER BY source_table
+----
+wm_allnull	1	0
+wm_mixed	1	0
+wm_nullable	0	2
+wm_ok	0	2
+
+# no seed happened for the failing tables and no cursor progress was saved
+query II
+SELECT count(*), count(last_watermark) FROM __ducklake_metadata_wm_dest.main.ducklake_replication_table
+WHERE source_table IN ('wm_mixed', 'wm_allnull')
+----
+2	0
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'wm_dest'
+----
+2
+
+query I
+SELECT status FROM ducklake_replicate_status('wm_dest') WHERE replication_id = 1
+----
+error
+
+# recovery: remove the NULL rows and the same job catches up
+statement ok
+DELETE FROM wm_mixed WHERE seq IS NULL
+
+statement ok
+DELETE FROM wm_allnull WHERE seq IS NULL
+
+statement ok
+INSERT INTO wm_mixed VALUES (2, 'two')
+
+query IIII
+SELECT replication_id, tables_synced, tables_failed, message FROM ducklake_replicate_catchup('wm_dest', 1)
+----
+1	4	0	copied 4 tables / 6 rows
+
+query III
+SELECT source_table, last_error IS NULL, row_count_dest FROM ducklake_replicate_tables('wm_dest', 1) ORDER BY source_table
+----
+wm_allnull	1	0
+wm_mixed	1	2
+wm_nullable	1	2
+wm_ok	1	2
+
+# a NULL arriving after a successful seed fails the table and keeps prior rows/cursor
+statement ok
+INSERT INTO wm_mixed VALUES (NULL, 'late-null')
+
+query II
+SELECT last_watermark, row_count_dest FROM ducklake_replicate_tables('wm_dest', 1) WHERE source_table = 'wm_mixed'
+----
+2	2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('wm_dest', 1)
+
+query II
+SELECT last_watermark, row_count_dest FROM ducklake_replicate_tables('wm_dest', 1) WHERE source_table = 'wm_mixed'
+----
+2	2
+
+query II
+SELECT count(*), sum(seq) FROM wm_dest.main.wm_mixed
+----
+2	3
+
+query I
+SELECT last_error LIKE '%contains NULL values%' FROM ducklake_replicate_tables('wm_dest', 1)
+WHERE source_table = 'wm_mixed'
+----
+1
+
+# removing the late NULL recovers incrementally with the equal-boundary replay intact
+statement ok
+DELETE FROM wm_mixed WHERE seq IS NULL
+
+statement ok
+INSERT INTO wm_mixed VALUES (2, 'two-late'), (3, 'three')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('wm_dest', 1)
+
+query II
+SELECT seq, v FROM wm_dest.main.wm_mixed ORDER BY v
+----
+1	one
+3	three
+2	two
+2	two-late
+
+query I
+SELECT last_watermark FROM ducklake_replicate_tables('wm_dest', 1) WHERE source_table = 'wm_mixed'
+----
+3
+
+statement ok
+DETACH wm_dest

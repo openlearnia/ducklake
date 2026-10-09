@@ -811,6 +811,21 @@ static string ChooseStrategy(ClientContext &context, Catalog &source_catalog, co
 	return "full";
 }
 
+//! Rejects NULL watermark values before any destination data or cursor change: watermark sync
+//! is an append-only monotonic strategy, and NULL rows can neither seed nor advance the cursor.
+//! Runs inside the source/apply transaction; schema nullability alone is not rejection grounds -
+//! only actual NULL values are.
+static void ValidateWatermarkRows(Connection &apply, const string &src_table, const string &watermark_column) {
+	auto exists = ScalarValue(
+	    apply, StringUtil::Format("SELECT EXISTS(SELECT 1 FROM %s WHERE %s IS NULL)", src_table,
+	                              SQLId(watermark_column)));
+	if (!exists.IsNull() && exists.GetValue<bool>()) {
+		throw InvalidInputException("watermark column %s contains NULL values; use full replication or remove NULL "
+		                            "values",
+		                            watermark_column);
+	}
+}
+
 //! Replay the boundary value to capture rows arriving with the previous maximum watermark.
 static void ApplyWatermarkDelta(Connection &apply, const string &dst_table, const string &src_table,
                                 const string &watermark_column, const string &watermark_type, const Value &low,
@@ -1249,6 +1264,11 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 				}
 
 				bool reseed = recreated || outcome.strategy == "full";
+				if (outcome.strategy == "watermark") {
+					// Reject NULL watermark rows before any destination data or cursor change -
+					// both the initial seed and incremental cycles validate the same way.
+					ValidateWatermarkRows(*apply, src_table, outcome.watermark_column);
+				}
 				if (outcome.strategy == "watermark" &&
 				    (!prior || prior->last_watermark.IsNull() ||
 				     !StringUtil::CIEquals(prior->watermark_column, outcome.watermark_column))) {
