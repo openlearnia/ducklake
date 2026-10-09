@@ -1,0 +1,224 @@
+# name: test/sql/replication/replicate_identifiers.test
+# description: resolved catalog names and quoted identifiers in replication discovery
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ident_dest.db' AS ident_dest (DATA_PATH '{TEST_DIR}/ident_dest_files')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ident_src.db' AS src (DATA_PATH '{TEST_DIR}/ident_src_files')
+
+statement ok
+CREATE TABLE src.main.kt (id INTEGER PRIMARY KEY, v VARCHAR)
+
+statement ok
+INSERT INTO src.main.kt VALUES (1, 'a'), (2, 'b')
+
+# job creation accepts an upper-case alias and persists the canonical source name
+query I
+SELECT replication_id FROM ducklake_replicate_create('ident_dest', 'MEMORY')
+----
+1
+
+# the memory source has no tables: nothing to sync, nothing dropped
+query IIII
+SELECT replication_id, tables_synced, rows_copied, message FROM ducklake_replicate_catchup('ident_dest', 1)
+----
+1	0	0	no source tables matched include/exclude patterns
+
+statement ok
+CREATE TABLE mkt (id INTEGER PRIMARY KEY, v VARCHAR)
+
+statement ok
+INSERT INTO mkt VALUES (1, 'x'), (2, 'y')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ident_dest', 1)
+
+query II
+SELECT source_table, strategy FROM ducklake_replicate_tables('ident_dest', 1)
+----
+mkt	merge
+
+# a ducklake source with PK discovery
+query I
+SELECT replication_id FROM ducklake_replicate_create('ident_dest', 'src')
+----
+2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ident_dest', 2)
+
+query II
+SELECT source_table, strategy FROM ducklake_replicate_tables('ident_dest', 2)
+----
+kt	snapshot
+
+query II
+SELECT id, v FROM ident_dest.main.kt ORDER BY id
+----
+1	a
+2	b
+
+# reattaching the persisted source with different casing must not drop replicas
+statement ok
+DETACH src
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ident_src.db' AS "SRC" (DATA_PATH '{TEST_DIR}/ident_src_files')
+
+statement ok
+INSERT INTO src.main.kt VALUES (3, 'c')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ident_dest', 2)
+
+query II
+SELECT id, v FROM ident_dest.main.kt ORDER BY id
+----
+1	a
+2	b
+3	c
+
+query II
+SELECT source_table, row_count_dest FROM ducklake_replicate_tables('ident_dest', 2)
+----
+kt	3
+
+# destination reattach keeps the job and the data
+statement ok
+DETACH ident_dest
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ident_dest.db' AS ident_dest (DATA_PATH '{TEST_DIR}/ident_dest_files')
+
+query II
+SELECT source_table, row_count_dest FROM ducklake_replicate_tables('ident_dest', 2)
+----
+kt	3
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ident_dest', 2)
+
+query II
+SELECT id, v FROM ident_dest.main.kt ORDER BY id
+----
+1	a
+2	b
+3	c
+
+# dotted catalog/schema/table names, spaces and embedded double quotes on a native source
+statement ok
+ATTACH '{TEST_DIR}/ident_native.db' AS "my.src"
+
+statement ok
+CREATE SCHEMA "my.src"."odd.schema"
+
+statement ok
+CREATE TABLE "my.src"."odd.schema"."weird table" (id INTEGER PRIMARY KEY, v VARCHAR)
+
+statement ok
+INSERT INTO "my.src"."odd.schema"."weird table" VALUES (1, 'w1'), (2, 'w2')
+
+statement ok
+CREATE TABLE "my.src"."odd.schema"."quo""ted" (id INTEGER PRIMARY KEY, v VARCHAR)
+
+statement ok
+INSERT INTO "my.src"."odd.schema"."quo""ted" VALUES (5, 'q5')
+
+statement ok
+CREATE TABLE "my.src"."odd.schema".plain (id INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO "my.src"."odd.schema".plain VALUES (9, 'p9')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('ident_dest', 'my.src', include := 'odd.schema.*')
+----
+3
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ident_dest', 3)
+
+# PK discovery runs before falling back to full: quoted components resolve per table
+query TT
+SELECT source_table, strategy FROM ducklake_replicate_tables('ident_dest', 3) ORDER BY source_table
+----
+plain	full
+quo"ted	merge
+weird table	merge
+
+query II
+SELECT id, v FROM ident_dest."odd.schema"."weird table" ORDER BY id
+----
+1	w1
+2	w2
+
+query II
+SELECT id, v FROM ident_dest."odd.schema"."quo""ted"
+----
+5	q5
+
+query II
+SELECT id, v FROM ident_dest."odd.schema".plain
+----
+9	p9
+
+# merge keeps working across update/delete/insert on the exotic names
+statement ok
+UPDATE "my.src"."odd.schema"."weird table" SET v = 'w1b' WHERE id = 1
+
+statement ok
+DELETE FROM "my.src"."odd.schema"."weird table" WHERE id = 2
+
+statement ok
+INSERT INTO "my.src"."odd.schema"."weird table" VALUES (3, 'w3')
+
+statement ok
+INSERT INTO "my.src"."odd.schema"."quo""ted" VALUES (6, 'q6')
+
+statement ok
+DELETE FROM "my.src"."odd.schema".plain WHERE id = 9
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ident_dest', 3)
+
+query II
+SELECT id, v FROM ident_dest."odd.schema"."weird table" ORDER BY id
+----
+1	w1b
+3	w3
+
+query II
+SELECT id, v FROM ident_dest."odd.schema"."quo""ted" ORDER BY id
+----
+5	q5
+6	q6
+
+query I
+SELECT count(*) FROM ident_dest."odd.schema".plain
+----
+0
+
+query TT
+SELECT source_table, strategy FROM ducklake_replicate_tables('ident_dest', 3) ORDER BY source_table
+----
+plain	full
+quo"ted	merge
+weird table	merge
+
+# an unresolvable source catalog fails the cycle instead of looking empty
+statement ok
+DETACH "my.src"
+
+statement error
+SELECT * FROM ducklake_replicate_catchup('ident_dest', 3)
+----
+Failed to find attached database
+
+statement ok
+DETACH ident_dest

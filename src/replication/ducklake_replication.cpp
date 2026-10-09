@@ -198,7 +198,9 @@ static vector<ReplColumnInfo> ListColumns(ClientContext &context, Catalog &catal
 static vector<string> PrimaryKeyColumns(ClientContext &context, Catalog &catalog, const string &database,
                                         const string &schema, const string &table) {
 	auto con = MakeConnection(context, catalog.GetDatabase());
-	auto qualified = SQLLit(database + "." + schema + "." + table);
+	// Each name component is quoted as an identifier, then the qualified name is wrapped as one
+	// string literal - names containing dots or spaces must survive the pragma round-trip.
+	auto qualified = SQLLit(SQLId(database) + "." + SQLId(schema) + "." + SQLId(table));
 	auto query = StringUtil::Format("SELECT name FROM pragma_table_info(%s) WHERE pk", qualified);
 	auto result = con->Query(query);
 	CheckResult(*result, "Failed to read primary key for " + database + "." + schema + "." + table);
@@ -636,6 +638,9 @@ uint64_t DuckLakeReplication::CreateJob(ClientContext &context, DuckLakeCatalog 
 		                            data_sync_mode);
 	}
 	auto &source = GetAttachedCatalog(context, source_catalog);
+	// Persist the resolved (canonical) source name: catalog lookups are case-insensitive, but
+	// the saved name also feeds case-sensitive metadata filters on later cycles.
+	auto resolved_source = source.GetName().GetIdentifierName();
 	if (StringUtil::CIEquals(data_sync_mode, "share") && !StringUtil::CIEquals(source.GetCatalogType(), "ducklake")) {
 		throw InvalidInputException("ducklake_replicate_create: share mode requires a DuckLake source catalog "
 		                            "(source \"%s\" is %s)",
@@ -650,7 +655,7 @@ uint64_t DuckLakeReplication::CreateJob(ClientContext &context, DuckLakeCatalog 
 	    "INSERT INTO %s (replication_id, source_catalog, dest_catalog, status, data_sync_mode, interval_ms, "
 	    "include_patterns, exclude_patterns, watermark_columns, created_at) "
 	    "SELECT COALESCE(MAX(replication_id), 0) + 1, %s, %s, 'created', %s, %llu, %s, %s, %s, now() FROM %s",
-	    table, SQLLit(source_catalog), SQLLit(dest.GetName().GetIdentifierName()), SQLLit(data_sync_mode), interval_ms,
+	    table, SQLLit(resolved_source), SQLLit(dest.GetName().GetIdentifierName()), SQLLit(data_sync_mode), interval_ms,
 	    SQLLit(include), SQLLit(exclude), watermark_columns.empty() ? "NULL" : SQLLit(watermark_columns), table);
 	auto ins_res = con->Query(insert_sql);
 	CheckResult(*ins_res, "Failed to create replication job");
@@ -1054,6 +1059,11 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 		auto exclude = SplitPatterns(job.exclude_patterns);
 		auto watermark_spec = ParseWatermarkSpec(job.watermark_columns);
 		auto &source_catalog = GetAttachedCatalog(context, job.source_catalog);
+		// Resolve the saved alias to the catalog's current name each cycle: lookups are
+		// case-insensitive, but the name feeds case-sensitive metadata filters and apply SQL.
+		// A lookup failure throws and stops reconciliation rather than looking like an empty
+		// source (which would drop every replica table).
+		job.source_catalog = source_catalog.GetName().GetIdentifierName();
 		auto source_is_ducklake = StringUtil::CIEquals(source_catalog.GetCatalogType(), "ducklake");
 		auto source_tables = ListSourceTables(context, source_catalog, job.source_catalog, include, exclude);
 		auto states = ListTableStates(context, dest, replication_id);
@@ -1802,8 +1812,8 @@ Value DuckLakeReplication::SnapshotsBehind(ClientContext &context, DuckLakeCatal
 			return Value();
 		}
 		auto con = MakeConnection(context, source.GetDatabase());
-		auto head =
-		    ScalarValue(*con, "SELECT MAX(snapshot_id) FROM ducklake_snapshots(" + SQLLit(job.source_catalog) + ")");
+		auto head = ScalarValue(*con, "SELECT MAX(snapshot_id) FROM ducklake_snapshots(" +
+		                                      SQLLit(source.GetName().GetIdentifierName()) + ")");
 		if (head.IsNull()) {
 			return Value();
 		}
