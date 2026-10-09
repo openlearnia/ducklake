@@ -1570,6 +1570,9 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			transaction_changes.altered_tables_with_schema_version_changes.insert(table_id);
 			if (local_change.type == LocalChangeType::RENAME_COLUMN) {
 				column_schema_change = true;
+				// keys follow the renamed column - republish the set with updated names
+				// (identical content when the renamed column is not a key)
+				constraints_touched = true;
 				// persist updated sort expressions (column name was updated in the table entry)
 				if (table.GetSortData()) {
 					auto sort_key = DuckLakeTransaction::GetNewSortKey(commit_state, table);
@@ -1583,6 +1586,11 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			// drop the indicated column
 			// note that in case of nested types we might be dropping multiple columns here
 			HandleChangedFields(commit_state.GetTableId(table), table.GetChangedFields(), result, txn_added_fields);
+			if (local_change.type == LocalChangeType::REMOVE_COLUMN) {
+				// dropping a column removes its dependent key declarations - publish the
+				// reduced final set (identical content when the column was not a key)
+				constraints_touched = true;
+			}
 			transaction_changes.altered_tables_with_schema_version_changes.insert(table_id);
 			column_schema_change = true;
 			break;

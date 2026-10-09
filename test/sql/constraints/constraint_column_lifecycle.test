@@ -1,0 +1,231 @@
+# name: test/sql/constraints/constraint_column_lifecycle.test
+# description: keys survive column rename; dependent keys are removed on column drop
+# group: [constraints]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/con_life.db' AS lake (DATA_PATH '{TEST_DIR}/con_life_files')
+
+statement ok
+SET ducklake_default_data_file_format = 'parquet'
+
+statement ok
+USE lake
+
+# renaming a key column moves the key with it
+statement ok
+CREATE TABLE ren(a INTEGER, b INTEGER, PRIMARY KEY(a))
+
+statement ok
+INSERT INTO ren VALUES (1, 10)
+
+statement ok
+ALTER TABLE ren RENAME COLUMN a TO c
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'ren' AND constraint_type != 'NOT NULL'
+----
+ren	PRIMARY KEY(c)
+
+# the snapshot before the rename still sees the original definition
+query TT
+SELECT c.constraint_type, c.column_name
+FROM __ducklake_metadata_lake.ducklake_table_constraint c
+WHERE c.table_id = (SELECT table_id FROM __ducklake_metadata_lake.ducklake_table WHERE table_name = 'ren')
+AND (SELECT max(snapshot_id) - 1 FROM ducklake_snapshots('lake')) >= c.begin_snapshot
+AND ((SELECT max(snapshot_id) - 1 FROM ducklake_snapshots('lake')) < c.end_snapshot OR c.end_snapshot IS NULL)
+ORDER BY 1, 2
+----
+PRIMARY KEY	a
+
+# introspection inside an explicit transaction; the rename rolls back cleanly
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+ALTER TABLE ren RENAME COLUMN c TO d
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'ren' AND constraint_type != 'NOT NULL'
+----
+ren	PRIMARY KEY(d)
+
+statement ok
+ROLLBACK
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'ren' AND constraint_type != 'NOT NULL'
+----
+ren	PRIMARY KEY(c)
+
+# drop/re-add: a new same-name column inherits nothing
+statement ok
+CREATE TABLE resurrect(a INTEGER PRIMARY KEY, b INTEGER)
+
+statement ok
+INSERT INTO resurrect VALUES (1, 2)
+
+statement ok
+ALTER TABLE resurrect DROP COLUMN a
+
+statement ok
+ALTER TABLE resurrect ADD COLUMN a INTEGER
+
+query I
+SELECT count(*) FROM duckdb_constraints()
+WHERE table_name = 'resurrect' AND constraint_type != 'NOT NULL'
+----
+0
+
+# the old snapshot before the drop still sees the original key
+query TT
+SELECT c.constraint_type, c.column_name
+FROM __ducklake_metadata_lake.ducklake_table_constraint c
+WHERE c.table_id = (SELECT table_id FROM __ducklake_metadata_lake.ducklake_table WHERE table_name = 'resurrect')
+AND (SELECT max(snapshot_id) - 2 FROM ducklake_snapshots('lake')) >= c.begin_snapshot
+AND ((SELECT max(snapshot_id) - 2 FROM ducklake_snapshots('lake')) < c.end_snapshot OR c.end_snapshot IS NULL)
+ORDER BY 1, 2
+----
+PRIMARY KEY	a
+
+# composite keys follow a renamed component and lose the whole declaration on a component drop
+statement ok
+CREATE TABLE comp(a INTEGER, b INTEGER, PRIMARY KEY(a, b))
+
+statement ok
+ALTER TABLE comp RENAME COLUMN a TO x
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'comp' AND constraint_type != 'NOT NULL'
+----
+comp	PRIMARY KEY(x, b)
+
+statement ok
+ALTER TABLE comp DROP COLUMN b
+
+query I
+SELECT count(*) FROM duckdb_constraints()
+WHERE table_name = 'comp' AND constraint_type != 'NOT NULL'
+----
+0
+
+# multiple constraints sharing a column: dropping it removes exactly the dependent declarations
+statement ok
+CREATE TABLE shared(a INTEGER, b INTEGER, UNIQUE(a), PRIMARY KEY(a, b))
+
+statement ok
+ALTER TABLE shared DROP COLUMN a
+
+query I
+SELECT count(*) FROM duckdb_constraints()
+WHERE table_name = 'shared' AND constraint_type != 'NOT NULL'
+----
+0
+
+# dropping an unrelated earlier column keeps later index-referenced keys
+statement ok
+CREATE TABLE shifted(pad INTEGER, k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO shifted VALUES (1, 2, 3)
+
+statement ok
+ALTER TABLE shifted DROP COLUMN pad
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'shifted' AND constraint_type != 'NOT NULL'
+----
+shifted	PRIMARY KEY(k)
+
+query II
+SELECT k, v FROM shifted
+----
+2	3
+
+# case-only rename
+statement ok
+CREATE TABLE cased(a INTEGER, UNIQUE(a))
+
+statement ok
+ALTER TABLE cased RENAME COLUMN a TO A
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'cased' AND constraint_type != 'NOT NULL'
+----
+cased	UNIQUE(A)
+
+# rename and drop chains inside one transaction
+statement ok
+CREATE TABLE chained(p INTEGER, q INTEGER, r INTEGER, PRIMARY KEY(p), UNIQUE(q, r))
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+ALTER TABLE chained RENAME COLUMN q TO q2
+
+statement ok
+ALTER TABLE chained DROP COLUMN r
+
+statement ok
+COMMIT
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'chained' AND constraint_type != 'NOT NULL' ORDER BY constraint_text
+----
+chained	PRIMARY KEY(p)
+
+# a rolled-back drop leaves the key in place
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+ALTER TABLE chained DROP COLUMN p
+
+statement ok
+ROLLBACK
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'chained' AND constraint_type != 'NOT NULL' ORDER BY constraint_text
+----
+chained	PRIMARY KEY(p)
+
+# everything survives a detach/reattach
+statement ok
+USE memory
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/con_life.db' AS lake (DATA_PATH '{TEST_DIR}/con_life_files')
+
+statement ok
+USE lake
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name IN ('ren', 'resurrect', 'comp', 'shared', 'shifted', 'cased', 'chained')
+AND constraint_type != 'NOT NULL' ORDER BY table_name, constraint_text
+----
+cased	UNIQUE(A)
+chained	PRIMARY KEY(p)
+ren	PRIMARY KEY(c)
+shifted	PRIMARY KEY(k)
+
+statement ok
+USE memory
+
+statement ok
+DETACH lake

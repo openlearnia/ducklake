@@ -949,6 +949,22 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, 
 		new_columns.AddColumn(std::move(copy));
 	}
 	table_info.columns = std::move(new_columns);
+	// keys follow the renamed column: rewrite name-based references (index-based ones resolve
+	// to the new column name automatically)
+	for (auto &constraint : table_info.constraints) {
+		if (constraint->type != ConstraintType::UNIQUE) {
+			continue;
+		}
+		auto &unique = constraint->Cast<UniqueConstraint>();
+		if (unique.HasIndex()) {
+			continue;
+		}
+		for (auto &key_name : unique.GetColumnNamesMutable()) {
+			if (key_name == info.old_name) {
+				key_name = info.new_name;
+			}
+		}
+	}
 
 	auto new_entry = make_uniq<DuckLakeTableEntry>(
 	    *this, table_info, LocalChange::RenameColumn(field_id.GetFieldIndex()), info.new_name.GetIdentifierName());
@@ -1070,6 +1086,33 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
 			if (not_null.index.index > removed_index.index) {
 				// this index belongs to a column after the removed column - shift the index
 				not_null.index.index--;
+			}
+		} else if (constraint->type == ConstraintType::UNIQUE) {
+			auto &unique = constraint->Cast<UniqueConstraint>();
+			if (unique.HasIndex()) {
+				if (unique.GetIndex() == removed_index) {
+					table_info.constraints.erase_at(c_idx);
+					c_idx--;
+					continue;
+				}
+				if (unique.GetIndex().index > removed_index.index) {
+					unique.SetIndex(LogicalIndex(unique.GetIndex().index - 1));
+				}
+			} else {
+				// dropping a key column removes the whole dependent PK/UNIQUE declaration,
+				// including composite keys; unrelated keys remain
+				bool references_removed = false;
+				for (auto &key_name : unique.GetColumnNames()) {
+					if (key_name == info.removed_column) {
+						references_removed = true;
+						break;
+					}
+				}
+				if (references_removed) {
+					table_info.constraints.erase_at(c_idx);
+					c_idx--;
+					continue;
+				}
 			}
 		}
 	}
