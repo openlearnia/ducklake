@@ -3440,22 +3440,36 @@ string DuckLakeMetadataManager::GetInlinedTableQuery(const DuckLakeTableInfo &ta
 	return InlinedTableDdlSql(table_name, column_defs, InlinedColNames());
 }
 
-string DuckLakeMetadataManager::WriteNewConstraints(const vector<DuckLakeConstraintInfo> &new_constraints) {
-	if (new_constraints.empty()) {
+string DuckLakeMetadataManager::WriteConstraintReplacements(
+    const map<TableIndex, vector<DuckLakeConstraintInfo>> &replacement_constraints) {
+	if (replacement_constraints.empty()) {
 		return {};
 	}
-	string insert_sql;
-	for (auto &constraint : new_constraints) {
-		for (idx_t col_idx = 0; col_idx < constraint.column_names.size(); col_idx++) {
-			if (!insert_sql.empty()) {
-				insert_sql += ", ";
+	string result;
+	for (auto &entry : replacement_constraints) {
+		// end the prior live set; historical snapshots keep reading the old rows
+		result += StringUtil::Format("UPDATE {METADATA_CATALOG}.ducklake_table_constraint SET end_snapshot = "
+		                             "{SNAPSHOT_ID} WHERE table_id = %d AND end_snapshot IS NULL;",
+		                             entry.first.index);
+		// insert the complete replacement with distinct sequential constraint indexes and
+		// ordered column indexes - an empty set removes every key
+		string insert_sql;
+		for (idx_t constr_idx = 0; constr_idx < entry.second.size(); constr_idx++) {
+			auto &constraint = entry.second[constr_idx];
+			for (idx_t col_idx = 0; col_idx < constraint.column_names.size(); col_idx++) {
+				if (!insert_sql.empty()) {
+					insert_sql += ", ";
+				}
+				insert_sql += StringUtil::Format("(%d, %llu, %llu, %s, %s, {SNAPSHOT_ID}, NULL)", entry.first.index,
+				                                 constr_idx, col_idx, SQLString(constraint.constraint_type),
+				                                 SQLString(constraint.column_names[col_idx]));
 			}
-			insert_sql +=
-			    StringUtil::Format("(%d, 0, %llu, %s, %s, {SNAPSHOT_ID}, NULL)", constraint.table_id.index, col_idx,
-			                       SQLString(constraint.constraint_type), SQLString(constraint.column_names[col_idx]));
+		}
+		if (!insert_sql.empty()) {
+			result += "INSERT INTO {METADATA_CATALOG}.ducklake_table_constraint VALUES " + insert_sql + ";";
 		}
 	}
-	return "INSERT INTO {METADATA_CATALOG}.ducklake_table_constraint VALUES " + insert_sql + ";";
+	return result;
 }
 
 static constexpr idx_t MAX_VALUES_LIST_LENGTH = 65536;

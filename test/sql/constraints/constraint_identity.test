@@ -1,0 +1,188 @@
+# name: test/sql/constraints/constraint_identity.test
+# description: versioned complete constraint sets across ALTER ADD CONSTRAINT
+# group: [constraints]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/con_ident.db' AS lake (DATA_PATH '{TEST_DIR}/con_ident_files')
+
+statement ok
+SET ducklake_default_data_file_format = 'parquet'
+
+statement ok
+USE lake
+
+# UNIQUE(a) followed by ADD PRIMARY KEY(b): two separate ordered constraints
+statement ok
+CREATE TABLE two_keys(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO two_keys VALUES (1, 2)
+
+statement ok
+ALTER TABLE two_keys ADD UNIQUE(a)
+
+statement ok
+ALTER TABLE two_keys ADD PRIMARY KEY(b)
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'two_keys' AND constraint_type != 'NOT NULL' ORDER BY constraint_text
+----
+two_keys	PRIMARY KEY(b)
+two_keys	UNIQUE(a)
+
+# live metadata rows: distinct sequential constraint indexes; the prior set is end-dated
+query IIIT
+SELECT constraint_index, column_index, column_name, constraint_type
+FROM __ducklake_metadata_lake.ducklake_table_constraint
+WHERE table_id = (SELECT table_id FROM __ducklake_metadata_lake.ducklake_table WHERE table_name = 'two_keys')
+AND end_snapshot IS NULL
+ORDER BY constraint_index, column_index
+----
+0	0	a	UNIQUE
+1	0	b	PRIMARY KEY
+
+# the snapshot before the PRIMARY KEY addition still sees only the original key
+query TT
+SELECT c.constraint_type, c.column_name
+FROM __ducklake_metadata_lake.ducklake_table_constraint c
+WHERE c.table_id = (SELECT table_id FROM __ducklake_metadata_lake.ducklake_table WHERE table_name = 'two_keys')
+AND (SELECT max(snapshot_id) - 1 FROM ducklake_snapshots('lake')) >= c.begin_snapshot
+AND ((SELECT max(snapshot_id) - 1 FROM ducklake_snapshots('lake')) < c.end_snapshot OR c.end_snapshot IS NULL)
+ORDER BY 1, 2
+----
+UNIQUE	a
+
+# two separate ADD UNIQUE statements stay separate; composite column order is preserved
+statement ok
+CREATE TABLE uq_pair(a INTEGER, b INTEGER, c INTEGER)
+
+statement ok
+ALTER TABLE uq_pair ADD UNIQUE(a)
+
+statement ok
+ALTER TABLE uq_pair ADD UNIQUE(b, c)
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'uq_pair' AND constraint_type != 'NOT NULL' ORDER BY constraint_text
+----
+uq_pair	UNIQUE(a)
+uq_pair	UNIQUE(b, c)
+
+# multiple additions inside one transaction
+statement ok
+CREATE TABLE one_txn(a INTEGER, b INTEGER, c INTEGER)
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+ALTER TABLE one_txn ADD UNIQUE(c, a)
+
+statement ok
+ALTER TABLE one_txn ADD UNIQUE(b)
+
+statement ok
+COMMIT
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'one_txn' AND constraint_type != 'NOT NULL' ORDER BY constraint_text
+----
+one_txn	UNIQUE(b)
+one_txn	UNIQUE(c, a)
+
+# CREATE plus ADD in one transaction: the key rides on the new-table row exactly once
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CREATE TABLE created_txn(a INTEGER, b INTEGER)
+
+statement ok
+ALTER TABLE created_txn ADD PRIMARY KEY(a)
+
+statement ok
+ALTER TABLE created_txn ADD UNIQUE(b, a)
+
+statement ok
+COMMIT
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'created_txn' AND constraint_type != 'NOT NULL' ORDER BY constraint_text
+----
+created_txn	PRIMARY KEY(a)
+created_txn	UNIQUE(b, a)
+
+query II
+SELECT count(*), count(DISTINCT constraint_index) FROM __ducklake_metadata_lake.ducklake_table_constraint
+WHERE table_id = (SELECT table_id FROM __ducklake_metadata_lake.ducklake_table WHERE table_name = 'created_txn')
+AND end_snapshot IS NULL
+----
+3	2
+
+# a rolled-back addition publishes nothing
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+ALTER TABLE two_keys ADD UNIQUE(a, b)
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM duckdb_constraints() WHERE table_name = 'two_keys' AND constraint_type != 'NOT NULL'
+----
+2
+
+# a second PRIMARY KEY is still rejected
+statement error
+ALTER TABLE two_keys ADD PRIMARY KEY(a)
+----
+already has a PRIMARY KEY constraint
+
+# re-declaring the same columns is still rejected
+statement error
+ALTER TABLE two_keys ADD UNIQUE(a)
+----
+already has a UNIQUE constraint on these columns
+
+# the complete sets survive a detach/reattach
+statement ok
+USE memory
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/con_ident.db' AS lake (DATA_PATH '{TEST_DIR}/con_ident_files')
+
+statement ok
+USE lake
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name IN ('two_keys', 'uq_pair', 'one_txn', 'created_txn') AND constraint_type != 'NOT NULL'
+ORDER BY table_name, constraint_text
+----
+created_txn	PRIMARY KEY(a)
+created_txn	UNIQUE(b, a)
+one_txn	UNIQUE(b)
+one_txn	UNIQUE(c, a)
+two_keys	PRIMARY KEY(b)
+two_keys	UNIQUE(a)
+uq_pair	UNIQUE(a)
+uq_pair	UNIQUE(b, c)
+
+statement ok
+USE memory
+
+statement ok
+DETACH lake

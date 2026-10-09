@@ -9,6 +9,7 @@
 #include "duckdb/function/scalar_macro_function.hpp"
 #include "duckdb/function/table_macro_function.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_commit_state.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
@@ -1389,6 +1390,32 @@ NewProcedureInfo DuckLakeTransactionState::GetNewProcedures(DuckLakeCommitState 
 	return result;
 }
 
+//! Final effective PK/UNIQUE set of a table entry, resolving index-based definitions to the
+//! current column names. PRIMARY KEY / UNIQUE are stored as metadata only and never enforced.
+static vector<DuckLakeConstraintInfo> EffectiveConstraints(DuckLakeTableEntry &table, TableIndex table_id) {
+	vector<DuckLakeConstraintInfo> constraints;
+	for (auto &constraint : table.GetConstraints()) {
+		if (constraint->type != ConstraintType::UNIQUE) {
+			continue;
+		}
+		auto &unique = constraint->Cast<UniqueConstraint>();
+		DuckLakeConstraintInfo constraint_info;
+		constraint_info.table_id = table_id;
+		constraint_info.constraint_type = unique.IsPrimaryKey() ? "PRIMARY KEY" : "UNIQUE";
+		if (unique.HasIndex()) {
+			constraint_info.column_names.push_back(table.GetColumn(unique.GetIndex()).Name().GetIdentifierName());
+		} else {
+			for (auto &name : unique.GetColumnNames()) {
+				constraint_info.column_names.push_back(name.GetIdentifierName());
+			}
+		}
+		if (!constraint_info.column_names.empty()) {
+			constraints.push_back(std::move(constraint_info));
+		}
+	}
+	return constraints;
+}
+
 void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state, DuckLakeCatalogSet &catalog_set,
                                                reference<CatalogEntry> table_entry, NewTableInfo &result,
                                                TransactionChangeInformation &transaction_changes) {
@@ -1444,6 +1471,11 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 
 	// traverse in reverse order
 	bool column_schema_change = false;
+	//! Set when any version of this table changed its effective constraint set.
+	bool constraints_touched = false;
+	//! Set when the table itself was created in this transaction (its constraint rows are
+	//! written with the new-table row instead of a replacement).
+	bool table_created_in_txn = false;
 	for (idx_t table_idx = tables.size(); table_idx > 0; table_idx--) {
 		auto &table = tables[table_idx - 1].get();
 		auto local_change = table.GetLocalChange();
@@ -1463,11 +1495,9 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			if (!constraint_change) {
 				break;
 			}
-			DuckLakeConstraintInfo constraint_info;
-			constraint_info.table_id = commit_state.GetTableId(table);
-			constraint_info.constraint_type = constraint_change->constraint_type;
-			constraint_info.column_names = constraint_change->column_names;
-			result.new_constraints.push_back(std::move(constraint_info));
+			// The final effective constraint set is collected once after the chain walk and
+			// published as a snapshot-versioned replacement.
+			constraints_touched = true;
 			transaction_changes.altered_tables.insert(table_id);
 			transaction_changes.altered_tables_with_schema_version_changes.insert(table_id);
 			break;
@@ -1585,6 +1615,12 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			}
 			auto new_table = DuckLakeTransaction::GetNewTable(commit_state, table);
 			auto new_table_id = new_table.id;
+			if (local_change.type == LocalChangeType::CREATED) {
+				table_created_in_txn = true;
+				// constraints added later in this same transaction ride along on the new-table
+				// row exactly once - collected from the final entry, not the created version
+				new_table.constraints = EffectiveConstraints(tables.front(), new_table_id);
+			}
 			result.new_tables.push_back(std::move(new_table));
 
 			// remap the table in the commit state
@@ -1623,6 +1659,15 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 		default:
 			throw NotImplementedException("Unsupported transaction local change");
 		}
+	}
+	if (constraints_touched && !table_created_in_txn) {
+		// Publish the complete final PK/UNIQUE set of this committed table as a snapshot-versioned
+		// replacement: end-date the prior live rows and insert the new set with sequential
+		// constraint indexes. An empty final set removes all keys. Newly created tables are
+		// excluded - their constraints are folded into the new-table row exactly once.
+		auto &final_table = tables.front().get();
+		auto final_table_id = commit_state.GetTableId(final_table);
+		result.replacement_constraints[final_table_id] = EffectiveConstraints(final_table, final_table_id);
 	}
 	if (column_schema_change) {
 		// we changed the column definitions of an existing table - we need to create a new inlined data table
@@ -1919,7 +1964,7 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 		batch_queries += DuckLakeMetadataManager::WriteNewColumns(result.new_columns);
 		batch_queries += context.write_inlined_tables(commit_snapshot, result.new_inlined_data_tables);
 		batch_queries += DuckLakeMetadataManager::WriteNewSortKeys(existing_catalog.sorts, result.new_sort_keys);
-		batch_queries += DuckLakeMetadataManager::WriteNewConstraints(result.new_constraints);
+		batch_queries += DuckLakeMetadataManager::WriteConstraintReplacements(result.replacement_constraints);
 		new_tables_result = result.new_tables;
 		new_inlined_data_tables_result = result.new_inlined_data_tables;
 	}

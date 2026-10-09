@@ -29,7 +29,10 @@ struct NewTableInfo {
 	vector<DuckLakeNewColumn> new_columns;
 	vector<DuckLakeTableInfo> new_inlined_data_tables;
 	vector<DuckLakeSortInfo> new_sort_keys;
-	vector<DuckLakeConstraintInfo> new_constraints;
+	//! Complete final PK/UNIQUE sets for altered committed tables, keyed by table id. Each entry
+	//! replaces the table's live constraint rows at the commit snapshot; an empty vector removes
+	//! all keys. Newly created tables keep flowing through new_tables exactly once.
+	map<TableIndex, vector<DuckLakeConstraintInfo>> replacement_constraints;
 	vector<DuckLakeConfigOption> new_table_options;
 };
 
