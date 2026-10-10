@@ -1,0 +1,69 @@
+# name: test/sql/materialized_view/native_materialized_view_txn_freshness.test
+# description: native MV freshness tracks post-refresh writes inside the same transaction
+# group: [materialized_view]
+
+statement ok
+CREATE TABLE native_source(x INTEGER)
+
+statement ok
+INSERT INTO native_source VALUES (10)
+
+statement ok
+CREATE MATERIALIZED VIEW native_mv AS SELECT SUM(x) AS s FROM native_source
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO native_source VALUES (20)
+
+statement ok
+REFRESH MATERIALIZED VIEW native_mv
+
+statement ok
+INSERT INTO native_source VALUES (30)
+
+statement ok
+COMMIT
+
+query III
+SELECT is_stale::INTEGER, (SELECT s FROM native_mv), (SELECT SUM(x) FROM native_source)
+FROM duckdb_materialized_views() WHERE view_name = 'native_mv'
+----
+1	30	60
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE native_mv
+
+query II
+SELECT (SELECT s FROM native_mv), (SELECT SUM(x) FROM native_source)
+----
+60	60
+
+# a clean transactional refresh without post-refresh writes stays fresh
+statement ok
+CREATE TABLE native_source2(x INTEGER)
+
+statement ok
+INSERT INTO native_source2 VALUES (10)
+
+statement ok
+CREATE MATERIALIZED VIEW native_mv2 AS SELECT SUM(x) AS s FROM native_source2
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO native_source2 VALUES (20)
+
+statement ok
+REFRESH MATERIALIZED VIEW native_mv2
+
+statement ok
+COMMIT
+
+query III
+SELECT is_stale::INTEGER, (SELECT s FROM native_mv2), (SELECT SUM(x) FROM native_source2)
+FROM duckdb_materialized_views() WHERE view_name = 'native_mv2'
+----
+0	30	30

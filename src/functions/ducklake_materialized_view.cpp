@@ -629,11 +629,12 @@ class DuckLakeMVRefresh : public PhysicalOperator {
 public:
 	DuckLakeMVRefresh(PhysicalPlan &physical_plan, const vector<LogicalType> &types, DuckLakeTableEntry &table_p,
 	                  TableIndex mv_view_id_p, string encryption_key_p, optional_idx partition_id_p,
-	                  string refresh_mode_p, string logical_diff_sql_p, PhysicalOperator &child)
+	                  string refresh_mode_p, string logical_diff_sql_p, bool txn_wrote_dependencies_p,
+	                  PhysicalOperator &child)
 	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 0), table(table_p),
 	      mv_view_id(mv_view_id_p), encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
 	      refresh_mode(std::move(refresh_mode_p)), logical_diff_sql(std::move(logical_diff_sql_p)),
-	      refresh_start_ms(RefreshClockMillis()) {
+	      txn_wrote_dependencies(txn_wrote_dependencies_p), refresh_start_ms(RefreshClockMillis()) {
 		children.push_back(child);
 	}
 
@@ -643,6 +644,10 @@ public:
 	optional_idx partition_id;
 	string refresh_mode;
 	string logical_diff_sql;
+	//! the refreshing transaction also wrote to one of the view's dependencies: the commit's
+	//! own dependency changes land inside the next CDC window, so the next refresh must
+	//! recompute instead of delta-applying them a second time
+	bool txn_wrote_dependencies;
 	idx_t refresh_start_ms;
 
 public:
@@ -737,6 +742,7 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 			refresh.rows_changed = NumericCast<idx_t>(diff.GetValue(2, 0).GetValue<int64_t>());
 		}
 		transaction.AppendFiles(table_id, std::move(global_state.written_files));
+		refresh.txn_wrote_dependencies = txn_wrote_dependencies;
 		refresh.source_snapshot = snapshot.snapshot_id;
 		timestamp_tz_t source_time;
 		if (GetSnapshotTime(transaction, snapshot, source_time)) {
@@ -769,10 +775,11 @@ class DuckLakeLogicalMVRefresh : public LogicalExtensionOperator {
 public:
 	DuckLakeLogicalMVRefresh(TableIndex table_index_p, DuckLakeTableEntry &table_p, TableIndex mv_view_id_p,
 	                         string encryption_key_p, optional_idx partition_id_p, string refresh_mode_p,
-	                         string logical_diff_sql_p)
+	                         string logical_diff_sql_p, bool txn_wrote_dependencies_p)
 	    : table_index(table_index_p), table(table_p), mv_view_id(mv_view_id_p),
 	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
-	      refresh_mode(std::move(refresh_mode_p)), logical_diff_sql(std::move(logical_diff_sql_p)) {
+	      refresh_mode(std::move(refresh_mode_p)), logical_diff_sql(std::move(logical_diff_sql_p)),
+	      txn_wrote_dependencies(txn_wrote_dependencies_p) {
 	}
 
 	TableIndex table_index;
@@ -782,12 +789,14 @@ public:
 	optional_idx partition_id;
 	string refresh_mode;
 	string logical_diff_sql;
+	bool txn_wrote_dependencies;
 
 public:
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
 		auto &child = planner.CreatePlan(*children[0]);
 		return planner.Make<DuckLakeMVRefresh>(types, table, mv_view_id, std::move(encryption_key), partition_id,
-		                                       std::move(refresh_mode), std::move(logical_diff_sql), child);
+		                                       std::move(refresh_mode), std::move(logical_diff_sql),
+		                                       txn_wrote_dependencies, child);
 	}
 
 	string GetName() const override {
@@ -822,7 +831,8 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
                                                     unique_ptr<LogicalOperator> plan, DuckLakeTableEntry &table,
                                                     TableIndex mv_view_id, const string &schema_name,
                                                     const string &view_name, const string &refresh_mode,
-                                                    const string &logical_diff_sql, vector<Identifier> &return_names) {
+                                                    const string &logical_diff_sql, bool txn_wrote_dependencies,
+                                                    vector<Identifier> &return_names) {
 	plan->ResolveOperatorTypes();
 	if (DuckLakeTypes::RequiresCast(plan->types)) {
 		plan = DuckLakeInsert::InsertCasts(binder, plan);
@@ -861,8 +871,9 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 	copy->children.push_back(std::move(plan));
 
 	TableIndex mv_index = binder.GenerateTableIndex();
-	auto mv_op = make_uniq<DuckLakeLogicalMVRefresh>(mv_index, table, mv_view_id, std::move(copy_input.encryption_key),
-	                                                 optional_idx(), refresh_mode, logical_diff_sql);
+	auto mv_op =
+	    make_uniq<DuckLakeLogicalMVRefresh>(mv_index, table, mv_view_id, std::move(copy_input.encryption_key),
+	                                        optional_idx(), refresh_mode, logical_diff_sql, txn_wrote_dependencies);
 	mv_op->children.push_back(std::move(copy));
 	mv_op->ResolveOperatorTypes();
 
@@ -1095,7 +1106,13 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	// correct even before the transaction is reloaded from metadata.
 	create_info->catalog_materialized_view = true;
 	for (idx_t i = 0; i < bound.types.size(); i++) {
-		create_info->columns.AddColumn(ColumnDefinition(Identifier(column_names[i]), bound.types[i]));
+		auto column_type = bound.types[i];
+		if (column_type.id() == LogicalTypeId::HUGEINT) {
+			// parquet stores HUGEINT as a lossy DOUBLE; DECIMAL(38,0) is the exact int128
+			// round-trip (fixed-length byte array), value-identical for every HUGEINT
+			column_type = LogicalType::DECIMAL(38, 0);
+		}
+		create_info->columns.AddColumn(ColumnDefinition(Identifier(column_names[i]), std::move(column_type)));
 	}
 	auto table_binder = Binder::CreateBinder(context, input.binder);
 	auto bound_create = table_binder->BindCreateTableInfo(std::move(create_info));
@@ -1130,9 +1147,18 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	auto plan = std::move(bound.plan);
 	auto logical_diff_sql = BuildLogicalDiffSQL(string(), ResolveMaterializedViewSQL(stored_sql, ducklake_catalog),
 	                                            bound.names, analysis.key_positions);
+	// the creating transaction's own dependency writes were incorporated into the initial
+	// content: mark it so the next refresh recomputes instead of delta-applying them again
+	bool create_txn_wrote_dependencies = false;
+	for (auto &dependency : transaction.GetNewMaterializedViews().back().dependencies) {
+		if (dependency.IsTransactionLocal() || transaction.HasAnyLocalChanges(dependency)) {
+			create_txn_wrote_dependencies = true;
+			break;
+		}
+	}
 	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(plan), table,
 	                        transaction.GetNewMaterializedViews().back().id, schema, view_name, "full",
-	                        logical_diff_sql, return_names);
+	                        logical_diff_sql, create_txn_wrote_dependencies, return_names);
 }
 
 DuckLakeCreateMaterializedViewFunction::DuckLakeCreateMaterializedViewFunction()
@@ -1811,7 +1837,8 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 				    BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name), join_sql,
 				                        bound.names, analysis.key_positions);
 				return BuildMVWritePlan(context, *input.binder, bind_index, std::move(join_plan), table, mv->id, schema,
-				                        view_name, "join_incremental", logical_diff_sql, return_names);
+				                        view_name, "join_incremental", logical_diff_sql, local_dependencies_dirty,
+				                        return_names);
 			}
 		}
 	}
@@ -1831,7 +1858,11 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 		auto binder = Binder::CreateBinder(context, input.binder);
 		auto &sql_statement = static_cast<SQLStatement &>(*parsed_definition);
 		auto bound = binder->Bind(sql_statement);
-		if ((analysis.delta_eligible || analysis.conditional_delta_eligible) &&
+		// The previous refresh's transaction also wrote a dependency: its own commit's changes
+		// sit inside the CDC window and were already incorporated - delta-applying them again
+		// would double-count. Recompute the changed groups instead (always correct).
+		bool delta_suppressed = mv->last_refresh_txn_wrote_dependencies;
+		if ((analysis.delta_eligible || analysis.conditional_delta_eligible) && !delta_suppressed &&
 		    analysis.aggregates.size() + analysis.key_positions.size() == bound.names.size()) {
 			auto delta_sql = BuildDeltaRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names, bound.types,
 			                                      last_refreshed + 1, current_snapshot);
@@ -1839,7 +1870,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 			auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
 			                                            delta_sql, bound.names, analysis.key_positions);
 			return BuildMVWritePlan(context, *input.binder, bind_index, std::move(delta_plan), table, mv->id, schema,
-			                        view_name, "delta", logical_diff_sql, return_names);
+			                        view_name, "delta", logical_diff_sql, local_dependencies_dirty, return_names);
 		}
 		auto incremental_sql = BuildIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 		                                                  last_refreshed + 1, current_snapshot);
@@ -1847,7 +1878,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 		auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
 		                                            incremental_sql, bound.names, analysis.key_positions);
 		return BuildMVWritePlan(context, *input.binder, bind_index, std::move(incremental_plan), table, mv->id, schema,
-		                        view_name, "incremental", logical_diff_sql, return_names);
+		                        view_name, "incremental", logical_diff_sql, local_dependencies_dirty, return_names);
 	}
 
 	auto binder = Binder::CreateBinder(context, input.binder);
@@ -1856,7 +1887,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
 	                                            resolved_sql, bound.names, analysis.key_positions);
 	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), table, mv->id, schema, view_name,
-	                        "full", logical_diff_sql, return_names);
+	                        "full", logical_diff_sql, local_dependencies_dirty, return_names);
 }
 
 DuckLakeRefreshMaterializedViewFunction::DuckLakeRefreshMaterializedViewFunction()
@@ -1979,6 +2010,17 @@ static unique_ptr<FunctionData> MaterializedViewsBind(ClientContext &context, Ta
 		bool stale = true;
 		if (mv.last_refreshed_snapshot.IsValid()) {
 			stale = DependenciesChanged(transaction, mv, mv.last_refreshed_snapshot.GetIndex(), current_snapshot);
+		}
+		if (!stale) {
+			// uncommitted changes to a dependency are invisible to the snapshot window but
+			// visible to source reads in this transaction - the listing must agree with the
+			// stale-read guard
+			for (auto &dependency : mv.dependencies) {
+				if (dependency.IsTransactionLocal() || transaction.HasAnyLocalChanges(dependency)) {
+					stale = true;
+					break;
+				}
+			}
 		}
 		Value last_refreshed;
 		if (mv.last_refreshed_snapshot.IsValid()) {

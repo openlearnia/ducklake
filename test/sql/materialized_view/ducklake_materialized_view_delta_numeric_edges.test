@@ -69,3 +69,56 @@ SELECT k, s FROM lake.mv_dbl ORDER BY k
 ----
 1	10.0
 2	7.0
+
+# HUGEINT boundary aggregates round-trip exactly through the backing files
+statement ok
+CREATE TABLE lake.big (k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO lake.big VALUES (1, '-9223372036854775808'::BIGINT), (1, 100)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.big_mv AS
+SELECT k, SUM(x) AS s, COUNT(x) AS n, COUNT(*) AS c FROM lake.big GROUP BY k
+
+query I
+SELECT (SELECT s FROM lake.big_mv)
+----
+-9223372036854775708
+
+statement ok
+DELETE FROM lake.big WHERE x = '-9223372036854775808'::BIGINT
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.big_mv
+
+query I
+SELECT (SELECT s FROM lake.big_mv)
+----
+100
+
+statement ok
+CREATE TABLE lake.ubb (k INTEGER, x UBIGINT)
+
+statement ok
+INSERT INTO lake.ubb VALUES (1, '18446744073709551615'::UBIGINT), (1, 100)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.ubb_mv AS
+SELECT k, SUM(x) AS s, COUNT(x) AS n, COUNT(*) AS c FROM lake.ubb GROUP BY k
+
+query I
+SELECT (SELECT s FROM lake.ubb_mv)
+----
+18446744073709551715
+
+statement ok
+DELETE FROM lake.ubb WHERE x = '18446744073709551615'::UBIGINT
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.ubb_mv
+
+query I
+SELECT (SELECT s FROM lake.ubb_mv)
+----
+100

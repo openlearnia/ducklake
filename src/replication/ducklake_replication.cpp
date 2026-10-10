@@ -498,11 +498,13 @@ static void MarkTableError(ClientContext &context, DuckLakeCatalog &dest, const 
 	    "INSERT INTO %s (replication_id, source_schema, source_table, dest_schema, dest_table, strategy, "
 	    "watermark_column, pk_columns, source_table_uuid, last_watermark, last_source_snapshot, "
 	    "last_full_sync_snapshot, row_count_dest, last_error, synced_at) "
-	    "VALUES (%llu, %s, %s, %s, %s, 'full', NULL, NULL, NULL, NULL, NULL, NULL, NULL, %s, now()) "
+	    "SELECT %llu, %s, %s, %s, %s, 'full', NULL, NULL, NULL, NULL, NULL, NULL, NULL, %s, now() "
+	    "WHERE NOT EXISTS (SELECT 1 FROM %s other WHERE other.dest_schema = %s AND other.dest_table = %s AND "
+	    "other.replication_id <> %llu) "
 	    "ON CONFLICT (replication_id, source_schema, source_table) DO UPDATE SET last_error = "
 	    "excluded.last_error, synced_at = excluded.synced_at",
 	    state_table, job.replication_id, SQLLit(ref.schema), SQLLit(ref.table), SQLLit(ref.schema), SQLLit(ref.table),
-	    SQLLit(error));
+	    SQLLit(error), state_table, SQLLit(ref.schema), SQLLit(ref.table), job.replication_id);
 	auto ins_res = con->Query(insert_sql);
 	CheckResult(*ins_res, "Failed to record replication table error");
 }
@@ -960,13 +962,22 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 		src_by_path[share_fs.CanonicalizePath(src_files[i].file.path)] = i;
 		src_by_base[base_name(src_files[i].file.path)].push_back(i);
 	}
+	// Basename fallback also requires the basename to be unique among the DESTINATION's live
+	// registrations: after a same-basename source file disappears, its old registration would
+	// otherwise resolve to the surviving namesake and never be dropped.
+	unordered_map<string, idx_t> dst_base_count;
+	for (auto &file : dst_files) {
+		dst_base_count[base_name(file.file.path)]++;
+	}
 	auto resolve_src = [&](const string &registered_path) -> idx_t {
 		auto by_path = src_by_path.find(share_fs.CanonicalizePath(registered_path));
 		if (by_path != src_by_path.end()) {
 			return by_path->second;
 		}
 		auto by_base = src_by_base.find(base_name(registered_path));
-		if (by_base != src_by_base.end() && by_base->second.size() == 1) {
+		auto dst_count = dst_base_count.find(base_name(registered_path));
+		bool dst_unique = dst_count == dst_base_count.end() || dst_count->second == 1;
+		if (by_base != src_by_base.end() && by_base->second.size() == 1 && dst_unique) {
 			return by_base->second[0];
 		}
 		return DConstants::INVALID_INDEX;
@@ -1243,7 +1254,9 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 					    SQLLit(ref.schema), SQLLit(ref.table), job.replication_id);
 					auto ins_res = con->Query(insert_sql);
 					CheckResult(*ins_res, "Failed to claim replication table");
-					if (ins_res->RowCount() == 0) {
+					// an INSERT that matched zero rows still returns a result row carrying the
+					// affected count - read the count, not the result row count
+					if (ins_res->RowCount() == 0 || ins_res->GetValue(0, 0).GetValue<int64_t>() == 0) {
 						claims_dest = false;
 						throw InvalidInputException("destination table %s is already managed by another "
 						                            "replication job",
@@ -1277,6 +1290,27 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 						source_columns =
 						    ListColumns(context, source_catalog, job.source_catalog, ref.schema, ref.table);
 						dest_columns = ListColumns(context, dest, dest_name, ref.schema, ref.table);
+					}
+				} else {
+					// Native sources carry no UUID. The catalog table OID is a usable incarnation
+					// identity: dropping and recreating the table allocates a fresh OID, so a
+					// recreation invalidates cursors regardless of watermark values. File-backed
+					// catalogs may renumber OIDs across reattach - that only triggers a safe
+					// one-time reseed.
+					auto oid = ScalarValue(
+					    *apply, StringUtil::Format("SELECT table_oid FROM duckdb_tables() WHERE database_name = %s AND "
+					                               "schema_name = %s AND table_name = %s",
+					                               SQLLit(job.source_catalog), SQLLit(ref.schema), SQLLit(ref.table)));
+					if (!oid.IsNull()) {
+						source_uuid = Value(oid.ToString());
+						outcome.source_table_uuid = source_uuid;
+						if (prior && !prior->source_table_uuid.IsNull() &&
+						    prior->source_table_uuid.GetValue<string>() != source_uuid.GetValue<string>()) {
+							identity_changed = true;
+							source_columns =
+							    ListColumns(context, source_catalog, job.source_catalog, ref.schema, ref.table);
+							dest_columns = ListColumns(context, dest, dest_name, ref.schema, ref.table);
+						}
 					}
 				}
 

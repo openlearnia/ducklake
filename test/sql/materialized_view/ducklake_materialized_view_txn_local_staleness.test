@@ -62,3 +62,30 @@ query I
 SELECT s FROM dl.mv
 ----
 3
+
+# the is_stale listing agrees with the read guard for uncommitted dependency writes
+statement ok con1
+SET ducklake_mv_stale_read = 'allow'
+
+statement ok con1
+BEGIN
+
+statement ok con1
+SELECT * FROM dl.src
+
+statement ok con1
+INSERT INTO dl.src VALUES (20)
+
+query III con1
+SELECT is_stale::INTEGER, (SELECT s FROM dl.mv), (SELECT SUM(x) FROM dl.src)
+FROM ducklake_materialized_views('dl') WHERE view_name = 'mv'
+----
+1	3	23
+
+statement ok con1
+ROLLBACK
+
+query I con1
+SELECT is_stale::INTEGER FROM ducklake_materialized_views('dl') WHERE view_name = 'mv'
+----
+0

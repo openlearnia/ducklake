@@ -422,6 +422,56 @@ SELECT id, v FROM ss_dst.main.dup ORDER BY id
 2	b1
 3	c1
 
+# deleting a row backed by one of two same-basename external files must drop only that
+# file: the basename fallback cannot resolve the surviving namesake's registration
+statement ok
+CREATE TABLE ss_src.main.dupdel (id INTEGER, v VARCHAR)
+
+statement ok
+COPY (SELECT 1 AS id, 'a1' AS v) TO '{TEST_DIR}/ss_src_files/main/t/dup_a.parquet' (FORMAT parquet)
+
+statement ok
+COPY (SELECT 2 AS id, 'b1' AS v) TO '{TEST_DIR}/ss_src_files/main/lm/dup_a.parquet' (FORMAT parquet)
+
+statement ok
+SELECT * FROM ducklake_add_data_files('ss_src', 'dupdel', '{TEST_DIR}/ss_src_files/main/t/dup_a.parquet')
+
+statement ok
+SELECT * FROM ducklake_add_data_files('ss_src', 'dupdel', '{TEST_DIR}/ss_src_files/main/lm/dup_a.parquet')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query II
+SELECT id, v FROM ss_dst.main.dupdel ORDER BY id
+----
+1	a1
+2	b1
+
+# delete the row backed by the /lm/ file; its registration must be dropped, the /t/ kept
+statement ok
+DELETE FROM ss_src.main.dupdel WHERE id = 2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query II
+SELECT id, v FROM ss_dst.main.dupdel ORDER BY id
+----
+1	a1
+
+# and symmetrically for the other file
+statement ok
+DELETE FROM ss_src.main.dupdel WHERE id = 1
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query I
+SELECT count(*) FROM ss_dst.main.dupdel
+----
+0
+
 # ---------------------------------------------------------------------------
 # a recreated source incarnation re-establishes the share table's initial
 # missing-field defaults

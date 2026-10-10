@@ -393,6 +393,8 @@ struct DuckLakeViewColumnTagInfo {
 
 struct DuckLakeMaterializedViewRefreshInfo {
 	TableIndex view_id;
+	//! the refreshing transaction also wrote to one of the view's dependencies
+	bool txn_wrote_dependencies = false;
 	string refresh_mode;
 	idx_t rows_refreshed = 0;
 	idx_t refresh_duration_ms = 0;
@@ -423,6 +425,10 @@ struct DuckLakeMaterializedViewInfo {
 	//! the definition references tables outside this lake: their changes are invisible to
 	//! lake snapshots, so the view's freshness cannot be tracked and it always reports stale
 	bool has_external_dependencies = false;
+	//! the last refresh's transaction also wrote to a dependency: its own commit's changes
+	//! land inside the next CDC window, so the delta path would replay them - the next
+	//! refresh must recompute instead (cleared again by a clean refresh)
+	bool last_refresh_txn_wrote_dependencies = false;
 	//! staging-only: write last_refreshed_snapshot as the commit snapshot ({SNAPSHOT_ID} placeholder)
 	bool pending_refresh_stamp = false;
 	//! definition-contract version of the stored sql/dependencies

@@ -226,6 +226,91 @@ SELECT seq, v FROM repl_dest.main.nsrc ORDER BY seq
 ----
 1	new1
 
+
+# native-source recreation: the catalog table OID is the incarnation identity, so
+# same-maximum, higher-maximum and empty replacements all reseed
+statement ok
+CREATE TABLE nsrc2 (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO nsrc2 VALUES (1, 'old1'), (2, 'old2')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'memory', include := 'main.nsrc2',
+    watermark_columns := 'main.nsrc2=seq')
+----
+3
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
+
+query II
+SELECT seq, v FROM repl_dest.main.nsrc2 ORDER BY seq
+----
+1	old1
+2	old2
+
+statement ok
+DROP TABLE nsrc2
+
+statement ok
+CREATE TABLE nsrc2 (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO nsrc2 VALUES (1, 'new1')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
+
+query II
+SELECT seq, v FROM repl_dest.main.nsrc2 ORDER BY seq
+----
+1	new1
+
+statement ok
+DROP TABLE nsrc2
+
+statement ok
+CREATE TABLE nsrc2 (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO nsrc2 VALUES (1, 'n1'), (5, 'n5')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
+
+query II
+SELECT seq, v FROM repl_dest.main.nsrc2 ORDER BY seq
+----
+1	n1
+5	n5
+
+statement ok
+DROP TABLE nsrc2
+
+statement ok
+CREATE TABLE nsrc2 (seq BIGINT, v VARCHAR)
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
+
+query I
+SELECT count(*) FROM repl_dest.main.nsrc2
+----
+0
+
+# a plain append without recreation stays incremental
+statement ok
+INSERT INTO nsrc2 VALUES (9, 'nine')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
+
+query II
+SELECT count(*), max(seq) FROM repl_dest.main.nsrc2
+----
+1	9
+
 # a table-level failure preserves the saved identity and cursor of the failed table
 statement ok
 CREATE TABLE repl_src.main.other (seq BIGINT, v VARCHAR)
@@ -237,19 +322,19 @@ query I
 SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'repl_src', include := 'main.other',
     watermark_columns := 'main.other=seq')
 ----
-3
+4
 
 statement ok
-SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 4)
 
 query III
-SELECT source_table, strategy, row_count_dest FROM ducklake_replicate_tables('repl_dest', 3)
+SELECT source_table, strategy, row_count_dest FROM ducklake_replicate_tables('repl_dest', 4)
 ----
 other	watermark	1
 
 query I
 SELECT source_table_uuid IS NOT NULL FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table
-WHERE replication_id = 3
+WHERE replication_id = 4
 ----
 1
 
@@ -258,11 +343,11 @@ statement ok
 ALTER TABLE repl_src.main.other DROP COLUMN seq
 
 statement ok
-SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 4)
 
 query III
 SELECT last_error LIKE '%watermark column%', last_watermark IS NOT NULL, source_table_uuid IS NOT NULL
-FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table WHERE replication_id = 3
+FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table WHERE replication_id = 4
 ----
 1	1	1
 

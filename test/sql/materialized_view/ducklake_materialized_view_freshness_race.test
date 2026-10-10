@@ -91,3 +91,72 @@ query I
 SELECT s FROM dl.mv
 ----
 130
+
+# a refresh inside a transaction that ALSO wrote the source must not replay that write
+statement ok
+CREATE TABLE dl.replay_src (g INTEGER, x INTEGER)
+
+statement ok
+INSERT INTO dl.replay_src VALUES (1, 10)
+
+statement ok
+CREATE MATERIALIZED VIEW dl.replay_mv AS
+SELECT g, SUM(x) AS s, COUNT(x) AS n, COUNT(*) AS c FROM dl.replay_src GROUP BY g
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO dl.replay_src VALUES (1, 20)
+
+statement ok
+REFRESH MATERIALIZED VIEW dl.replay_mv
+
+statement ok
+COMMIT
+
+query II
+SELECT (SELECT s FROM dl.replay_mv), (SELECT SUM(x) FROM dl.replay_src)
+----
+30	30
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE dl.replay_mv
+
+query II
+SELECT (SELECT s FROM dl.replay_mv), (SELECT SUM(x) FROM dl.replay_src)
+----
+30	30
+
+# rows added after the transactional refresh converge too
+statement ok
+INSERT INTO dl.replay_src VALUES (1, 30)
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE dl.replay_mv
+
+query II
+SELECT (SELECT s FROM dl.replay_mv), (SELECT SUM(x) FROM dl.replay_src)
+----
+60	60
+
+# ...and again through a second transactional write+refresh cycle
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO dl.replay_src VALUES (1, 40)
+
+statement ok
+REFRESH MATERIALIZED VIEW dl.replay_mv
+
+statement ok
+COMMIT
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE dl.replay_mv
+
+query II
+SELECT (SELECT s FROM dl.replay_mv), (SELECT SUM(x) FROM dl.replay_src)
+----
+100	100
