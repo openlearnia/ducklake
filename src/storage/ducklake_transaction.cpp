@@ -904,7 +904,6 @@ void GetTransactionTableChanges(reference<CatalogEntry> table_entry, Transaction
 		auto &table = table_entry.get().Cast<DuckLakeTableEntry>();
 		switch (table.GetLocalChange().type) {
 		case LocalChangeType::SET_PARTITION_KEY:
-		case LocalChangeType::SET_NULL:
 		case LocalChangeType::DROP_NULL:
 		case LocalChangeType::RENAME_COLUMN:
 		case LocalChangeType::ADD_COLUMN:
@@ -917,6 +916,28 @@ void GetTransactionTableChanges(reference<CatalogEntry> table_entry, Transaction
 			if (!IsTransactionLocal(table_id)) {
 				changes.altered_tables.insert(table_id);
 				changes.altered_tables_with_schema_version_changes.insert(table_id);
+			}
+			break;
+		}
+		case LocalChangeType::SET_NULL: {
+			// adding NOT NULL makes concurrent inserts unsafe: a row inserted by another
+			// transaction can carry NULL past the constraint. Tracked in its own set so only
+			// this alter (not every schema alter) conflicts with inserts.
+			auto table_id = table.GetTableId();
+			if (!IsTransactionLocal(table_id)) {
+				changes.altered_tables.insert(table_id);
+				changes.altered_tables_with_schema_version_changes.insert(table_id);
+				changes.tables_set_not_null.insert(table_id);
+			}
+			break;
+		}
+		case LocalChangeType::ADD_CONSTRAINT: {
+			// the constraint is persisted as metadata when the transaction commits - record the
+			// table as altered so concurrent alters of the same table (e.g. dropping a key
+			// column) conflict with it instead of committing orphaned key metadata
+			auto table_id = table.GetTableId();
+			if (!IsTransactionLocal(table_id)) {
+				changes.altered_tables.insert(table_id);
 			}
 			break;
 		}
@@ -940,9 +961,6 @@ void GetTransactionTableChanges(reference<CatalogEntry> table_entry, Transaction
 			changes.created_tables[schema.PathKey()].insert(table);
 			break;
 		}
-		case LocalChangeType::ADD_CONSTRAINT:
-			// the constraint is persisted as metadata when the transaction commits
-			break;
 		default:
 			throw NotImplementedException("Unsupported transaction local change in GetTransactionTableChanges");
 		}

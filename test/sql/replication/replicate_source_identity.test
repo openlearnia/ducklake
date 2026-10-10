@@ -186,6 +186,46 @@ SELECT source_table_uuid IS NOT NULL FROM __ducklake_metadata_repl_dest.main.duc
 ----
 1
 
+# native sources carry no identity: a recreated table whose watermark maximum goes
+# backwards (rows removed or renumbered) must reseed instead of applying an empty window
+statement ok
+CREATE TABLE nsrc (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO nsrc VALUES (1, 'old1'), (2, 'old2')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'memory', include := 'main.nsrc',
+    watermark_columns := 'main.nsrc=seq')
+----
+2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query II
+SELECT seq, v FROM repl_dest.main.nsrc ORDER BY seq
+----
+1	old1
+2	old2
+
+statement ok
+DROP TABLE nsrc
+
+statement ok
+CREATE TABLE nsrc (seq BIGINT, v VARCHAR)
+
+statement ok
+INSERT INTO nsrc VALUES (1, 'new1')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+
+query II
+SELECT seq, v FROM repl_dest.main.nsrc ORDER BY seq
+----
+1	new1
+
 # a table-level failure preserves the saved identity and cursor of the failed table
 statement ok
 CREATE TABLE repl_src.main.other (seq BIGINT, v VARCHAR)
@@ -197,19 +237,19 @@ query I
 SELECT replication_id FROM ducklake_replicate_create('repl_dest', 'repl_src', include := 'main.other',
     watermark_columns := 'main.other=seq')
 ----
-2
+3
 
 statement ok
-SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
 
 query III
-SELECT source_table, strategy, row_count_dest FROM ducklake_replicate_tables('repl_dest', 2)
+SELECT source_table, strategy, row_count_dest FROM ducklake_replicate_tables('repl_dest', 3)
 ----
 other	watermark	1
 
 query I
 SELECT source_table_uuid IS NOT NULL FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table
-WHERE replication_id = 2
+WHERE replication_id = 3
 ----
 1
 
@@ -218,11 +258,11 @@ statement ok
 ALTER TABLE repl_src.main.other DROP COLUMN seq
 
 statement ok
-SELECT * FROM ducklake_replicate_catchup('repl_dest', 2)
+SELECT * FROM ducklake_replicate_catchup('repl_dest', 3)
 
 query III
 SELECT last_error LIKE '%watermark column%', last_watermark IS NOT NULL, source_table_uuid IS NOT NULL
-FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table WHERE replication_id = 2
+FROM __ducklake_metadata_repl_dest.main.ducklake_replication_table WHERE replication_id = 3
 ----
 1	1	1
 

@@ -24,6 +24,7 @@ enum class ChangeType {
 	REWRITE_DELETE,
 	CREATED_SCALAR_MACRO,
 	CREATED_TABLE_MACRO,
+	SET_NOT_NULL,
 	CREATED_PROCEDURE,
 	DROPPED_SCALAR_MACRO,
 	DROPPED_TABLE_MACRO,
@@ -81,6 +82,8 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 		return ChangeType::MERGE_ADJACENT;
 	} else if (StringUtil::CIEquals(change_type_str, "rewrite_delete")) {
 		return ChangeType::REWRITE_DELETE;
+	} else if (StringUtil::CIEquals(change_type_str, "set_not_null")) {
+		return ChangeType::SET_NOT_NULL;
 	} else if (StringUtil::CIEquals(change_type_str, "inlined_insert")) {
 		return ChangeType::INSERTED_INTO_TABLE_INLINED;
 	} else if (StringUtil::CIEquals(change_type_str, "inlined_delete")) {
@@ -197,6 +200,9 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			break;
 		case ChangeType::INSERTED_INTO_TABLE:
 			result.inserted_tables.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
+			break;
+		case ChangeType::SET_NOT_NULL:
+			result.tables_set_not_null.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
 			break;
 		case ChangeType::DELETED_FROM_TABLE:
 			result.tables_deleted_from.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));

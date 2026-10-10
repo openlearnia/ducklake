@@ -127,6 +127,25 @@ AND end_snapshot IS NULL
 ----
 3	2
 
+# duplicates are detected case-insensitively: UNIQUE(A) repeats UNIQUE(a)
+statement error
+ALTER TABLE two_keys ADD UNIQUE(A)
+----
+already has a UNIQUE constraint on these columns
+
+# a PRIMARY KEY over columns that already carry a UNIQUE declaration is a
+# distinct, stronger declaration - it is allowed, not an existing PK
+statement ok
+ALTER TABLE uq_pair ADD PRIMARY KEY(a)
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'uq_pair' AND constraint_type != 'NOT NULL' ORDER BY constraint_text
+----
+uq_pair	PRIMARY KEY(a)
+uq_pair	UNIQUE(a)
+uq_pair	UNIQUE(b, c)
+
 # a rolled-back addition publishes nothing
 statement ok
 BEGIN TRANSACTION
@@ -303,6 +322,7 @@ opt_chain	UNIQUE(a)
 opt_part	PRIMARY KEY(a)
 two_keys	PRIMARY KEY(b)
 two_keys	UNIQUE(a)
+uq_pair	PRIMARY KEY(a)
 uq_pair	UNIQUE(a)
 uq_pair	UNIQUE(b, c)
 

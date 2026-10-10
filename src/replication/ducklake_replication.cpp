@@ -651,18 +651,29 @@ uint64_t DuckLakeReplication::CreateJob(ClientContext &context, DuckLakeCatalog 
 	EnsureStateTables(context, dest);
 	auto con = MakeConnection(context, dest.GetDatabase());
 	auto table = MetaTableName(dest, "ducklake_replication");
-	auto insert_sql = StringUtil::Format(
-	    "INSERT INTO %s (replication_id, source_catalog, dest_catalog, status, data_sync_mode, interval_ms, "
-	    "include_patterns, exclude_patterns, watermark_columns, created_at) "
-	    "SELECT COALESCE(MAX(replication_id), 0) + 1, %s, %s, 'created', %s, %llu, %s, %s, %s, now() FROM %s",
-	    table, SQLLit(resolved_source), SQLLit(dest.GetName().GetIdentifierName()), SQLLit(data_sync_mode), interval_ms,
-	    SQLLit(include), SQLLit(exclude), watermark_columns.empty() ? "NULL" : SQLLit(watermark_columns), table);
-	auto ins_res = con->Query(insert_sql);
-	CheckResult(*ins_res, "Failed to create replication job");
-	auto id_sql = StringUtil::Format("SELECT MAX(replication_id) FROM %s", table);
-	auto id_res = con->Query(id_sql);
-	CheckResult(*id_res, "Failed to read new replication id");
-	return id_res->GetValue(0, 0).GetValue<uint64_t>();
+	// Allocate the id and insert it explicitly: allocating via INSERT ... SELECT MAX()+1 and
+	// reading MAX() back afterwards can hand one caller the id another caller just inserted.
+	// The mutex closes the read-to-insert gap in-process; the primary key turns any remaining
+	// (cross-process) race into a constraint error instead of a silently wrong id.
+	static mutex job_id_lock;
+	uint64_t new_id;
+	{
+		lock_guard<mutex> guard(job_id_lock);
+		auto id_sql = StringUtil::Format("SELECT COALESCE(MAX(replication_id), 0) + 1 FROM %s", table);
+		auto id_res = con->Query(id_sql);
+		CheckResult(*id_res, "Failed to allocate replication id");
+		new_id = id_res->GetValue(0, 0).GetValue<uint64_t>();
+		auto insert_sql = StringUtil::Format(
+		    "INSERT INTO %s (replication_id, source_catalog, dest_catalog, status, data_sync_mode, interval_ms, "
+		    "include_patterns, exclude_patterns, watermark_columns, created_at) "
+		    "VALUES (%llu, %s, %s, 'created', %s, %llu, %s, %s, %s, now())",
+		    table, new_id, SQLLit(resolved_source), SQLLit(dest.GetName().GetIdentifierName()),
+		    SQLLit(data_sync_mode), interval_ms, SQLLit(include), SQLLit(exclude),
+		    watermark_columns.empty() ? "NULL" : SQLLit(watermark_columns));
+		auto ins_res = con->Query(insert_sql);
+		CheckResult(*ins_res, "Failed to create replication job");
+	}
+	return new_id;
 }
 
 void DuckLakeReplication::DropJob(ClientContext &context, DuckLakeCatalog &dest, uint64_t replication_id) {
@@ -933,15 +944,33 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 	}
 	auto dst_files = ListLakeFiles(apply, dest, ref.schema, ref.table, optional_idx());
 
-	// Path canonicalization differs between catalogs (glob expansion resolves symlinks) - match on
-	// the final component instead; DuckLake file names are generated unique ids.
 	auto base_name = [](const string &path) {
 		return path.substr(path.find_last_of("/\\") + 1);
 	};
-	unordered_map<string, idx_t> src_by_name;
+	// A destination registration is matched back to its source file primarily by canonicalized
+	// full path. The basename is only a fallback for paths that legitimately differ between the
+	// two catalogs (symlink resolution during glob expansion, or a source data path nested
+	// inside the destination's, which gets rebased on registration). DuckLake-written files
+	// carry unique generated basenames, but externally added files can share a basename across
+	// directories - an ambiguous basename without a path match must not conflate them.
+	auto &share_fs = FileSystem::GetFileSystem(*apply.context);
+	unordered_map<string, idx_t> src_by_path;
+	unordered_map<string, vector<idx_t>> src_by_base;
 	for (idx_t i = 0; i < src_files.size(); i++) {
-		src_by_name[base_name(src_files[i].file.path)] = i;
+		src_by_path[share_fs.CanonicalizePath(src_files[i].file.path)] = i;
+		src_by_base[base_name(src_files[i].file.path)].push_back(i);
 	}
+	auto resolve_src = [&](const string &registered_path) -> idx_t {
+		auto by_path = src_by_path.find(share_fs.CanonicalizePath(registered_path));
+		if (by_path != src_by_path.end()) {
+			return by_path->second;
+		}
+		auto by_base = src_by_base.find(base_name(registered_path));
+		if (by_base != src_by_base.end() && by_base->second.size() == 1) {
+			return by_base->second[0];
+		}
+		return DConstants::INVALID_INDEX;
+	};
 	auto &dest_txn = DuckLakeTransaction::Get(*apply.context, dest);
 	auto &dest_table =
 	    dest.GetEntry<TableCatalogEntry>(*apply.context,
@@ -962,18 +991,22 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 	};
 
 	// Dest registrations absent from the source set - or whose delete file no longer matches - are
-	// dropped (metadata tombstone only; the physical bytes stay with the source).
+	// dropped (metadata tombstone only; the physical bytes stay with the source). Files that do
+	// match are recorded so the registration pass only stages what is actually missing.
+	unordered_set<idx_t> matched_src;
 	for (auto &file : dst_files) {
-		auto it = src_by_name.find(base_name(file.file.path));
+		auto src_idx = resolve_src(file.file.path);
 		bool delete_mismatch = false;
-		if (it != src_by_name.end()) {
-			auto expected = src_files[it->second].delete_file.path.empty()
+		if (src_idx != DConstants::INVALID_INDEX) {
+			auto expected = src_files[src_idx].delete_file.path.empty()
 			                    ? string()
-			                    : share_delete_name(src_files[it->second].delete_file.path);
+			                    : share_delete_name(src_files[src_idx].delete_file.path);
 			delete_mismatch = base_name(file.delete_file.path) != expected;
 		}
-		if (it == src_by_name.end() || delete_mismatch) {
+		if (src_idx == DConstants::INVALID_INDEX || delete_mismatch) {
 			dest_txn.DropFile(table_id, file.file_id, file.file.path, file.row_count, file.file.file_size_bytes);
+		} else {
+			matched_src.insert(src_idx);
 		}
 	}
 
@@ -983,17 +1016,7 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 	// staged data file so the commit binds them to the freshly assigned data_file_id.
 	vector<idx_t> missing;
 	for (idx_t i = 0; i < src_files.size(); i++) {
-		auto &file = src_files[i];
-		auto expected_delete = file.delete_file.path.empty() ? string() : share_delete_name(file.delete_file.path);
-		auto registered = false;
-		for (auto &dst_file : dst_files) {
-			if (base_name(dst_file.file.path) == base_name(file.file.path) &&
-			    base_name(dst_file.delete_file.path) == expected_delete) {
-				registered = true;
-				break;
-			}
-		}
-		if (!registered) {
+		if (!matched_src.count(i)) {
 			missing.push_back(i);
 		}
 	}
@@ -1008,7 +1031,12 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 		auto new_files = DuckLakePrepareSharedFiles(dest_txn, *apply.context, source_catalog.Cast<DuckLakeCatalog>(),
 		                                            src_table, dest_table, missing_entries);
 		for (auto &new_file : new_files) {
-			auto &src_file = src_files[src_by_name[base_name(new_file.file_name)]];
+			auto staged_src_idx = resolve_src(new_file.file_name);
+			if (staged_src_idx == DConstants::INVALID_INDEX) {
+				throw InvalidInputException("Cannot resolve shared file \"%s\" back to its source file",
+				                            new_file.file_name);
+			}
+			auto &src_file = src_files[staged_src_idx];
 			new_file.encryption_key = src_file.file.encryption_key;
 			// Preserve the source's row-id span - required for files that physically embed row ids.
 			if (src_file.row_id_start.IsValid()) {
@@ -1157,7 +1185,15 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 			bool claims_dest = true;
 			TableSyncOutcome outcome;
 			try {
-				auto owner = ConflictingOwner(context, dest, replication_id, ref.schema, ref.table);
+				// Ownership check and claim are serialized and the claim itself is conditional:
+				// two jobs racing on the same destination table used to both claim it (separate
+				// check and insert statements), leaving permanent mutual rejections behind.
+				static mutex table_claim_lock;
+				uint64_t owner = 0;
+				{
+					lock_guard<mutex> guard(table_claim_lock);
+					owner = ConflictingOwner(context, dest, replication_id, ref.schema, ref.table);
+				}
 				if (owner != 0) {
 					claims_dest = false;
 					throw InvalidInputException("destination table %s is already managed by replication job %llu",
@@ -1186,8 +1222,33 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 					outcome.pk_columns = StringUtil::Join(pk_columns, ",");
 				}
 				if (!prior) {
-					// Claim the table before its first data commit so a restart can safely reseed it.
-					UpsertTableSyncState(context, dest, job, ref, outcome);
+					// Claim the table before its first data commit so a restart can safely reseed
+					// it. The claim inserts only when no other job owns this destination table:
+					// the insert and the ownership check are one statement, so a racing job
+					// either sees this claim and backs off, or is seen by it.
+					lock_guard<mutex> guard(table_claim_lock);
+					auto con = MakeConnection(context, dest.GetDatabase());
+					auto state_table = MetaTableName(dest, "ducklake_replication_table");
+					auto insert_sql = StringUtil::Format(
+					    "INSERT INTO %s (replication_id, source_schema, source_table, dest_schema, dest_table, "
+					    "strategy, watermark_column, pk_columns, source_table_uuid, last_watermark, "
+					    "last_source_snapshot, last_full_sync_snapshot, row_count_dest, last_error, synced_at) "
+					    "SELECT %llu, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, NULL, NULL, NULL, now() "
+					    "WHERE NOT EXISTS (SELECT 1 FROM %s other WHERE other.dest_schema = %s AND other.dest_table "
+					    "= %s AND other.replication_id <> %llu)",
+					    state_table, job.replication_id, SQLLit(ref.schema), SQLLit(ref.table), SQLLit(ref.schema),
+					    SQLLit(ref.table), SQLLit(outcome.strategy),
+					    outcome.watermark_column.empty() ? "NULL" : SQLLit(outcome.watermark_column),
+					    outcome.pk_columns.empty() ? "NULL" : SQLLit(outcome.pk_columns), state_table,
+					    SQLLit(ref.schema), SQLLit(ref.table), job.replication_id);
+					auto ins_res = con->Query(insert_sql);
+					CheckResult(*ins_res, "Failed to claim replication table");
+					if (ins_res->RowCount() == 0) {
+						claims_dest = false;
+						throw InvalidInputException("destination table %s is already managed by another "
+						                            "replication job",
+						                            label);
+					}
 				}
 
 				auto begin = apply->Query("BEGIN TRANSACTION");
@@ -1323,6 +1384,21 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 				    (!prior || prior->last_watermark.IsNull() ||
 				     !StringUtil::CIEquals(prior->watermark_column, outcome.watermark_column))) {
 					reseed = true;
+				}
+				if (outcome.strategy == "watermark" && prior && !prior->last_watermark.IsNull() &&
+				    !high_watermark.IsNull()) {
+					// The watermark high went backwards: the source table was recreated (native
+					// sources carry no identity), or its maximum row was deleted. Both violate
+					// the append-only contract - reseed instead of applying an empty window and
+					// silently keeping stale replica rows. Compared inside the source type so
+					// numeric and timestamp watermarks order correctly.
+					auto went_backwards =
+					    ScalarValue(*apply, StringUtil::Format("SELECT CAST(%s AS %s) > CAST(%s AS %s)",
+					                                           SQLLit(prior->last_watermark.ToString()), watermark_type,
+					                                           SQLLit(high_watermark.ToString()), watermark_type));
+					if (!went_backwards.IsNull() && went_backwards.GetValue<bool>()) {
+						reseed = true;
+					}
 				}
 				if (outcome.strategy == "snapshot" && (!prior || prior->last_source_snapshot.IsNull())) {
 					reseed = true;

@@ -1,0 +1,62 @@
+# name: test/sql/concurrent/concurrent_add_constraint_drop_column.test
+# description: ADD CONSTRAINT must conflict with a concurrent column drop
+# group: [concurrent]
+
+require notwindows
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok con1
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/pk_drop_race')
+
+statement ok con1
+CREATE TABLE dl.pk (a INTEGER, b INTEGER)
+
+statement ok con1
+INSERT INTO dl.pk VALUES (1, 2)
+
+# both sessions pin the same snapshot
+statement ok con1
+BEGIN
+
+statement ok con1
+SELECT * FROM dl.pk
+
+statement ok con2
+BEGIN
+
+statement ok con2
+SELECT * FROM dl.pk
+
+# con1 adds a PRIMARY KEY while con2 drops its key column
+statement ok con1
+ALTER TABLE dl.pk ADD PRIMARY KEY(a)
+
+statement ok con2
+ALTER TABLE dl.pk DROP COLUMN a
+
+statement ok con2
+COMMIT
+
+# the key addition must not commit over the dropped column and leave orphan metadata
+statement error con1
+COMMIT
+----
+<REGEX>:.*Transaction conflict - attempting to alter table.*altered it.*
+
+# the failed alter rolled back: no constraint metadata remains
+query I
+SELECT count(*) FROM duckdb_constraints() WHERE table_name = 'pk' AND constraint_type != 'NOT NULL'
+----
+0
+
+query I
+SELECT b FROM dl.pk
+----
+2

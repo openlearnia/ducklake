@@ -379,6 +379,49 @@ SELECT id, items FROM ss_dst.main.e4 ORDER BY id
 1	[{'a': 1, 'c': x}]
 2	[{'a': 2, 'c': y}]
 
+# external files sharing a basename across directories must not be conflated:
+# reconciliation matches canonical full paths, falling back to basename only when unique
+statement ok
+CREATE TABLE ss_src.main.dup (id INTEGER, v VARCHAR)
+
+statement ok
+COPY (SELECT 1 AS id, 'a1' AS v) TO '{TEST_DIR}/ss_src_files/main/t/same.parquet' (FORMAT parquet)
+
+statement ok
+COPY (SELECT 2 AS id, 'b1' AS v) TO '{TEST_DIR}/ss_src_files/main/lm/same.parquet' (FORMAT parquet)
+
+statement ok
+SELECT * FROM ducklake_add_data_files('ss_src', 'dup', '{TEST_DIR}/ss_src_files/main/t/same.parquet')
+
+statement ok
+SELECT * FROM ducklake_add_data_files('ss_src', 'dup', '{TEST_DIR}/ss_src_files/main/lm/same.parquet')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query II
+SELECT id, v FROM ss_dst.main.dup ORDER BY id
+----
+1	a1
+2	b1
+
+# adding a third file with the same basename registers it; the other two must survive
+statement ok
+COPY (SELECT 3 AS id, 'c1' AS v) TO '{TEST_DIR}/ss_src_files/main/r/same.parquet' (FORMAT parquet)
+
+statement ok
+SELECT * FROM ducklake_add_data_files('ss_src', 'dup', '{TEST_DIR}/ss_src_files/main/r/same.parquet')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query II
+SELECT id, v FROM ss_dst.main.dup ORDER BY id
+----
+1	a1
+2	b1
+3	c1
+
 # ---------------------------------------------------------------------------
 # a recreated source incarnation re-establishes the share table's initial
 # missing-field defaults

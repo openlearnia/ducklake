@@ -280,6 +280,8 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 		ConflictCheck(table_id, other_changes.tables_deleted_from, "insert into table", "deleted from it");
 		ConflictCheck(table_id, other_changes.tables_deleted_inlined, "insert into table",
 		              "deleted inlined data from it");
+		ConflictCheck(table_id, other_changes.tables_set_not_null, "insert into table",
+		              "added a NOT NULL constraint to it");
 	}
 	for (auto &table_id : changes.tables_inserted_inlined) {
 		ConflictCheck(table_id, other_changes.dropped_tables, "insert into table", "dropped it");
@@ -287,6 +289,14 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 		ConflictCheck(table_id, other_changes.tables_deleted_from, "insert into table", "deleted from it");
 		ConflictCheck(table_id, other_changes.tables_deleted_inlined, "insert into table",
 		              "deleted inlined data from it");
+		ConflictCheck(table_id, other_changes.tables_set_not_null, "insert into table",
+		              "added a NOT NULL constraint to it");
+	}
+	for (auto &table_id : changes.tables_set_not_null) {
+		// adding NOT NULL cannot coexist with rows another transaction inserted concurrently -
+		// those rows were never checked against the new constraint
+		ConflictCheck(table_id, other_changes.inserted_tables, "SET NOT NULL on table", "inserted into it");
+		ConflictCheck(table_id, other_changes.tables_inserted_inlined, "SET NOT NULL on table", "inserted into it");
 	}
 	for (auto &table_id : changes.tables_deleted_from) {
 		ConflictCheck(table_id, other_changes.dropped_tables, "delete from table", "dropped it");
@@ -487,6 +497,7 @@ string DuckLakeTransactionState::WriteSnapshotChanges(DuckLakeCommitState &commi
 	}
 
 	AddChangeInfo(commit_state, change_info, changes.tables_inserted_into, "inserted_into_table");
+	AddChangeInfo(commit_state, change_info, changes.tables_set_not_null, "set_not_null");
 	AddChangeInfo(commit_state, change_info, changes.tables_deleted_from, "deleted_from_table");
 	AddChangeInfo(commit_state, change_info, changes.altered_tables, "altered_table");
 	AddChangeInfo(commit_state, change_info, changes.altered_views, "altered_view");

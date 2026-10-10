@@ -37,6 +37,8 @@ struct TransactionChangeInformation {
 	set<ProcedureIndex> dropped_procedures;
 	set<TableIndex> tables_inserted_into;
 	set<TableIndex> tables_deleted_from;
+	//! Tables on which a NOT NULL constraint was added in this transaction
+	set<TableIndex> tables_set_not_null;
 	//! Tables a delete predicate was evaluated against, regardless of whether any rows matched
 	set<TableIndex> tables_delete_attempted;
 	set<TableIndex> tables_inserted_inlined;
@@ -62,6 +64,7 @@ struct SnapshotChangeInformation {
 	set<MacroIndex> dropped_table_macros;
 	set<ProcedureIndex> dropped_procedures;
 	set<TableIndex> inserted_tables;
+	set<TableIndex> tables_set_not_null;
 	set<TableIndex> tables_deleted_from;
 	set<TableIndex> tables_compacted;
 	set<TableIndex> tables_merge_adjacent;

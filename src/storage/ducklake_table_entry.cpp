@@ -867,7 +867,9 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
 		throw BinderException("Cannot add a constraint without columns to table %s", name);
 	}
 	auto constraint_type = unique.IsPrimaryKey() ? "PRIMARY KEY" : "UNIQUE";
-	// reject a second PRIMARY KEY, and an identical constraint on the same columns
+	// reject a second PRIMARY KEY, and an identical constraint (same type, same columns in
+	// the same order, compared case-insensitively). A PRIMARY KEY over columns that already
+	// carry a UNIQUE declaration is a distinct, stronger declaration and is allowed.
 	bool has_primary_key = false;
 	for (auto &constraint : table_info.constraints) {
 		if (constraint->type != ConstraintType::UNIQUE) {
@@ -885,8 +887,13 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
 		if (existing.IsPrimaryKey()) {
 			has_primary_key = true;
 		}
-		if (existing_names == column_names) {
-			throw CatalogException("Table %s already has a %s constraint on these columns", name, constraint_type);
+		bool same_columns = existing_names.size() == column_names.size();
+		for (idx_t i = 0; same_columns && i < column_names.size(); i++) {
+			same_columns = StringUtil::CIEquals(existing_names[i], column_names[i]);
+		}
+		if (same_columns && existing.IsPrimaryKey() == unique.IsPrimaryKey()) {
+			throw CatalogException("Table %s already has a %s constraint on these columns", name,
+			                       existing.IsPrimaryKey() ? "PRIMARY KEY" : "UNIQUE");
 		}
 	}
 	if (unique.IsPrimaryKey() && has_primary_key) {

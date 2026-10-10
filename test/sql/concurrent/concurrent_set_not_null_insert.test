@@ -1,0 +1,60 @@
+# name: test/sql/concurrent/concurrent_set_not_null_insert.test
+# description: SET NOT NULL must conflict with a concurrent committed insert
+# group: [concurrent]
+
+require notwindows
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok con1
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/set_not_null_race')
+
+statement ok con1
+CREATE TABLE dl.nn (x INTEGER)
+
+statement ok con1
+INSERT INTO dl.nn VALUES (10)
+
+# both sessions pin the same snapshot
+statement ok con1
+BEGIN
+
+statement ok con1
+SELECT * FROM dl.nn
+
+statement ok con2
+BEGIN
+
+statement ok con2
+SELECT * FROM dl.nn
+
+# con1 adds NOT NULL while con2 inserts a NULL row
+statement ok con1
+ALTER TABLE dl.nn ALTER COLUMN x SET NOT NULL
+
+statement ok con2
+INSERT INTO dl.nn VALUES (NULL)
+
+statement ok con2
+COMMIT
+
+# the NOT NULL addition must not commit over the unchecked NULL row
+statement error con1
+COMMIT
+----
+<REGEX>:.*Transaction conflict - attempting to SET NOT NULL on table.*inserted into it.*
+
+# the failed alter rolled back: the column still accepts NULL
+statement ok con1
+INSERT INTO dl.nn VALUES (NULL)
+
+query I
+SELECT count(*) FROM dl.nn
+----
+3
