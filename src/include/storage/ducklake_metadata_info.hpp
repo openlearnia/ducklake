@@ -420,6 +420,9 @@ struct DuckLakeMaterializedViewInfo {
 	optional_idx last_refreshed_snapshot;
 	//! table ids of the lake tables the definition references
 	vector<TableIndex> dependencies;
+	//! the definition references tables outside this lake: their changes are invisible to
+	//! lake snapshots, so the view's freshness cannot be tracked and it always reports stale
+	bool has_external_dependencies = false;
 	//! staging-only: write last_refreshed_snapshot as the commit snapshot ({SNAPSHOT_ID} placeholder)
 	bool pending_refresh_stamp = false;
 	//! definition-contract version of the stored sql/dependencies

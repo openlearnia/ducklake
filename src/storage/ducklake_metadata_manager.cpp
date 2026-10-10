@@ -366,7 +366,7 @@ string DuckLakeMetadataManager::GetCreateTableStatements() {
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, "
 	                     "begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect "
 	                     "VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT, "
-	                     "definition_version BIGINT);");
+	                     "definition_version BIGINT, has_external_dependencies BOOLEAN);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view_dependency(view_id BIGINT, "
 	                     "begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT);");
 	statements.push_back("CREATE TABLE {METADATA_CATALOG}.ducklake_materialized_view_refresh_history(view_id BIGINT, "
@@ -549,6 +549,7 @@ CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_role(role_id BIGINT PRIMA
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRIMARY KEY, grantee VARCHAR NOT NULL, schema_id BIGINT, table_id BIGINT, privileges BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT, definition_version BIGINT);
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS definition_version BIGINT;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS has_external_dependencies BOOLEAN;
 UPDATE {METADATA_CATALOG}.ducklake_materialized_view SET definition_version = %llu WHERE definition_version IS NULL;
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, definition_version BIGINT, security_definer BOOLEAN);
 ALTER TABLE {METADATA_CATALOG}.ducklake_procedure ADD COLUMN IF NOT EXISTS definition_version BIGINT;
@@ -3755,10 +3756,11 @@ string DuckLakeMetadataManager::WriteNewMaterializedViews(const vector<DuckLakeM
 		} else if (view.last_refreshed_snapshot.IsValid()) {
 			last_refreshed = to_string(view.last_refreshed_snapshot.GetIndex());
 		}
-		view_insert_sql += StringUtil::Format("(%d, '%s', {SNAPSHOT_ID}, NULL, %d, %s, %s, %s, %d, %s, %llu)",
-		                                      view.id.index, view.uuid, view.schema_id.index, SQLString(view.name),
-		                                      SQLString(view.dialect), SQLString(view.sql), view.backing_table_id.index,
-		                                      last_refreshed, view.definition_version);
+		view_insert_sql +=
+		    StringUtil::Format("(%d, '%s', {SNAPSHOT_ID}, NULL, %d, %s, %s, %s, %d, %s, %llu, %s)", view.id.index,
+		                       view.uuid, view.schema_id.index, SQLString(view.name), SQLString(view.dialect),
+		                       SQLString(view.sql), view.backing_table_id.index, last_refreshed,
+		                       view.definition_version, view.has_external_dependencies ? "TRUE" : "FALSE");
 		for (auto &dependency : view.dependencies) {
 			if (!dependency_insert_sql.empty()) {
 				dependency_insert_sql += ", ";
@@ -3771,7 +3773,7 @@ string DuckLakeMetadataManager::WriteNewMaterializedViews(const vector<DuckLakeM
 	if (!view_insert_sql.empty()) {
 		result += "INSERT INTO {METADATA_CATALOG}.ducklake_materialized_view(view_id, view_uuid, begin_snapshot, "
 		          "end_snapshot, schema_id, view_name, dialect, sql, backing_table_id, last_refreshed_snapshot, "
-		          "definition_version) VALUES " +
+		          "definition_version, has_external_dependencies) VALUES " +
 		          view_insert_sql + ";";
 	}
 	if (!dependency_insert_sql.empty()) {
@@ -3786,19 +3788,22 @@ string DuckLakeMetadataManager::UpdateMaterializedViewRefreshes(
 	if (refreshed_views.empty()) {
 		return {};
 	}
-	string id_list;
+	string result;
 	for (auto &refresh : refreshed_views) {
-		if (!id_list.empty()) {
-			id_list += ", ";
-		}
-		id_list += to_string(refresh.view_id.index);
-	}
-	return StringUtil::Format(R"(
+		// Freshness is tracked from the snapshot the data was actually computed at, not the
+		// commit snapshot: a source change that committed while the refresh transaction was
+		// still open falls between the two and must leave the view stale. The commit snapshot
+		// is only used when the source snapshot was not recorded.
+		auto stamped = refresh.source_snapshot != DConstants::INVALID_INDEX ? to_string(refresh.source_snapshot)
+		                                                                    : string("{SNAPSHOT_ID}");
+		result += StringUtil::Format(R"(
 UPDATE {METADATA_CATALOG}.ducklake_materialized_view
-SET last_refreshed_snapshot = {SNAPSHOT_ID}
-WHERE view_id IN (%s) AND end_snapshot IS NULL;
+SET last_refreshed_snapshot = %s
+WHERE view_id = %d AND end_snapshot IS NULL;
 )",
-	                          id_list);
+		                             stamped, refresh.view_id.index);
+	}
+	return result;
 }
 
 string DuckLakeMetadataManager::WriteMaterializedViewRefreshHistory(
@@ -3848,7 +3853,7 @@ vector<DuckLakeMaterializedViewInfo> DuckLakeMetadataManager::LoadMaterializedVi
 	}
 	string view_query = R"(
 SELECT view_id, view_uuid, schema_id, view_name, dialect, sql, backing_table_id, last_refreshed_snapshot,
-       COALESCE(definition_version, 1)
+       COALESCE(definition_version, 1), COALESCE(has_external_dependencies, FALSE)
 FROM {METADATA_CATALOG}.ducklake_materialized_view
 WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
 )";
@@ -3871,6 +3876,7 @@ WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_s
 			info.last_refreshed_snapshot = row.GetValue<uint64_t>(7);
 		}
 		info.definition_version = row.GetValue<uint64_t>(8);
+		info.has_external_dependencies = row.GetValue<bool>(9);
 		if (info.definition_version > CURRENT_MV_DEFINITION_VERSION) {
 			throw InvalidInputException(
 			    "Materialized view \"%s\" uses definition version %llu - this build supports up to version %llu. "

@@ -667,8 +667,8 @@ uint64_t DuckLakeReplication::CreateJob(ClientContext &context, DuckLakeCatalog 
 		    "INSERT INTO %s (replication_id, source_catalog, dest_catalog, status, data_sync_mode, interval_ms, "
 		    "include_patterns, exclude_patterns, watermark_columns, created_at) "
 		    "VALUES (%llu, %s, %s, 'created', %s, %llu, %s, %s, %s, now())",
-		    table, new_id, SQLLit(resolved_source), SQLLit(dest.GetName().GetIdentifierName()),
-		    SQLLit(data_sync_mode), interval_ms, SQLLit(include), SQLLit(exclude),
+		    table, new_id, SQLLit(resolved_source), SQLLit(dest.GetName().GetIdentifierName()), SQLLit(data_sync_mode),
+		    interval_ms, SQLLit(include), SQLLit(exclude),
 		    watermark_columns.empty() ? "NULL" : SQLLit(watermark_columns));
 		auto ins_res = con->Query(insert_sql);
 		CheckResult(*ins_res, "Failed to create replication job");

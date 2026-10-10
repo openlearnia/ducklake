@@ -47,7 +47,7 @@ SELECT grp, total, cnt FROM ducklake.mv1 ORDER BY grp
 query TI
 SELECT view_name, last_refreshed_snapshot FROM ducklake_materialized_views('ducklake') ORDER BY view_name
 ----
-mv1	2
+mv1	1
 
 # writes into the base table do not change the view until refresh
 statement ok

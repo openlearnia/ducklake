@@ -1,0 +1,92 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_external_dependency.test
+# description: MVs referencing tables outside the lake always report stale and refresh on demand
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_ext.db' AS lake (DATA_PATH '{TEST_DIR}/mv_ext_files')
+
+statement ok
+CREATE TABLE lake.fact (id INTEGER)
+
+statement ok
+INSERT INTO lake.fact VALUES (1), (2)
+
+statement ok
+CREATE TABLE dim (id INTEGER, label VARCHAR)
+
+statement ok
+INSERT INTO dim VALUES (1, 'one')
+
+# a lake MV joining a native table: freshness of the native side is untrackable
+statement ok
+CREATE MATERIALIZED VIEW lake.mv AS SELECT f.id, d.label FROM lake.fact f JOIN dim d ON d.id = f.id
+
+query II
+SELECT id, label FROM lake.mv ORDER BY id
+----
+1	one
+
+query I
+SELECT is_stale FROM ducklake_materialized_views('lake') WHERE view_name = 'mv'
+----
+true
+
+# changing the native dependency must not be invisible: IF STALE refreshes and picks it up
+statement ok
+UPDATE dim SET label = 'uno'
+
+query I
+SELECT label FROM lake.mv WHERE id = 1
+----
+one
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE lake.mv
+
+query II
+SELECT id, label FROM lake.mv ORDER BY id
+----
+1	uno
+
+# a fully-qualified external reference is also untrackable
+statement ok
+CREATE TABLE lake.fact2 (id INTEGER)
+
+statement ok
+INSERT INTO lake.fact2 VALUES (5)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv2 AS SELECT f.id, d.label FROM lake.fact2 f JOIN memory.main.dim d ON d.id = f.id
+
+query I
+SELECT is_stale FROM ducklake_materialized_views('lake') WHERE view_name = 'mv2'
+----
+true
+
+# staleness survives a detach/reattach (persisted flag)
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_ext.db' AS lake (DATA_PATH '{TEST_DIR}/mv_ext_files')
+
+query I
+SELECT is_stale FROM ducklake_materialized_views('lake') WHERE view_name = 'mv'
+----
+true
+
+# purely-lake MVs keep their tracked freshness (not permanently stale)
+statement ok
+CREATE MATERIALIZED VIEW lake.mv3 AS SELECT count(*) AS c FROM lake.fact
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv3
+
+query I
+SELECT is_stale FROM ducklake_materialized_views('lake') WHERE view_name = 'mv3'
+----
+false

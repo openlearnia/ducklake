@@ -1,0 +1,104 @@
+# name: test/sql/materialized_view/native_materialized_view_aggregate_safety.test
+# description: non-mergeable aggregates (AVG, COUNT DISTINCT) refresh fully instead of appending rows
+# group: [materialized_view]
+
+statement ok
+CREATE TABLE agg_base(id INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO agg_base VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE MATERIALIZED VIEW mv_avg AS SELECT avg(val) AS mean FROM agg_base
+
+query I
+SELECT mean FROM mv_avg
+----
+15
+
+statement ok
+INSERT INTO agg_base VALUES (3, 30)
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_avg
+
+query I
+SELECT mean FROM mv_avg
+----
+20
+
+query I
+SELECT count(*) FROM mv_avg
+----
+1
+
+# count(distinct ...) must not be treated as an appendable projection either
+statement ok
+CREATE MATERIALIZED VIEW mv_cd AS SELECT count(DISTINCT val) AS distinct_vals FROM agg_base
+
+query I
+SELECT distinct_vals FROM mv_cd
+----
+3
+
+statement ok
+INSERT INTO agg_base VALUES (1, 10)
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_cd
+
+query I
+SELECT distinct_vals FROM mv_cd
+----
+3
+
+# grouped AVG also recomputes correctly
+statement ok
+CREATE TABLE grp_base(g INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO grp_base VALUES (1, 10), (1, 20), (2, 5)
+
+statement ok
+CREATE MATERIALIZED VIEW mv_gavg AS SELECT g, avg(val) AS mean FROM grp_base GROUP BY g
+
+statement ok
+INSERT INTO grp_base VALUES (2, 15)
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_gavg
+
+query II
+SELECT g, mean FROM mv_gavg ORDER BY g
+----
+1	15
+2	10
+
+# plain projections and mergeable aggregates keep their fast paths
+statement ok
+CREATE MATERIALIZED VIEW mv_plain AS SELECT id, val * 2 AS doubled FROM agg_base
+
+statement ok
+INSERT INTO agg_base VALUES (9, 5)
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_plain
+
+query II
+SELECT id, doubled FROM mv_plain WHERE id = 9
+----
+9	10
+
+statement ok
+CREATE MATERIALIZED VIEW mv_sum AS SELECT sum(val) AS total FROM agg_base
+
+statement ok
+INSERT INTO agg_base VALUES (10, 100)
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_sum
+
+query I
+SELECT total FROM mv_sum
+----
+175

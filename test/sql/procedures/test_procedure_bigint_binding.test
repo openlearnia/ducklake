@@ -1,0 +1,92 @@
+# name: test/sql/procedures/test_procedure_bigint_binding.test
+# description: JavaScript bigint values bind exactly instead of wrapping through uint64
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/sp_bigint.db' AS ducklake (DATA_PATH '{TEST_DIR}/sp_bigint_files')
+
+# bigint RETURN values from JavaScript bind as their signed value
+statement ok
+CREATE PROCEDURE return_negative_bigint()
+RETURNS BIGINT
+LANGUAGE JAVASCRIPT
+AS $$
+return -1n;
+$$;
+
+query I
+CALL return_negative_bigint()
+----
+-1
+
+statement ok
+CREATE PROCEDURE return_bigint_min()
+RETURNS BIGINT
+LANGUAGE JAVASCRIPT
+AS $$
+return -9223372036854775808n;
+$$;
+
+query I
+CALL return_bigint_min()
+----
+-9223372036854775808
+
+statement ok
+CREATE PROCEDURE return_bigint_max()
+RETURNS BIGINT
+LANGUAGE JAVASCRIPT
+AS $$
+return 9223372036854775807n;
+$$;
+
+query I
+CALL return_bigint_max()
+----
+9223372036854775807
+
+statement ok
+CREATE PROCEDURE return_ubigint_max()
+RETURNS UBIGINT
+LANGUAGE JAVASCRIPT
+AS $$
+return 18446744073709551615n;
+$$;
+
+query I
+CALL return_ubigint_max()
+----
+18446744073709551615
+
+# bigint parameters to duckdb.query bind exactly too
+statement ok
+CREATE PROCEDURE echo_bigint_param()
+RETURNS BIGINT
+LANGUAGE JAVASCRIPT
+AS $$
+const rows = await duckdb.query('SELECT $1::BIGINT AS v', [-1n]);
+return rows[0].v;
+$$;
+
+query I
+CALL echo_bigint_param()
+----
+-1
+
+# out-of-range bigints fail loudly instead of wrapping to 0
+statement ok
+CREATE PROCEDURE return_overflow_bigint()
+RETURNS BIGINT
+LANGUAGE JAVASCRIPT
+AS $$
+return 18446744073709551616n;
+$$;
+
+statement error
+CALL return_overflow_bigint()
+----
+does not fit in BIGINT or UBIGINT

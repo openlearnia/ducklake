@@ -1,0 +1,95 @@
+# name: test/sql/procedures/test_procedure_cancellation.test
+# description: caller max_execution_time stops infinite JavaScript, unresolved promises, and long SQL
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/sp_cancel.db' AS ducklake (DATA_PATH '{TEST_DIR}/sp_cancel_files')
+
+statement ok
+CREATE TABLE ducklake.main.cancel_log (id INTEGER)
+
+# infinite JavaScript is stopped by the QuickJS interrupt handler
+statement ok
+CREATE PROCEDURE infinite_js()
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+while (true) { }
+$$;
+
+statement ok
+SET max_execution_time = 200
+
+statement error
+CALL infinite_js()
+----
+<REGEX>:.*(interrupted|maximum execution time|Interrupted).*
+
+statement ok
+RESET max_execution_time
+
+# a never-settling promise is stopped by the host loop
+statement ok
+CREATE PROCEDURE unresolved_promise()
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+return new Promise(() => {});
+$$;
+
+statement ok
+SET max_execution_time = 200
+
+statement error
+CALL unresolved_promise()
+----
+<REGEX>:.*interrupted.*
+
+statement ok
+RESET max_execution_time
+
+# long SQL on the private connection is interrupted too
+statement ok
+CREATE PROCEDURE long_sql()
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+await duckdb.execute('INSERT INTO ducklake.main.cancel_log SELECT i FROM range(100000000) t(i)');
+return 1;
+$$;
+
+statement ok
+SET max_execution_time = 200
+
+statement error
+CALL long_sql()
+----
+<REGEX>:.*(interrupted|Interrupted).*
+
+statement ok
+RESET max_execution_time
+
+# the interrupted insert did not commit
+query I
+SELECT count(*) FROM ducklake.main.cancel_log
+----
+0
+
+# a healthy procedure is unaffected
+statement ok
+CREATE PROCEDURE healthy()
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+await duckdb.execute('INSERT INTO ducklake.main.cancel_log VALUES (1)');
+return 42;
+$$;
+
+query I
+CALL healthy()
+----
+42

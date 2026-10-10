@@ -1,0 +1,60 @@
+# name: test/sql/procedures/test_procedure_transaction_ordering.test
+# description: duckdb.transaction() does not overtake previously queued SQL
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/sp_txn_order.db' AS ducklake (DATA_PATH '{TEST_DIR}/sp_txn_order_files')
+
+statement ok
+CREATE TABLE ducklake.main.order_log (id INTEGER)
+
+# an INSERT queued before duckdb.transaction() must not be captured by the transaction
+statement ok
+CREATE PROCEDURE insert_then_txn_rollback()
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+await duckdb.execute('INSERT INTO ducklake.main.order_log VALUES (1)');
+await duckdb.transaction(async () => {
+  await duckdb.execute('INSERT INTO ducklake.main.order_log VALUES (2)');
+  throw new Error('boom');
+});
+return 0;
+$$;
+
+statement error
+CALL insert_then_txn_rollback()
+----
+boom
+
+# the pre-transaction INSERT (1) survives; only the in-transaction INSERT (2) rolled back
+query I
+SELECT id FROM ducklake.main.order_log ORDER BY id
+----
+1
+
+# an insert immediately before the transaction, without an intervening await
+statement ok
+CREATE PROCEDURE insert_then_txn_commit()
+RETURNS INTEGER
+LANGUAGE JAVASCRIPT
+AS $$
+const p = duckdb.execute('INSERT INTO ducklake.main.order_log VALUES (10)');
+await duckdb.transaction(async () => {
+  await duckdb.execute('INSERT INTO ducklake.main.order_log VALUES (20)');
+});
+await p;
+return 0;
+$$;
+
+statement ok
+CALL insert_then_txn_commit()
+
+query II
+SELECT count(*), sum(id) FROM ducklake.main.order_log
+----
+3	31

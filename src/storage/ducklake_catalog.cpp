@@ -1766,6 +1766,11 @@ void DuckLakeCatalog::VerifyNotMaterializedViewBackingTable(ClientContext &conte
 bool DuckLakeCatalog::MaterializedViewDependenciesChanged(DuckLakeTransaction &transaction,
                                                           const DuckLakeMaterializedViewInfo &mv, idx_t start_snapshot,
                                                           idx_t end_snapshot) {
+	if (mv.has_external_dependencies) {
+		// the definition references tables outside this lake - their changes never appear in
+		// lake snapshot metadata, so freshness cannot be determined and the view reports stale
+		return true;
+	}
 	if (mv.dependencies.empty()) {
 		return true;
 	}
@@ -1829,6 +1834,16 @@ void DuckLakeCatalog::VerifyMaterializedViewStaleRead(ClientContext &context, Du
 	if (mv->last_refreshed_snapshot.IsValid()) {
 		stale = MaterializedViewDependenciesChanged(transaction, *mv, mv->last_refreshed_snapshot.GetIndex(),
 		                                            transaction.GetSnapshot().snapshot_id);
+	}
+	if (!stale) {
+		// uncommitted changes made by this transaction are invisible to the snapshot window but
+		// visible to source-table reads in the same transaction - the view is stale to it
+		for (auto &dependency : mv->dependencies) {
+			if (dependency.IsTransactionLocal() || transaction.HasAnyLocalChanges(dependency)) {
+				stale = true;
+				break;
+			}
+		}
 	}
 	if (!stale) {
 		return;

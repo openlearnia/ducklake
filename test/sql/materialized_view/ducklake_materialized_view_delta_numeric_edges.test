@@ -1,0 +1,71 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_delta_numeric_edges.test
+# description: delta refresh survives nonfinite summand deletions and wide integer negations
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_numedge.db' AS lake (DATA_PATH '{TEST_DIR}/mv_numedge_files')
+
+statement ok
+CREATE TABLE lake.dbl (k INTEGER, x DOUBLE)
+
+statement ok
+INSERT INTO lake.dbl VALUES (1, 'Infinity'::DOUBLE), (1, 10.0)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv_dbl AS SELECT k, sum(x) AS s, count(x) AS n, count(*) AS c FROM lake.dbl GROUP BY k
+
+# deleting Infinity must recompute the group (Inf - Inf would be NaN)
+statement ok
+DELETE FROM lake.dbl WHERE x = 'Infinity'::DOUBLE
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv_dbl
+
+query TI
+SELECT k, s FROM lake.mv_dbl
+----
+1	10.0
+
+# UBIGINT positives: negating the child type would overflow
+statement ok
+CREATE TABLE lake.ub (k INTEGER, x UBIGINT)
+
+statement ok
+INSERT INTO lake.ub VALUES (1, 18446744073709551615), (1, 1)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv_ub AS SELECT k, sum(x) AS s, count(x) AS n, count(*) AS c FROM lake.ub GROUP BY k
+
+statement ok
+DELETE FROM lake.ub WHERE x = 18446744073709551615
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv_ub
+
+query TI
+SELECT k, s FROM lake.mv_ub
+----
+1	1
+
+# deleting a NaN summand also recomputes instead of propagating NaN
+statement ok
+INSERT INTO lake.dbl VALUES (2, 'NaN'::DOUBLE), (2, 7.0)
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv_dbl
+
+statement ok
+DELETE FROM lake.dbl WHERE x = 'NaN'::DOUBLE
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv_dbl
+
+query TI
+SELECT k, s FROM lake.mv_dbl ORDER BY k
+----
+1	10.0
+2	7.0

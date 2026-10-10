@@ -1,0 +1,93 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_freshness_race.test
+# description: MV freshness is tracked from the snapshot the data was computed at, not the commit snapshot
+# group: [materialized_view]
+
+require notwindows
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok con1
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/mv_freshness_race')
+
+statement ok con1
+CREATE TABLE dl.src (x INTEGER)
+
+statement ok con1
+INSERT INTO dl.src VALUES (10)
+
+# con1 refreshes the view inside an open transaction
+statement ok con1
+BEGIN
+
+statement ok con1
+SELECT * FROM dl.src
+
+statement ok con2
+BEGIN
+
+statement ok con2
+SELECT * FROM dl.src
+
+statement ok con1
+CREATE MATERIALIZED VIEW dl.mv AS SELECT sum(x) AS s FROM dl.src
+
+# con2 commits a source insert while con1's refresh transaction is open
+statement ok con2
+INSERT INTO dl.src VALUES (20)
+
+statement ok con2
+COMMIT
+
+statement ok con1
+COMMIT
+
+# the view missed con2's row: it must be stale, and IF STALE must refresh
+query II
+SELECT is_stale, (SELECT sum(x) FROM dl.src)
+FROM ducklake_materialized_views('dl') WHERE view_name = 'mv'
+----
+true	30
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE dl.mv
+
+query I
+SELECT s FROM dl.mv
+----
+30
+
+# same-transaction writes after the refresh also leave the view stale
+statement ok con1
+BEGIN
+
+statement ok con1
+SELECT * FROM dl.src
+
+statement ok con1
+REFRESH MATERIALIZED VIEW dl.mv
+
+statement ok con1
+INSERT INTO dl.src VALUES (100)
+
+statement ok con1
+COMMIT
+
+query II
+SELECT is_stale, (SELECT sum(x) FROM dl.src)
+FROM ducklake_materialized_views('dl') WHERE view_name = 'mv'
+----
+true	130
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE dl.mv
+
+query I
+SELECT s FROM dl.mv
+----
+130

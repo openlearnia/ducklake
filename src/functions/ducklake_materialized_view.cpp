@@ -1,6 +1,7 @@
 #include "functions/ducklake_table_functions.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "storage/ducklake_rbac.hpp"
 #include "storage/ducklake_schema_entry.hpp"
 #include "storage/ducklake_table_entry.hpp"
@@ -939,7 +940,7 @@ static void CollectBaseTableRefs(QueryNode &node, vector<reference<BaseTableRef>
 //! Qualify base table references that live inside the lake with the lake catalog so the statement
 //! binds correctly regardless of the caller's search path. Also collects the dependency table ids.
 static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &ducklake_catalog, SelectStatement &statement,
-                                  vector<TableIndex> &dependencies) {
+                                  vector<TableIndex> &dependencies, bool &has_external_dependencies) {
 	vector<reference<BaseTableRef>> base_refs;
 	if (statement.node) {
 		CollectBaseTableRefs(*statement.node, base_refs);
@@ -950,7 +951,9 @@ static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &duckl
 		auto qualified_name = ref.GetQualifiedName();
 		if (!qualified_name.Catalog().empty() &&
 		    !StringUtil::CIEquals(qualified_name.Catalog().GetIdentifierName(), lake_name.GetIdentifierName())) {
-			// references an object outside this lake - cannot be tracked as a dependency
+			// references an object in another catalog: its changes never appear in this lake's
+			// snapshot metadata, so the view's freshness cannot be tracked
+			has_external_dependencies = true;
 			continue;
 		}
 		auto base_schema = qualified_name.Schema().empty() ? "main" : qualified_name.Schema().GetIdentifierName();
@@ -971,7 +974,21 @@ static void QualifyBaseRefsInLake(ClientContext &context, DuckLakeCatalog &duckl
 			}
 		}
 		if (!dep_entry) {
-			// not found in the lake - leave the reference alone, binding will resolve or report it
+			// not found in the lake: it may resolve through the caller's search path into
+			// another catalog (e.g. a native table) - those changes are untrackable as well
+			auto default_database = DatabaseManager::GetDefaultDatabase(context);
+			auto external_catalog = Catalog::GetCatalogEntry(context, default_database);
+			if (external_catalog && external_catalog.get() != &ducklake_catalog) {
+				auto external_entry = external_catalog->GetEntry(
+				    context, Identifier(base_schema),
+				    EntryLookupInfo(CatalogType::TABLE_ENTRY, QualifiedName(qualified_name.Name())),
+				    OnEntryNotFound::RETURN_NULL);
+				if (external_entry && (external_entry->type == CatalogType::TABLE_ENTRY ||
+				                       external_entry->type == CatalogType::VIEW_ENTRY)) {
+					has_external_dependencies = true;
+				}
+			}
+			// leave the reference alone, binding will resolve or report it
 			continue;
 		}
 		// qualify so the (re)bind resolves inside the lake regardless of search path
@@ -1012,7 +1029,8 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 
 	// qualify base refs with the lake catalog + resolve dependencies
 	vector<TableIndex> dependencies;
-	QualifyBaseRefsInLake(context, ducklake_catalog, *statement, dependencies);
+	bool has_external_dependencies = false;
+	QualifyBaseRefsInLake(context, ducklake_catalog, *statement, dependencies, has_external_dependencies);
 
 	// serialize the (qualified) definition before binding - binding mutates the parsed statement
 	auto stored_sql = statement->ToString();
@@ -1105,6 +1123,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 
 	// resolve dependencies from the parsed statement (all base tables referenced anywhere in the FROM)
 	mv_info.dependencies = dependencies;
+	mv_info.has_external_dependencies = has_external_dependencies;
 	transaction.CreateMaterializedView(std::move(mv_info));
 
 	// write the initial content: definition plan -> files -> refresh operator
@@ -1179,7 +1198,11 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 		switch (agg.kind) {
 		case MVAggKind::SUM:
 			pos_expr = agg.child_sql;
-			neg_expr = StringUtil::Format("(-(%s))", agg.child_sql);
+			// negate in the aggregate's (wider) output type: negating in the child type
+			// overflows for UBIGINT positives and signed minimums even when the resulting
+			// sum is representable
+			neg_expr =
+			    StringUtil::Format("(-(CAST(%s AS %s)))", agg.child_sql, bound_types[agg.select_index].ToString());
 			break;
 		case MVAggKind::COUNT_STAR:
 			pos_expr = "CAST(1 AS BIGINT)";
@@ -1344,8 +1367,28 @@ static string BuildDeltaRefreshSQL(DuckLakeCatalog &catalog, const DuckLakeMater
 	if (cnt_guard.empty()) {
 		cnt_guard = "1"; // SUM-only views: keep row if any delta (still emit)
 	}
+	// Deleting a nonfinite FLOAT/DOUBLE summand makes the delta indeterminate (Inf - Inf is
+	// NaN): those keys must be recomputed from the base table, exactly like deleted min/max
+	// extrema. Applies to every delta refresh with floating sum measures, not only views that
+	// also carry MIN/MAX aggregates.
+	string nonfinite_deleted;
+	for (idx_t a = 0; a < analysis.aggregates.size(); a++) {
+		auto &sum_agg = analysis.aggregates[a];
+		if (sum_agg.kind != MVAggKind::SUM) {
+			continue;
+		}
+		auto &sum_type = bound_types[sum_agg.select_index];
+		if (sum_type.id() != LogicalTypeId::FLOAT && sum_type.id() != LogicalTypeId::DOUBLE) {
+			continue;
+		}
+		if (!nonfinite_deleted.empty()) {
+			nonfinite_deleted += " OR ";
+		}
+		nonfinite_deleted += StringUtil::Format("NOT isfinite(c.__m%d)", a);
+	}
+	bool needs_invalid_cte = analysis.conditional_delta_eligible || !nonfinite_deleted.empty();
 	string invalid_filter;
-	if (analysis.conditional_delta_eligible) {
+	if (needs_invalid_cte) {
 		string invalid_key_match;
 		for (idx_t i = 0; i < analysis.key_positions.size(); i++) {
 			if (!invalid_key_match.empty()) {
@@ -1371,7 +1414,7 @@ WHERE (%s) <> 0%s
 		}
 		cte_columns += StringUtil::Format("__k%d", i);
 	}
-	if (!analysis.conditional_delta_eligible) {
+	if (!needs_invalid_cte) {
 		return StringUtil::Format(R"(
 WITH __mv_changed(%s) AS (
 	SELECT DISTINCT %s FROM %s%s%s
@@ -1414,6 +1457,15 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 		extremum_deleted += StringUtil::Format("c.__m%d IS NOT DISTINCT FROM __mv.%s", a,
 		                                       SQLIdentifier(bound_column_names[agg.select_index]));
 	}
+	// deleted-state conditions that make a delta unsafe: deleted min/max extrema, and
+	// deleted nonfinite floating summands
+	string deleted_unsafe = extremum_deleted;
+	if (!nonfinite_deleted.empty()) {
+		if (!deleted_unsafe.empty()) {
+			deleted_unsafe += " OR ";
+		}
+		deleted_unsafe += "(" + nonfinite_deleted + ")";
+	}
 	string invalid_columns;
 	string invalid_select;
 	string rebuild_condition;
@@ -1454,7 +1506,7 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 	                          cte_columns, cdc_key_select, ins_call, base_alias, cdc_where, cdc_key_select, del_call,
 	                          base_alias, cdc_where, cdc_key_select, ins_measures, ins_call, base_alias, cdc_where,
 	                          cdc_key_select, del_measures, del_call, base_alias, cdc_where, cte_columns, delta_aggs,
-	                          cte_columns, invalid_columns, invalid_select, mv_ref, invalid_key_join, extremum_deleted,
+	                          cte_columns, invalid_columns, invalid_select, mv_ref, invalid_key_join, deleted_unsafe,
 	                          kept, updated, rebuild);
 }
 
@@ -1713,7 +1765,9 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	// Analyze before qualify so WHERE/keys stay CDC-friendly (unqualified column names)
 	auto analysis = AnalyzeMaterializedView(*parsed_definition);
 	vector<TableIndex> parsed_dependencies;
-	QualifyBaseRefsInLake(context, ducklake_catalog, *parsed_definition, parsed_dependencies);
+	bool parsed_external_dependencies = false;
+	QualifyBaseRefsInLake(context, ducklake_catalog, *parsed_definition, parsed_dependencies,
+	                      parsed_external_dependencies);
 
 	// resolve dependency table ids by name (for join fact/dim split)
 	auto find_dep = [&](const string &schema_name, const string &table_name) -> optional_idx {
