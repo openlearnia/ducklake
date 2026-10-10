@@ -7,6 +7,8 @@
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_insert.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "storage/ducklake_metadata_info.hpp"
+#include "common/ducklake_name_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
@@ -17,6 +19,7 @@
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "storage/ducklake_geo_stats.hpp"
+#include <functional>
 #include <unordered_set>
 
 namespace duckdb {
@@ -182,6 +185,14 @@ public:
 	}
 
 	vector<DuckLakeDataFile> AddFiles(const vector<string> &globs);
+
+	//! Share-mode hook: rewrites footer column names from the source's logical metadata
+	//! (footer field ids or the source's registered name maps) immediately before name-mapping,
+	//! so files written under an evolved source schema still map onto the destination schema.
+	std::function<void(ParquetFileMetadata &)> pre_mapping_hook;
+	//! Share mode: rewritten column path -> physical footer name. Name-map source names must
+	//! keep addressing the file's on-disk layout, so MapColumn restores them from here.
+	unordered_map<string, string> shared_source_name_restore;
 
 private:
 	void ReadParquetFullMetadata(const string &glob, vector<DuckLakeDataFile> &result);
@@ -464,6 +475,9 @@ FROM parquet_full_metadata(%s)
 			}
 		}
 
+		if (pre_mapping_hook) {
+			pre_mapping_hook(file);
+		}
 		DetermineMapping(file);
 
 		auto &metadata_struct_children = StructVector::GetEntries(parquet_metadata_list_entries);
@@ -789,6 +803,9 @@ FROM vortex_full_metadata(%s)
 			}
 		}
 
+		if (pre_mapping_hook) {
+			pre_mapping_hook(file);
+		}
 		DetermineMapping(file);
 
 		auto &stats_struct_children = StructVector::GetEntries(vortex_stats_list_entries);
@@ -1257,6 +1274,12 @@ unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapColumn(ParquetFileMet
 
 	auto map_entry = make_uniq<DuckLakeNameMapEntry>();
 	map_entry->source_name = column.name;
+	// share mode rewrote the column name to the destination schema - the registered map must
+	// still address the physical footer layout
+	auto restored = shared_source_name_restore.find(prefix);
+	if (restored != shared_source_name_restore.end()) {
+		map_entry->source_name = restored->second;
+	}
 	map_entry->target_field_id = field_id.GetFieldIndex();
 
 	// Store the mapping from column to field for later statistics processing
@@ -1520,8 +1543,8 @@ void DuckLakeFileProcessor::MapColumnStats(ParquetFileMetadata &file_metadata, D
 			// extra statistics cannot describe a constant default, so the column gets none
 			continue;
 		}
-		auto column_stats = ConstantColumnStats(file_metadata, missing.field_index, missing.field_type,
-		                                        missing.default_value);
+		auto column_stats =
+		    ConstantColumnStats(file_metadata, missing.field_index, missing.field_type, missing.default_value);
 		if (missing.repeated) {
 			column_stats.has_num_values = false;
 			column_stats.has_null_count = false;
@@ -1599,8 +1622,8 @@ vector<unique_ptr<DuckLakeNameMapEntry>> DuckLakeFileProcessor::MapColumns(
 			    file_metadata.filepath);
 		}
 		const auto &initial_default = field_id.GetColumnData().initial_default;
-	CollectMissingColumns(field_id, initial_default.IsNull(), initial_default, repeated,
-	                      file_metadata.missing_columns);
+		CollectMissingColumns(field_id, initial_default.IsNull(), initial_default, repeated,
+		                      file_metadata.missing_columns);
 	}
 	return column_maps;
 }
@@ -1805,6 +1828,175 @@ vector<DuckLakeDataFile> DuckLakePrepareExternalFiles(DuckLakeTransaction &trans
 	bind_data.allow_internal_columns = true;
 	DuckLakeFileProcessor processor(transaction, context, bind_data, file_format);
 	return processor.AddFiles(paths);
+}
+
+//===--------------------------------------------------------------------===//
+// DuckLakePrepareSharedFiles
+//===--------------------------------------------------------------------===//
+
+//! Final path component of a file path - DuckLake file names are generated unique ids, so the
+//! base name identifies a file across catalogs with different path canonicalization.
+static string SharedFileBaseName(const string &path) {
+	return path.substr(path.find_last_of("/\\") + 1);
+}
+
+//! Finds a live source field by field index, anywhere in the nested field tree.
+static const DuckLakeFieldId *FindSharedFieldById(const vector<unique_ptr<DuckLakeFieldId>> &fields,
+                                                  idx_t field_index) {
+	for (auto &field : fields) {
+		if (field->GetFieldIndex().index == field_index) {
+			return field.get();
+		}
+		auto child = FindSharedFieldById(field->Children(), field_index);
+		if (child) {
+			return child;
+		}
+	}
+	return nullptr;
+}
+
+//! Finds a registered-map child entry by footer column name.
+static const DuckLakeNameMapEntry *FindSharedMapEntry(const vector<unique_ptr<DuckLakeNameMapEntry>> &entries,
+                                                      const string &name) {
+	for (auto &entry : entries) {
+		if (entry->source_name == name) {
+			return entry.get();
+		}
+	}
+	return nullptr;
+}
+
+//! Walks the source and destination field trees in parallel by name and records, for every
+//! source field, the corresponding destination field. Field ids differ between catalogs
+//! whenever either side evolved independently (drops, re-adds).
+static void BuildSharedFieldTranslation(const vector<unique_ptr<DuckLakeFieldId>> &source_fields,
+                                        const vector<unique_ptr<DuckLakeFieldId>> &dest_fields,
+                                        unordered_map<idx_t, const DuckLakeFieldId *> &translation) {
+	case_insensitive_map_t<const DuckLakeFieldId *> dest_by_name;
+	for (auto &dest_field : dest_fields) {
+		dest_by_name.emplace(dest_field->Name(), dest_field.get());
+	}
+	for (auto &source_field : source_fields) {
+		auto entry = dest_by_name.find(source_field->Name());
+		if (entry == dest_by_name.end()) {
+			continue;
+		}
+		translation.emplace(source_field->GetFieldIndex().index, entry->second);
+		BuildSharedFieldTranslation(source_field->Children(), entry->second->Children(), translation);
+	}
+}
+
+//! Rewrites one footer column from the source's logical metadata onto the destination schema:
+//! renames it to the destination field's name and rewrites its field id to the destination's
+//! field id so validation and statistics key on the destination, while remembering the physical
+//! footer name - registered name maps must keep addressing the file as it is laid out on disk.
+//! Columns whose source field was dropped after the file was written are removed entirely.
+static bool RewriteSharedColumn(ParquetColumn &column, const string &path_prefix, const DuckLakeNameMapEntry *map_entry,
+                                const vector<unique_ptr<DuckLakeFieldId>> &source_fields,
+                                const unordered_map<idx_t, const DuckLakeFieldId *> &translation,
+                                unordered_map<string, string> &source_name_restore) {
+	if (IsDuckLakeInternalColumn(column.name)) {
+		// internal columns (row ids, snapshot ids) stay in the file unmapped
+		return true;
+	}
+	const DuckLakeFieldId *source_field = nullptr;
+	if (map_entry) {
+		// externally added file: the registered name map already resolves footer name -> source field
+		source_field = FindSharedFieldById(source_fields, map_entry->target_field_id.index);
+	} else if (column.field_id.IsValid()) {
+		// ducklake-written file: the footer carries the source field id of the write-time schema
+		source_field = FindSharedFieldById(source_fields, column.field_id.GetIndex());
+	}
+	if ((map_entry || column.field_id.IsValid()) && !source_field) {
+		// the field was dropped from the source schema after the file was written
+		return false;
+	}
+	if (source_field) {
+		auto entry = translation.find(source_field->GetFieldIndex().index);
+		if (entry == translation.end()) {
+			throw InvalidInputException("Cannot share source field \"%s\": it has no matching destination column",
+			                            source_field->Name());
+		}
+		auto physical_name = column.name;
+		column.name = entry->second->Name();
+		column.field_id = entry->second->GetFieldIndex().index;
+		// the restore key is the rewritten path - MapColumn knows the column only by its new name
+		auto path = path_prefix.empty() ? column.name : path_prefix + "." + column.name;
+		source_name_restore[path] = physical_name;
+	}
+	vector<unique_ptr<ParquetColumn>> kept_children;
+	for (auto &child : column.child_columns) {
+		auto child_map = map_entry ? FindSharedMapEntry(map_entry->child_entries, child->name) : nullptr;
+		auto child_path = path_prefix.empty() ? column.name : path_prefix + "." + column.name;
+		if (RewriteSharedColumn(*child, child_path, child_map, source_fields, translation, source_name_restore)) {
+			kept_children.push_back(std::move(child));
+		}
+	}
+	column.child_columns = std::move(kept_children);
+	return true;
+}
+
+vector<DuckLakeDataFile> DuckLakePrepareSharedFiles(DuckLakeTransaction &dest_transaction, ClientContext &context,
+                                                    DuckLakeCatalog &source_catalog, DuckLakeTableEntry &source_table,
+                                                    DuckLakeTableEntry &dest_table,
+                                                    const vector<DuckLakeFileListExtendedEntry> &source_files) {
+	auto &source_txn = DuckLakeTransaction::Get(context, source_catalog);
+	// registered source name maps by file name - externally added files carry their own mapping
+	unordered_map<string, shared_ptr<const DuckLakeNameMap>> registered_maps;
+	for (auto &file : source_files) {
+		if (file.mapping_id.IsValid()) {
+			registered_maps[SharedFileBaseName(file.file.path)] = source_txn.GetMappingById(file.mapping_id);
+		}
+	}
+	// source field id -> destination field (same logical path, different physical ids)
+	unordered_map<idx_t, const DuckLakeFieldId *> field_translation;
+	BuildSharedFieldTranslation(source_table.GetFieldData().GetFieldIds(), dest_table.GetFieldData().GetFieldIds(),
+	                            field_translation);
+	auto &source_fields = source_table.GetFieldData().GetFieldIds();
+
+	DuckLakeAddDataFilesData bind_data(dest_transaction.GetCatalog(), dest_table);
+	// shared files carry their own layout - never derive values from hive-style paths
+	bind_data.hive_partitioning = HivePartitioningType::NO;
+	// ducklake-written files can carry internal columns (row ids, snapshot ids) - they are skipped
+	// rather than mapped
+	bind_data.allow_internal_columns = true;
+	// files written before a column was added legitimately lack it - the column reads its
+	// initial default instead
+	bind_data.allow_missing = true;
+
+	vector<DuckLakeDataFile> result;
+	unordered_map<string, vector<string>> paths_by_format;
+	for (auto &file : source_files) {
+		paths_by_format[file.file.file_format].push_back(file.file.path);
+	}
+	for (auto &entry : paths_by_format) {
+		DuckLakeFileProcessor processor(dest_transaction, context, bind_data, entry.first);
+		processor.pre_mapping_hook = [&processor, &registered_maps, &source_fields,
+		                              &field_translation](ParquetFileMetadata &file) {
+			auto it = registered_maps.find(SharedFileBaseName(file.filepath));
+			auto name_map = it == registered_maps.end() ? nullptr : it->second.get();
+			processor.shared_source_name_restore.clear();
+			vector<unique_ptr<ParquetColumn>> kept_columns;
+			for (auto &column : file.columns) {
+				auto map_entry = name_map ? FindSharedMapEntry(name_map->column_maps, column->name) : nullptr;
+				if (name_map && !map_entry && !IsDuckLakeInternalColumn(column->name)) {
+					// the registered map does not cover this column - it was not mapped into
+					// the source table either, so it must not reach the destination
+					continue;
+				}
+				if (RewriteSharedColumn(*column, string(), map_entry, source_fields, field_translation,
+				                        processor.shared_source_name_restore)) {
+					kept_columns.push_back(std::move(column));
+				}
+			}
+			file.columns = std::move(kept_columns);
+		};
+		auto files = processor.AddFiles(entry.second);
+		for (auto &prepared : files) {
+			result.push_back(std::move(prepared));
+		}
+	}
+	return result;
 }
 
 static void DuckLakeAddDataFilesExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {

@@ -816,9 +816,8 @@ static string ChooseStrategy(ClientContext &context, Catalog &source_catalog, co
 //! Runs inside the source/apply transaction; schema nullability alone is not rejection grounds -
 //! only actual NULL values are.
 static void ValidateWatermarkRows(Connection &apply, const string &src_table, const string &watermark_column) {
-	auto exists = ScalarValue(
-	    apply, StringUtil::Format("SELECT EXISTS(SELECT 1 FROM %s WHERE %s IS NULL)", src_table,
-	                              SQLId(watermark_column)));
+	auto exists = ScalarValue(apply, StringUtil::Format("SELECT EXISTS(SELECT 1 FROM %s WHERE %s IS NULL)", src_table,
+	                                                    SQLId(watermark_column)));
 	if (!exists.IsNull() && exists.GetValue<bool>()) {
 		throw InvalidInputException("watermark column %s contains NULL values; use full replication or remove NULL "
 		                            "values",
@@ -978,9 +977,11 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 		}
 	}
 
-	// Register missing source files, grouped by file format. Source delete files ride along on the
+	// Register missing source files. The preparation composes the source's logical mappings
+	// (footer field ids / registered name maps) with the destination schema so files written
+	// under an evolved source schema still map correctly. Source delete files ride along on the
 	// staged data file so the commit binds them to the freshly assigned data_file_id.
-	unordered_map<string, vector<idx_t>> missing_by_format;
+	vector<idx_t> missing;
 	for (idx_t i = 0; i < src_files.size(); i++) {
 		auto &file = src_files[i];
 		auto expected_delete = file.delete_file.path.empty() ? string() : share_delete_name(file.delete_file.path);
@@ -993,18 +994,19 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 			}
 		}
 		if (!registered) {
-			missing_by_format[file.file.file_format].push_back(i);
+			missing.push_back(i);
 		}
 	}
 	vector<string> external_paths;
 	vector<DuckLakeDataFile> staged_files;
 	auto &fs = FileSystem::GetFileSystem(*apply.context);
-	for (auto &entry : missing_by_format) {
-		vector<string> paths;
-		for (auto idx : entry.second) {
-			paths.push_back(src_files[idx].file.path);
+	if (!missing.empty()) {
+		vector<DuckLakeFileListExtendedEntry> missing_entries;
+		for (auto idx : missing) {
+			missing_entries.push_back(src_files[idx]);
 		}
-		auto new_files = DuckLakePrepareExternalFiles(dest_txn, *apply.context, dest, dest_table, paths, entry.first);
+		auto new_files = DuckLakePrepareSharedFiles(dest_txn, *apply.context, source_catalog.Cast<DuckLakeCatalog>(),
+		                                            src_table, dest_table, missing_entries);
 		for (auto &new_file : new_files) {
 			auto &src_file = src_files[src_by_name[base_name(new_file.file_name)]];
 			new_file.encryption_key = src_file.file.encryption_key;
@@ -1041,6 +1043,22 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 	if (!staged_files.empty()) {
 		dest_txn.AppendFiles(table_id, std::move(staged_files));
 	}
+}
+
+//! The source column's initial default (recorded when the column was added), rendered as a SQL
+//! literal. Empty when the column was added without a default: pre-addition files read NULL on
+//! the source, so the destination must not default them either.
+static string SharedColumnInitialDefault(DuckLakeTableEntry &source_table, const string &column_name) {
+	for (auto &field : source_table.GetFieldData().GetFieldIds()) {
+		if (StringUtil::CIEquals(field->Name(), column_name)) {
+			auto &initial_default = field->GetColumnData().initial_default;
+			if (initial_default.IsNull()) {
+				return string();
+			}
+			return initial_default.ToSQLString();
+		}
+	}
+	return string();
 }
 
 DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &context, DuckLakeCatalog &dest,
@@ -1182,16 +1200,17 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 				// transaction so schema, identity and cursor bounds describe one source point.
 				Value source_uuid;
 				bool identity_changed = false;
+				DuckLakeTableEntry *src_duck_table = nullptr;
 				if (source_is_ducklake) {
 					auto entry = source_catalog.GetEntry<TableCatalogEntry>(
 					    *apply->context,
 					    QualifiedName(source_catalog.GetName(), Identifier(ref.schema), Identifier(ref.table)),
 					    OnEntryNotFound::THROW_EXCEPTION);
-					source_uuid = Value(entry->Cast<DuckLakeTableEntry>().GetTableUUID());
+					src_duck_table = &entry->Cast<DuckLakeTableEntry>();
+					source_uuid = Value(src_duck_table->GetTableUUID());
 					outcome.source_table_uuid = source_uuid;
-					if (prior &&
-					    (prior->source_table_uuid.IsNull() ||
-					     prior->source_table_uuid.GetValue<string>() != source_uuid.GetValue<string>())) {
+					if (prior && (prior->source_table_uuid.IsNull() ||
+					              prior->source_table_uuid.GetValue<string>() != source_uuid.GetValue<string>())) {
 						identity_changed = true;
 						// Never pair the previous incarnation's schema with the new identity.
 						source_columns =
@@ -1219,8 +1238,26 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 					recreated = true;
 				}
 				if (recreated) {
-					auto create_sql =
-					    StringUtil::Format("CREATE TABLE %s AS SELECT * FROM %s WHERE 1 = 0", dst_table, src_table);
+					string create_sql;
+					if (outcome.strategy == "share" && src_duck_table) {
+						// Share tables are created from the source's logical schema with the
+						// source's initial defaults: files written before a column existed read
+						// that column's original default, even after the source changed it.
+						vector<string> column_defs;
+						for (auto &field : src_duck_table->GetFieldData().GetFieldIds()) {
+							auto &initial_default = field->GetColumnData().initial_default;
+							auto def = SQLId(field->Name()) + " " + field->Type().ToString();
+							if (!initial_default.IsNull()) {
+								def += " DEFAULT " + initial_default.ToSQLString();
+							}
+							column_defs.push_back(std::move(def));
+						}
+						create_sql =
+						    StringUtil::Format("CREATE TABLE %s (%s)", dst_table, StringUtil::Join(column_defs, ", "));
+					} else {
+						create_sql =
+						    StringUtil::Format("CREATE TABLE %s AS SELECT * FROM %s WHERE 1 = 0", dst_table, src_table);
+					}
 					auto create_res = apply->Query(create_sql);
 					CheckResult(*create_res, "Failed to create table " + dst_table);
 				} else if (extended) {
@@ -1229,7 +1266,17 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 						auto alter_sql =
 						    StringUtil::Format("ALTER TABLE %s ADD COLUMN %s %s", dst_table, SQLId(col.name), col.type);
 						if (col.has_default) {
-							alter_sql += " DEFAULT " + col.default_value;
+							if (outcome.strategy == "share" && src_duck_table) {
+								// share mode extends with the source's initial default so files
+								// written before the column existed keep reading the value that
+								// was current when the column was added
+								auto initial = SharedColumnInitialDefault(*src_duck_table, col.name);
+								if (!initial.empty()) {
+									alter_sql += " DEFAULT " + initial;
+								}
+							} else {
+								alter_sql += " DEFAULT " + col.default_value;
+							}
 						}
 						auto alter_res = apply->Query(alter_sql);
 						CheckResult(*alter_res, "Failed to add column " + col.name + " to " + dst_table);
@@ -1833,7 +1880,7 @@ Value DuckLakeReplication::SnapshotsBehind(ClientContext &context, DuckLakeCatal
 		}
 		auto con = MakeConnection(context, source.GetDatabase());
 		auto head = ScalarValue(*con, "SELECT MAX(snapshot_id) FROM ducklake_snapshots(" +
-		                                      SQLLit(source.GetName().GetIdentifierName()) + ")");
+		                                  SQLLit(source.GetName().GetIdentifierName()) + ")");
 		if (head.IsNull()) {
 			return Value();
 		}

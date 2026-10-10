@@ -388,8 +388,8 @@ public:
 	//! Ends each table's live constraint rows at {SNAPSHOT_ID} and inserts the complete
 	//! replacement set with sequential constraint indexes. An empty vector for a table
 	//! removes all of its keys. Retry/rollback rebuild the batch from scratch.
-	static string WriteConstraintReplacements(
-	    const map<TableIndex, vector<DuckLakeConstraintInfo>> &replacement_constraints);
+	static string
+	WriteConstraintReplacements(const map<TableIndex, vector<DuckLakeConstraintInfo>> &replacement_constraints);
 	static string WriteNewSortKeys(const vector<DuckLakeSortInfo> &existing_sorts,
 	                               const vector<DuckLakeSortInfo> &new_sorts);
 	static string WriteDroppedColumns(const vector<DuckLakeDroppedColumn> &dropped_columns);

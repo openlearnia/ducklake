@@ -152,6 +152,18 @@ vector<DuckLakeDataFile> DuckLakePrepareExternalFiles(DuckLakeTransaction &trans
                                                       Catalog &catalog, DuckLakeTableEntry &table,
                                                       const vector<string> &paths, const string &file_format);
 
+struct DuckLakeFileListExtendedEntry;
+
+//! Share-mode file preparation: composes physical-file-to-source mappings (footer field ids or
+//! the source's registered name maps, renamed to the source's current schema) with the
+//! destination schema, instead of matching raw footer names against the destination. Dropped
+//! source fields are excluded; columns added after a file was written read their initial
+//! default. Registration (name map, stats) happens on the destination transaction.
+vector<DuckLakeDataFile> DuckLakePrepareSharedFiles(DuckLakeTransaction &dest_transaction, ClientContext &context,
+                                                    DuckLakeCatalog &source_catalog, DuckLakeTableEntry &source_table,
+                                                    DuckLakeTableEntry &dest_table,
+                                                    const vector<DuckLakeFileListExtendedEntry> &source_files);
+
 class DuckLakeSettingsFunction : public DuckLakeBaseMetadataFunction {
 public:
 	DuckLakeSettingsFunction();
