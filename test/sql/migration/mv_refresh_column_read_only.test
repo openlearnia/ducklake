@@ -1,0 +1,55 @@
+# name: test/sql/migration/mv_refresh_column_read_only.test
+# description: read-only current catalogs without MV refresh metadata remain readable and unchanged
+# group: [migration]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_refresh_ro.db' AS dl (DATA_PATH '{TEST_DIR}/mv_refresh_ro_files')
+
+statement ok
+CREATE TABLE dl.src(g INTEGER, x INTEGER)
+
+statement ok
+INSERT INTO dl.src VALUES (1, 10)
+
+statement ok
+CREATE MATERIALIZED VIEW dl.mv AS SELECT g, SUM(x) s FROM dl.src GROUP BY g
+
+statement ok
+DETACH dl
+
+statement ok
+ATTACH '{TEST_DIR}/mv_refresh_ro.db' AS legacy
+
+statement ok
+ALTER TABLE legacy.ducklake_materialized_view DROP COLUMN last_refresh_txn_wrote_dependencies
+
+statement ok
+DETACH legacy
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_refresh_ro.db' AS dl (DATA_PATH '{TEST_DIR}/mv_refresh_ro_files', READ_ONLY)
+
+query I
+SELECT x FROM dl.src
+----
+10
+
+query I
+SELECT s FROM dl.mv
+----
+10
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('dl') WHERE NOT is_stale
+----
+1
+
+# Read-only compatibility must not mutate the metadata schema.
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name='__ducklake_metadata_dl' AND table_name='ducklake_materialized_view' AND column_name='last_refresh_txn_wrote_dependencies'
+----
+0

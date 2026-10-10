@@ -1,0 +1,93 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_int128.test
+# description: materialized views preserve signed 128-bit types, range, and arithmetic
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_int128.db' AS lake (DATA_PATH '{TEST_DIR}/mv_int128_files')
+
+statement ok
+CREATE TABLE src(id INTEGER, x HUGEINT)
+
+statement ok
+INSERT INTO src VALUES (1, '-170141183460469231731687303715884105728'::HUGEINT), (2, '170141183460469231731687303715884105727'::HUGEINT), (3, '100000000000000000000000000000000000000'::HUGEINT), (4, 9007199254740993), (5, NULL)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv AS SELECT * FROM src
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE mv.x IS NOT DISTINCT FROM src.x AND typeof(mv.x) = typeof(src.x) AND (mv.x + 0) IS NOT DISTINCT FROM (src.x + 0)) FROM lake.mv mv JOIN src USING (id)
+----
+5	5
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE mv.x IS NOT DISTINCT FROM src.x AND typeof(mv.x) = 'HUGEINT') FROM lake.mv mv JOIN src USING (id)
+----
+5	5
+
+statement ok
+CREATE TABLE lake.big(k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO lake.big VALUES (1, '-9223372036854775808'::BIGINT), (1, 100)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.big_mv AS SELECT k, SUM(x) s, COUNT(x) n, COUNT(*) c FROM lake.big GROUP BY k
+
+query IT
+SELECT s, typeof(s) FROM lake.big_mv
+----
+-9223372036854775708	HUGEINT
+
+statement ok
+DELETE FROM lake.big WHERE x = '-9223372036854775808'::BIGINT
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.big_mv
+
+query IT
+SELECT s, typeof(s) FROM lake.big_mv
+----
+100	HUGEINT
+
+statement ok
+CREATE TABLE lake.ub(k INTEGER, x UBIGINT)
+
+statement ok
+INSERT INTO lake.ub VALUES (1, '18446744073709551615'::UBIGINT), (1, 100)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.ub_mv AS SELECT k, SUM(x) s, COUNT(x) n, COUNT(*) c FROM lake.ub GROUP BY k
+
+query IT
+SELECT s, typeof(s) FROM lake.ub_mv
+----
+18446744073709551715	HUGEINT
+
+statement ok
+DELETE FROM lake.ub WHERE x = '18446744073709551615'::UBIGINT
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.ub_mv
+
+query IT
+SELECT s, typeof(s) FROM lake.ub_mv
+----
+100	HUGEINT
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_int128.db' AS lake (DATA_PATH '{TEST_DIR}/mv_int128_files')
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE mv.x IS NOT DISTINCT FROM src.x AND typeof(mv.x) = 'HUGEINT') FROM lake.mv mv JOIN src USING (id)
+----
+5	5

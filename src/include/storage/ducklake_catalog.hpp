@@ -143,6 +143,8 @@ struct DuckLakeAttachedCatalogs : public ObjectCacheEntry {
 class DuckLakeSchemaPinState {
 public:
 	void Pin(shared_ptr<DuckLakeSchemaCacheEntry> entry);
+	//! Returns the owner of a cached schema referenced by a prepared plan.
+	shared_ptr<DuckLakeSchemaCacheEntry> GetPin(SchemaCatalogEntry &schema);
 	//! Clear all pinned schema cache entries for this pin state.
 	void Clear();
 

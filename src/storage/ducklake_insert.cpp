@@ -788,8 +788,11 @@ PhysicalOperator &DuckLakeInsert::PlanInsert(ClientContext &context, PhysicalPla
                                              DuckLakeTableEntry &table, string encryption_key) {
 	vector<LogicalType> return_types;
 	return_types.emplace_back(LogicalType::BIGINT);
-	return planner.Make<DuckLakeInsert>(return_types, table, GetPartitionId(table.GetPartitionData()),
-	                                    std::move(encryption_key));
+	auto &insert = planner.Make<DuckLakeInsert>(return_types, table, GetPartitionId(table.GetPartitionData()),
+	                                           std::move(encryption_key));
+	insert.Cast<DuckLakeInsert>().schema_cache_pin =
+	    DuckLakeTransaction::Get(context, table.ParentCatalog()).GetSchemaCachePin(table.ParentSchema());
+	return insert;
 }
 
 string DuckLakeCatalog::GenerateEncryptionKey(ClientContext &context) const {
@@ -960,6 +963,7 @@ PhysicalOperator &DuckLakeCatalog::PlanCreateTableAs(ClientContext &context, Phy
 	    planner.Make<DuckLakeInsert>(op.types, op.schema, std::move(op.info), std::move(table_uuid),
 	                                 std::move(table_data_path), std::move(partition_data), std::move(sort_data),
 	                                 std::move(table_options), std::move(copy_input.encryption_key));
+	insert.Cast<DuckLakeInsert>().schema_cache_pin = duck_transaction.GetSchemaCachePin(op.schema);
 	if (pipeline.inline_data) {
 		pipeline.inline_data->insert = insert.Cast<DuckLakeInsert>();
 	}

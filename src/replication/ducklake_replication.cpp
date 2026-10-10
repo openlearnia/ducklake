@@ -20,6 +20,7 @@
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
@@ -30,6 +31,7 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/storage/object_cache.hpp"
 
 #include <condition_variable>
 #include <cstdlib>
@@ -78,6 +80,26 @@ static void CheckResult(QueryResult &result, const string &context) {
 	if (result.HasError()) {
 		result.GetErrorObject().Throw(context + ": ");
 	}
+}
+
+struct DuckLakeReplicationNativeEpoch : public ObjectCacheEntry {
+	string epoch = UUID::ToString(UUID::GenerateRandomUUID());
+
+	static string ObjectType() {
+		return "ducklake_replication_native_epoch";
+	}
+	string GetObjectType() override {
+		return ObjectType();
+	}
+	optional_idx GetEstimatedCacheMemory() const override {
+		// The epoch must remain stable until this database instance closes.
+		return optional_idx();
+	}
+};
+
+static string NativeSourceIdentity(ClientContext &context, const Value &oid) {
+	auto epoch = context.db->GetObjectCache().GetOrCreateWithTypePrefix<DuckLakeReplicationNativeEpoch>("instance");
+	return "native:" + epoch->epoch + ":" + oid.ToString();
 }
 
 //! `*` matches any run, `?` a single character.
@@ -949,36 +971,16 @@ static void ApplyShareSync(ClientContext &context, Connection &apply, Catalog &s
 	auto base_name = [](const string &path) {
 		return path.substr(path.find_last_of("/\\") + 1);
 	};
-	// A destination registration is matched back to its source file primarily by canonicalized
-	// full path. The basename is only a fallback for paths that legitimately differ between the
-	// two catalogs (symlink resolution during glob expansion, or a source data path nested
-	// inside the destination's, which gets rebased on registration). DuckLake-written files
-	// carry unique generated basenames, but externally added files can share a basename across
-	// directories - an ambiguous basename without a path match must not conflate them.
+	// Canonical paths also resolve symlinked or rebased data paths without conflating namesakes.
 	auto &share_fs = FileSystem::GetFileSystem(*apply.context);
 	unordered_map<string, idx_t> src_by_path;
-	unordered_map<string, vector<idx_t>> src_by_base;
 	for (idx_t i = 0; i < src_files.size(); i++) {
 		src_by_path[share_fs.CanonicalizePath(src_files[i].file.path)] = i;
-		src_by_base[base_name(src_files[i].file.path)].push_back(i);
-	}
-	// Basename fallback also requires the basename to be unique among the DESTINATION's live
-	// registrations: after a same-basename source file disappears, its old registration would
-	// otherwise resolve to the surviving namesake and never be dropped.
-	unordered_map<string, idx_t> dst_base_count;
-	for (auto &file : dst_files) {
-		dst_base_count[base_name(file.file.path)]++;
 	}
 	auto resolve_src = [&](const string &registered_path) -> idx_t {
 		auto by_path = src_by_path.find(share_fs.CanonicalizePath(registered_path));
 		if (by_path != src_by_path.end()) {
 			return by_path->second;
-		}
-		auto by_base = src_by_base.find(base_name(registered_path));
-		auto dst_count = dst_base_count.find(base_name(registered_path));
-		bool dst_unique = dst_count == dst_base_count.end() || dst_count->second == 1;
-		if (by_base != src_by_base.end() && by_base->second.size() == 1 && dst_unique) {
-			return by_base->second[0];
 		}
 		return DConstants::INVALID_INDEX;
 	};
@@ -1292,25 +1294,25 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 						dest_columns = ListColumns(context, dest, dest_name, ref.schema, ref.table);
 					}
 				} else {
-					// Native sources carry no UUID. The catalog table OID is a usable incarnation
-					// identity: dropping and recreating the table allocates a fresh OID, so a
-					// recreation invalidates cursors regardless of watermark values. File-backed
-					// catalogs may renumber OIDs across reattach - that only triggers a safe
-					// one-time reseed.
+					// Native OIDs identify tables only within this database instance. A new runtime
+					// epoch forces one reseed after restart, while later appends remain incremental.
 					auto oid = ScalarValue(
 					    *apply, StringUtil::Format("SELECT table_oid FROM duckdb_tables() WHERE database_name = %s AND "
 					                               "schema_name = %s AND table_name = %s",
 					                               SQLLit(job.source_catalog), SQLLit(ref.schema), SQLLit(ref.table)));
 					if (!oid.IsNull()) {
-						source_uuid = Value(oid.ToString());
+						source_uuid = Value(NativeSourceIdentity(*apply->context, oid));
 						outcome.source_table_uuid = source_uuid;
-						if (prior && !prior->source_table_uuid.IsNull() &&
-						    prior->source_table_uuid.GetValue<string>() != source_uuid.GetValue<string>()) {
+						if (prior && (prior->source_table_uuid.IsNull() ||
+						              prior->source_table_uuid.GetValue<string>() != source_uuid.GetValue<string>())) {
 							identity_changed = true;
 							source_columns =
 							    ListColumns(context, source_catalog, job.source_catalog, ref.schema, ref.table);
 							dest_columns = ListColumns(context, dest, dest_name, ref.schema, ref.table);
 						}
+					} else if (prior) {
+						// Without an incarnation identity a persisted cursor cannot be trusted.
+						identity_changed = true;
 					}
 				}
 

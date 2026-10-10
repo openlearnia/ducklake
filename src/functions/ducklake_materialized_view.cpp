@@ -1106,13 +1106,7 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	// correct even before the transaction is reloaded from metadata.
 	create_info->catalog_materialized_view = true;
 	for (idx_t i = 0; i < bound.types.size(); i++) {
-		auto column_type = bound.types[i];
-		if (column_type.id() == LogicalTypeId::HUGEINT) {
-			// parquet stores HUGEINT as a lossy DOUBLE; DECIMAL(38,0) is the exact int128
-			// round-trip (fixed-length byte array), value-identical for every HUGEINT
-			column_type = LogicalType::DECIMAL(38, 0);
-		}
-		create_info->columns.AddColumn(ColumnDefinition(Identifier(column_names[i]), std::move(column_type)));
+		create_info->columns.AddColumn(ColumnDefinition(Identifier(column_names[i]), bound.types[i]));
 	}
 	auto table_binder = Binder::CreateBinder(context, input.binder);
 	auto bound_create = table_binder->BindCreateTableInfo(std::move(create_info));
@@ -1709,6 +1703,47 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 	                          analysis.join_condition_sql, kept, rebuild);
 }
 
+static DuckLakeTableEntry &RepairLegacyHugeintBackingSchema(DuckLakeTransaction &transaction, DuckLakeTableEntry &table,
+                                                            const vector<LogicalType> &definition_types) {
+	auto &columns = table.GetColumns();
+	if (columns.PhysicalColumnCount() != definition_types.size()) {
+		return table;
+	}
+	auto changed_fields = make_uniq<ColumnChangeInfo>();
+	auto new_field_data = make_shared_ptr<DuckLakeFieldData>();
+	ColumnList new_columns;
+	for (idx_t i = 0; i < definition_types.size(); i++) {
+		auto &column = columns.GetColumn(PhysicalIndex(i));
+		auto &field = table.GetFieldId(PhysicalIndex(i));
+		auto copy = column.Copy();
+		if (column.Type() == LogicalType::DECIMAL(38, 0) && definition_types[i] == LogicalType::HUGEINT) {
+			copy.SetType(LogicalType::HUGEINT);
+			changed_fields->DropField(field);
+			DuckLakeNewColumn new_column;
+			new_column.column_info = table.GetColumnInfo(field.GetFieldIndex());
+			new_column.column_info.type = DuckLakeTypes::ToString(LogicalType::HUGEINT);
+			changed_fields->new_fields.push_back(std::move(new_column));
+			new_field_data->Add(
+			    make_uniq<DuckLakeFieldId>(field.GetColumnData().Copy(), field.Name(), LogicalType::HUGEINT));
+		} else {
+			new_field_data->Add(field.Copy());
+		}
+		new_columns.AddColumn(std::move(copy));
+	}
+	if (changed_fields->new_fields.empty()) {
+		return table;
+	}
+	// Version the schema with the refresh, preserving field IDs and old snapshots.
+	auto info = table.GetInfo();
+	auto &create_info = info->Cast<CreateTableInfo>();
+	create_info.columns = std::move(new_columns);
+	auto replacement = make_uniq<DuckLakeTableEntry>(table, create_info, LocalChangeType::CHANGE_COLUMN_TYPE,
+	                                                 std::move(changed_fields), std::move(new_field_data));
+	auto &result = *replacement;
+	transaction.AlterEntry(table, std::move(replacement));
+	return result;
+}
+
 static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &context, TableFunctionBindInput &input,
                                                                TableIndex bind_index,
                                                                vector<Identifier> &return_names) {
@@ -1780,11 +1815,14 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 
 	// resolve the backing table entry
 	auto snapshot = transaction.GetSnapshot();
-	auto entry = ducklake_catalog.GetEntryById(transaction, snapshot, mv->backing_table_id);
+	auto entry = transaction.GetCurrentLocalTableById(mv->backing_table_id);
+	if (!entry) {
+		entry = ducklake_catalog.GetEntryById(transaction, snapshot, mv->backing_table_id);
+	}
 	if (!entry) {
 		throw InvalidInputException("Failed to find backing table for materialized view \"%s\"", view_name);
 	}
-	auto &table = entry->Cast<DuckLakeTableEntry>();
+	auto table = &entry->Cast<DuckLakeTableEntry>();
 
 	auto resolved_sql = ResolveMaterializedViewSQL(mv->sql, ducklake_catalog);
 	auto parsed_definition = ParseSingleSelect(resolved_sql, "definition");
@@ -1794,6 +1832,25 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	bool parsed_external_dependencies = false;
 	QualifyBaseRefsInLake(context, ducklake_catalog, *parsed_definition, parsed_dependencies,
 	                      parsed_external_dependencies);
+	if (!if_stale) {
+		bool has_legacy_decimal = false;
+		for (auto &column : table->GetColumns().Physical()) {
+			if (column.Type() == LogicalType::DECIMAL(38, 0)) {
+				has_legacy_decimal = true;
+				break;
+			}
+		}
+		if (has_legacy_decimal) {
+			auto definition = parsed_definition->Copy();
+			auto definition_binder = Binder::CreateBinder(context, input.binder);
+			auto bound_definition = definition_binder->Bind(*definition);
+			auto &repaired = RepairLegacyHugeintBackingSchema(transaction, *table, bound_definition.types);
+			if (&repaired != table) {
+				table = &repaired;
+				force_full_refresh = true;
+			}
+		}
+	}
 
 	// resolve dependency table ids by name (for join fact/dim split)
 	auto find_dep = [&](const string &schema_name, const string &table_name) -> optional_idx {
@@ -1836,9 +1893,9 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 				auto logical_diff_sql =
 				    BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name), join_sql,
 				                        bound.names, analysis.key_positions);
-				return BuildMVWritePlan(context, *input.binder, bind_index, std::move(join_plan), table, mv->id, schema,
-				                        view_name, "join_incremental", logical_diff_sql, local_dependencies_dirty,
-				                        return_names);
+				return BuildMVWritePlan(context, *input.binder, bind_index, std::move(join_plan), *table, mv->id,
+				                        schema, view_name, "join_incremental", logical_diff_sql,
+				                        local_dependencies_dirty, return_names);
 			}
 		}
 	}
@@ -1869,7 +1926,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 			auto delta_plan = BindDefinitionPlan(*input.binder, context, delta_sql, "delta refresh");
 			auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
 			                                            delta_sql, bound.names, analysis.key_positions);
-			return BuildMVWritePlan(context, *input.binder, bind_index, std::move(delta_plan), table, mv->id, schema,
+			return BuildMVWritePlan(context, *input.binder, bind_index, std::move(delta_plan), *table, mv->id, schema,
 			                        view_name, "delta", logical_diff_sql, local_dependencies_dirty, return_names);
 		}
 		auto incremental_sql = BuildIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
@@ -1877,7 +1934,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 		auto incremental_plan = BindDefinitionPlan(*input.binder, context, incremental_sql, "incremental refresh");
 		auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
 		                                            incremental_sql, bound.names, analysis.key_positions);
-		return BuildMVWritePlan(context, *input.binder, bind_index, std::move(incremental_plan), table, mv->id, schema,
+		return BuildMVWritePlan(context, *input.binder, bind_index, std::move(incremental_plan), *table, mv->id, schema,
 		                        view_name, "incremental", logical_diff_sql, local_dependencies_dirty, return_names);
 	}
 
@@ -1886,8 +1943,8 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 	auto bound = binder->Bind(sql_statement);
 	auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
 	                                            resolved_sql, bound.names, analysis.key_positions);
-	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), table, mv->id, schema, view_name,
-	                        "full", logical_diff_sql, local_dependencies_dirty, return_names);
+	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), *table, mv->id, schema,
+	                        view_name, "full", logical_diff_sql, local_dependencies_dirty, return_names);
 }
 
 DuckLakeRefreshMaterializedViewFunction::DuckLakeRefreshMaterializedViewFunction()
@@ -1941,9 +1998,8 @@ static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &conte
 	// drop the backing table through the regular table drop path
 	auto snapshot = transaction.GetSnapshot();
 	optional_ptr<CatalogEntry> backing;
-	if (mv->backing_table_id.IsTransactionLocal()) {
-		backing = transaction.GetLocalEntryById(mv->backing_table_id);
-	} else {
+	backing = transaction.GetCurrentLocalTableById(mv->backing_table_id);
+	if (!backing && !mv->backing_table_id.IsTransactionLocal()) {
 		backing = ducklake_catalog.GetEntryById(transaction, snapshot, mv->backing_table_id);
 	}
 	if (backing) {

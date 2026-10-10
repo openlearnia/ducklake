@@ -558,6 +558,8 @@ public:
 	}
 	//! Adds ducklake_procedure.security_definer, skipping catalogs that predate the table
 	virtual void EnsureProcedureSecurityColumn();
+	//! Adds refresh ordering metadata on writable catalogs; reports availability on read-only catalogs
+	virtual bool EnsureMaterializedViewRefreshColumn(bool allow_schema_change = true);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 

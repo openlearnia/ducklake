@@ -1,0 +1,32 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_nested_int128.test
+# description: nested struct and list materialized view integers retain exact values and types
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_nested_int128.db' AS lake (DATA_PATH '{TEST_DIR}/mv_nested_int128_files')
+
+statement ok
+CREATE TABLE src AS SELECT struct_pack(x := 9007199254740993::HUGEINT, u := 9007199254740993::UHUGEINT) s, [9007199254740993::HUGEINT, NULL] xs
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv AS SELECT * FROM src
+
+query III
+SELECT mv.s.x = src.s.x, mv.s.u = src.s.u, mv.xs IS NOT DISTINCT FROM src.xs FROM lake.mv mv, src
+----
+1	1	1
+
+statement ok
+INSERT INTO src SELECT struct_pack(x := '-170141183460469231731687303715884105728'::HUGEINT, u := '340282366920938463463374607431768211455'::UHUGEINT), ['170141183460469231731687303715884105727'::HUGEINT, NULL]
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE mv.s IS NOT DISTINCT FROM src.s AND mv.xs IS NOT DISTINCT FROM src.xs AND typeof(mv.s) = typeof(src.s) AND typeof(mv.xs) = typeof(src.xs)) FROM lake.mv mv JOIN src ON mv.s.x = src.s.x
+----
+2	2

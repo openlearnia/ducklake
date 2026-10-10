@@ -1,0 +1,108 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_legacy_int128.test
+# description: full refresh repairs legacy decimal-backed HUGEINT views atomically
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_legacy_int128.db' AS lake (DATA_PATH '{TEST_DIR}/mv_legacy_int128_files')
+
+statement ok
+CREATE TABLE src(x HUGEINT)
+
+statement ok
+INSERT INTO src VALUES (9007199254740993)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.legacy AS SELECT x::DECIMAL(38,0) x FROM memory.main.src
+
+statement ok
+CREATE MATERIALIZED VIEW lake.decimal_mv AS SELECT x::DECIMAL(38,0) x FROM memory.main.src
+
+statement ok
+DETACH lake
+
+# Reproduce the previous implementation: original HUGEINT definition with DECIMAL backing storage.
+statement ok
+ATTACH '{TEST_DIR}/mv_legacy_int128.db' AS metadata
+
+statement ok
+UPDATE metadata.ducklake_materialized_view SET sql = 'SELECT x FROM memory.main.src' WHERE view_name = 'legacy'
+
+statement ok
+DETACH metadata
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_legacy_int128.db' AS lake (DATA_PATH '{TEST_DIR}/mv_legacy_int128_files')
+
+query IT
+SELECT x, typeof(x) FROM lake.legacy
+----
+9007199254740993	DECIMAL(38,0)
+
+statement ok
+BEGIN
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.legacy
+
+query IT
+SELECT x, typeof(x) FROM lake.legacy
+----
+9007199254740993	HUGEINT
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.legacy
+
+query IT
+SELECT x, typeof(x) FROM lake.legacy
+----
+9007199254740993	HUGEINT
+
+statement ok
+ROLLBACK
+
+query T
+SELECT typeof(x) FROM lake.legacy
+----
+DECIMAL(38,0)
+
+statement ok
+UPDATE src SET x = '100000000000000000000000000000000000000'::HUGEINT
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.legacy
+
+query IT
+SELECT x + 0, typeof(x) FROM lake.legacy
+----
+100000000000000000000000000000000000000	HUGEINT
+
+query IT
+SELECT x, typeof(x) FROM lake.legacy AT (VERSION => 2)
+----
+9007199254740993	DECIMAL(38,0)
+
+statement ok
+UPDATE src SET x = 9007199254740993
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.decimal_mv
+
+query IT
+SELECT x, typeof(x) FROM lake.decimal_mv
+----
+9007199254740993	DECIMAL(38,0)
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_legacy_int128.db' AS lake (DATA_PATH '{TEST_DIR}/mv_legacy_int128_files')
+
+query IT
+SELECT x + 0, typeof(x) FROM lake.legacy
+----
+100000000000000000000000000000000000000	HUGEINT

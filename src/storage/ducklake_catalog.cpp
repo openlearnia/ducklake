@@ -338,6 +338,17 @@ void DuckLakeSchemaPinState::Pin(shared_ptr<DuckLakeSchemaCacheEntry> entry) {
 	pins.emplace(raw, std::move(entry));
 }
 
+shared_ptr<DuckLakeSchemaCacheEntry> DuckLakeSchemaPinState::GetPin(SchemaCatalogEntry &schema) {
+	lock_guard<mutex> guard(lock);
+	auto schema_id = schema.Cast<DuckLakeSchemaEntry>().GetSchemaId();
+	for (auto &pin : pins) {
+		if (pin.second->catalog_set.GetEntryById(schema_id).get() == &schema) {
+			return pin.second;
+		}
+	}
+	return nullptr;
+}
+
 void DuckLakeCatalog::EnsureCommitInfoProvided(const DuckLakeSnapshotCommit &commit_info) const {
 	if (!IsCommitInfoRequired() || commit_info.is_commit_info_set) {
 		return;
@@ -392,11 +403,20 @@ void DuckLakeCatalog::FinalizeLoad(optional_ptr<ClientContext> context) {
 		}
 	}
 	RegisterCatalog();
-	DuckLakeInitializer initializer(*context, *this, options);
-	initializer.Initialize();
-	if (options.enable_rbac) {
-		rbac->EnsureMetadataTables(*context);
-		rbac->SetEnabled(true);
+	try {
+		DuckLakeInitializer initializer(*context, *this, options);
+		initializer.Initialize();
+		if (options.enable_rbac) {
+			rbac->EnsureMetadataTables(*context);
+			rbac->SetEnabled(true);
+		}
+	} catch (...) {
+		// the metadata attach commits on its own, so a failed initialization must release it explicitly
+		try {
+			OnDetach(*context);
+		} catch (...) {
+		}
+		throw;
 	}
 	db.tags["data_path"] = DataPath();
 	if (con) {
@@ -1707,8 +1727,9 @@ optional_ptr<CatalogEntry> DuckLakeCatalog::TryResolveMaterializedViewBackingTab
 	if (!mv) {
 		return nullptr;
 	}
-	if (mv->backing_table_id.IsTransactionLocal()) {
-		return transaction.GetLocalEntryById(mv->backing_table_id);
+	auto local_entry = transaction.GetCurrentLocalTableById(mv->backing_table_id);
+	if (local_entry || mv->backing_table_id.IsTransactionLocal()) {
+		return local_entry;
 	}
 	return GetEntryById(transaction, transaction.GetSnapshot(), mv->backing_table_id);
 }

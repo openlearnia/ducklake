@@ -1,0 +1,71 @@
+# name: test/sql/replication/replicate_share_mapping_paths.test
+# description: colliding external basenames retain independent source mappings across column renames
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+statement ok
+SET threads = 1
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/share_mapping_source.db' AS src (DATA_PATH '{TEST_DIR}/share_mapping_source_files')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/share_mapping_dest.db' AS dst (DATA_PATH '{TEST_DIR}/share_mapping_dest_files')
+
+statement ok
+CALL ducklake_set_option('src', 'data_inlining_row_limit', 0)
+
+statement ok
+CREATE TABLE src.main.t (id INTEGER)
+
+statement ok
+COPY (SELECT 1::INTEGER AS id) TO '{TEST_DIR}/mapping_a' (FORMAT PARQUET, PER_THREAD_OUTPUT true, FILENAME_PATTERN 'same_{i}')
+
+statement ok
+SELECT * FROM ducklake_add_data_files('src', 't', '{TEST_DIR}/mapping_a/*.parquet')
+
+statement ok
+ALTER TABLE src.main.t RENAME id TO new_id
+
+statement ok
+COPY (SELECT 2::INTEGER AS new_id) TO '{TEST_DIR}/mapping_b' (FORMAT PARQUET, PER_THREAD_OUTPUT true, FILENAME_PATTERN 'same_{i}')
+
+statement ok
+SELECT * FROM ducklake_add_data_files('src', 't', '{TEST_DIR}/mapping_b/*.parquet')
+
+query I
+SELECT new_id FROM src.main.t ORDER BY new_id
+----
+1
+2
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('dst', 'src', data_sync_mode := 'share')
+----
+1
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+query I
+SELECT new_id FROM dst.main.t ORDER BY new_id
+----
+1
+2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+query II
+SELECT count(new_id), sum(new_id) FROM dst.main.t
+----
+2	3
+
+statement ok
+DETACH src
+
+statement ok
+DETACH dst

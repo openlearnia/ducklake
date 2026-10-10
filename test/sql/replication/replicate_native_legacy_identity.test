@@ -1,0 +1,80 @@
+# name: test/sql/replication/replicate_native_legacy_identity.test
+# description: native watermark state predating incarnation tracking is reseeded once
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/native_legacy_dest.db' AS dst (DATA_PATH '{TEST_DIR}/native_legacy_files')
+
+statement ok
+CREATE TABLE wm (seq INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO wm VALUES (1, 'old1'), (2, 'old2')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('dst', 'memory', include := 'main.wm', watermark_columns := 'main.wm=seq')
+----
+1
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+# Earlier versions persisted NULL for every native source identity.
+statement ok
+UPDATE __ducklake_metadata_dst.main.ducklake_replication_table SET source_table_uuid = NULL WHERE replication_id = 1
+
+statement ok
+DROP TABLE wm
+
+statement ok
+CREATE TABLE wm (seq INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO wm VALUES (1, 'new1'), (2, 'new2')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+query II
+SELECT seq, v FROM dst.main.wm ORDER BY seq
+----
+1	new1
+2	new2
+
+# The new cursor survives a table-level failure and then resumes normally.
+statement ok
+INSERT INTO wm VALUES (NULL, 'invalid')
+
+query I
+SELECT tables_failed FROM ducklake_replicate_catchup('dst', 1)
+----
+1
+
+query II
+SELECT seq, v FROM dst.main.wm ORDER BY seq
+----
+1	new1
+2	new2
+
+statement ok
+DELETE FROM wm WHERE seq IS NULL
+
+statement ok
+INSERT INTO wm VALUES (3, 'new3')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+query II
+SELECT seq, v FROM dst.main.wm ORDER BY seq
+----
+1	new1
+2	new2
+3	new3
+
+statement ok
+DETACH dst

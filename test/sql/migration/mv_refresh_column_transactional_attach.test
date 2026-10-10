@@ -1,0 +1,69 @@
+# name: test/sql/migration/mv_refresh_column_transactional_attach.test
+# description: transactional attach upgrade survives private refresh reads and commit retry
+# group: [migration]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_refresh_attach.db' AS dl (DATA_PATH '{TEST_DIR}/mv_refresh_attach_files')
+
+statement ok
+CREATE TABLE dl.src(g INTEGER, x INTEGER)
+
+statement ok
+INSERT INTO dl.src VALUES (1, 10)
+
+statement ok
+CREATE MATERIALIZED VIEW dl.mv AS SELECT g, SUM(x) s, COUNT(x) n, COUNT(*) c FROM dl.src GROUP BY g
+
+statement ok
+DETACH dl
+
+statement ok
+ATTACH '{TEST_DIR}/mv_refresh_attach.db' AS legacy
+
+statement ok
+ALTER TABLE legacy.ducklake_materialized_view DROP COLUMN last_refresh_txn_wrote_dependencies
+
+statement ok
+DETACH legacy
+
+statement ok con1
+SET immediate_transaction_mode=true
+
+statement ok con1
+BEGIN
+
+statement ok con1
+ATTACH 'ducklake:{TEST_DIR}/mv_refresh_attach.db' AS dl (DATA_PATH '{TEST_DIR}/mv_refresh_attach_files')
+
+statement ok con1
+INSERT INTO dl.src VALUES (1, 20)
+
+statement ok con1
+REFRESH MATERIALIZED VIEW dl.mv
+
+# A concurrent empty snapshot forces the metadata commit attempt to retry.
+statement ok con2
+INSERT INTO __ducklake_metadata_dl.ducklake_snapshot SELECT snapshot_id+1, NOW(), schema_version, next_catalog_id, next_file_id FROM __ducklake_metadata_dl.ducklake_snapshot ORDER BY snapshot_id DESC LIMIT 1
+
+statement ok con2
+INSERT INTO __ducklake_metadata_dl.ducklake_snapshot_changes SELECT MAX(snapshot_id), '', NULL, NULL, NULL FROM __ducklake_metadata_dl.ducklake_snapshot
+
+statement ok con1
+COMMIT
+
+query I con1
+SELECT s FROM dl.mv
+----
+30
+
+statement ok con1
+REFRESH MATERIALIZED VIEW IF STALE dl.mv
+
+query I con1
+SELECT s FROM dl.mv
+----
+30

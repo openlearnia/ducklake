@@ -211,11 +211,15 @@ public:
 	//! Execute SQL on the metadata connection without placeholder substitution or metadata-manager wrapping.
 	unique_ptr<QueryResult> ExecuteRaw(string query);
 	Connection &GetConnection();
+	//! Commit the metadata connection's open transaction and start a new one.
+	void CommitMetadataTransaction();
 
 	//! Keep a schema cache entry alive for as long as this transaction lives. Transaction-local catalog entries hold
 	//! bare references into the cached catalog set, and those references are read again at commit time, so the entry
 	//! must not be evicted from the ObjectCache in between.
 	void PinSchemaCacheEntry(shared_ptr<DuckLakeSchemaCacheEntry> entry);
+	//! Retain an entry beyond this transaction when a prepared plan borrows its schema or tables.
+	shared_ptr<DuckLakeSchemaCacheEntry> GetSchemaCachePin(SchemaCatalogEntry &schema);
 
 	DuckLakeSnapshot GetSnapshot();
 	DuckLakeSnapshot GetSnapshot(optional_ptr<BoundAtClause> at_clause,
@@ -229,6 +233,8 @@ public:
 	bool IsRenamed(CatalogEntry &entry);
 	optional_ptr<CatalogEntry> GetLocalEntryById(SchemaIndex schema_id);
 	optional_ptr<CatalogEntry> GetLocalEntryById(TableIndex table_id);
+	//! Like GetLocalEntryById, but also finds tables ALTERed in this transaction (current snapshot only).
+	optional_ptr<CatalogEntry> GetCurrentLocalTableById(TableIndex table_id);
 
 	void AlterEntry(CatalogEntry &old_entry, unique_ptr<CatalogEntry> new_entry);
 

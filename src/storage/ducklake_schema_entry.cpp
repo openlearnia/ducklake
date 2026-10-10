@@ -603,13 +603,13 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::LookupEntry(CatalogTransaction t
 		return nullptr;
 	}
 	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
-	if (catalog_type == CatalogType::TABLE_ENTRY) {
+	auto at_clause = lookup_info.GetAtClause();
+	if (catalog_type == CatalogType::TABLE_ENTRY && !at_clause) {
 		auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
 		if (auto backing = duck_catalog.TryResolveMaterializedViewBackingTable(duck_transaction, *this, entry_name)) {
 			return backing;
 		}
 	}
-	auto at_clause = lookup_info.GetAtClause();
 	if (!at_clause) {
 		auto transaction_entry = catalog_type == CatalogType::SCHEMA_ENTRY
 		                             ? duck_transaction.GetTransactionLocalSchema(*this, entry_name)

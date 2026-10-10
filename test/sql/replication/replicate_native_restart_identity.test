@@ -1,0 +1,93 @@
+# name: test/sql/replication/replicate_native_restart_identity.test
+# description: persisted native replication reseeds after database restart and keeps later appends incremental
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+load {TEST_DIR}/native_restart_main.db
+
+statement ok
+ATTACH '{TEST_DIR}/native_restart_source.db' AS src
+
+statement ok
+CREATE TABLE src.main.wm (seq INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO src.main.wm VALUES (1, 'old1'), (2, 'old2')
+
+restart
+
+statement ok
+ATTACH '{TEST_DIR}/native_restart_source.db' AS src
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/native_restart_dest.db' AS dst (DATA_PATH '{TEST_DIR}/native_restart_files')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('dst', 'src', include := 'main.wm', watermark_columns := 'main.wm=seq')
+----
+1
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+restart
+
+statement ok
+ATTACH '{TEST_DIR}/native_restart_source.db' AS src
+
+statement ok
+DROP TABLE src.main.wm
+
+statement ok
+CREATE TABLE src.main.wm (seq INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO src.main.wm VALUES (1, 'new1'), (3, 'new3')
+
+restart
+
+statement ok
+ATTACH '{TEST_DIR}/native_restart_source.db' AS src
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/native_restart_dest.db' AS dst (DATA_PATH '{TEST_DIR}/native_restart_files')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+query II
+SELECT seq, v FROM dst.main.wm ORDER BY seq
+----
+1	new1
+3	new3
+
+# An append keeps the already seeded row below the watermark in place.
+statement ok
+CREATE TEMP TABLE prior_row AS SELECT rowid AS rid FROM dst.main.wm WHERE seq = 1
+
+statement ok
+INSERT INTO src.main.wm VALUES (4, 'new4')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+query II
+SELECT seq, v FROM dst.main.wm ORDER BY seq
+----
+1	new1
+3	new3
+4	new4
+
+query I
+SELECT d.rowid = p.rid FROM dst.main.wm d, prior_row p WHERE d.seq = 1
+----
+true
+
+statement ok
+DETACH src
+
+statement ok
+DETACH dst

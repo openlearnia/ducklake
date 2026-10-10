@@ -195,7 +195,13 @@ string DuckLakeMetadataManager::ListAggregation(const vector<pair<string, string
 unique_ptr<QueryResult> DuckLakeMetadataManager::AttachMetadata(const string &attach_query) {
 	auto query = attach_query;
 	SubstituteCatalogPlaceholders(query);
-	return transaction.ExecuteRaw(query);
+	auto result = transaction.ExecuteRaw(query);
+	if (!result->HasError()) {
+		// Commit the attach on its own: a metadata commit retry rolls back the metadata transaction,
+		// which would otherwise detach the metadata database in the middle of the commit loop.
+		transaction.CommitMetadataTransaction();
+	}
+	return result;
 }
 
 string DuckLakeMetadataManager::MetadataExistsQuery() const {
@@ -551,7 +557,7 @@ CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRI
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_materialized_view(view_id BIGINT, view_uuid UUID, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, view_name VARCHAR, dialect VARCHAR, sql VARCHAR, backing_table_id BIGINT, last_refreshed_snapshot BIGINT, definition_version BIGINT);
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS definition_version BIGINT;
 ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS has_external_dependencies BOOLEAN;
-ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS last_refresh_txn_wrote_dependencies BOOLEAN;
+ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS last_refresh_txn_wrote_dependencies BOOLEAN DEFAULT TRUE;
 UPDATE {METADATA_CATALOG}.ducklake_materialized_view SET definition_version = %llu WHERE definition_version IS NULL;
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_procedure(schema_id BIGINT, procedure_id BIGINT, procedure_name VARCHAR, language VARCHAR, body VARCHAR, return_type VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, definition_version BIGINT, security_definer BOOLEAN);
 ALTER TABLE {METADATA_CATALOG}.ducklake_procedure ADD COLUMN IF NOT EXISTS definition_version BIGINT;
@@ -610,6 +616,32 @@ void DuckLakeMetadataManager::MigrateV10(bool allow_failures) {
 	ExecuteMigration(V1_1_DEV1_MIGRATION_QUERY, allow_failures, "1.0", "1.1-dev1");
 	EnsureProcedureSecurityColumn();
 	EnsureSnapshotProtectionTable();
+}
+
+bool DuckLakeMetadataManager::EnsureMaterializedViewRefreshColumn(bool allow_schema_change) {
+	if (!transaction.GetCatalog().SupportsPortMetadata()) {
+		return false;
+	}
+	// Probe the current metadata transaction: a commit retry can roll back an earlier ALTER.
+	auto probe = Query("SELECT * FROM {METADATA_CATALOG}.ducklake_materialized_view LIMIT 0");
+	if (probe->HasError()) {
+		probe->GetErrorObject().Throw("Failed to inspect materialized view metadata: ");
+	}
+	for (auto &name : probe->GetNames()) {
+		if (StringUtil::CIEquals(name.GetIdentifierName(), "last_refresh_txn_wrote_dependencies")) {
+			return true;
+		}
+	}
+	if (!allow_schema_change || MetadataIsReadOnly()) {
+		return false;
+	}
+	// Older refreshes may include local writes. Unknown ordering must suppress CDC delta replay.
+	auto result = Execute("ALTER TABLE {METADATA_CATALOG}.ducklake_materialized_view ADD COLUMN IF NOT EXISTS "
+	                      "last_refresh_txn_wrote_dependencies BOOLEAN DEFAULT TRUE");
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to add materialized view refresh metadata: ");
+	}
+	return true;
 }
 
 void DuckLakeMetadataManager::EnsureProcedureSecurityColumn() {
@@ -3854,13 +3886,17 @@ vector<DuckLakeMaterializedViewInfo> DuckLakeMetadataManager::LoadMaterializedVi
 		// pre-port lakes (catalog version < 1.1) have no materialized view metadata tables
 		return result;
 	}
+	bool has_refresh_column = EnsureMaterializedViewRefreshColumn(false);
 	string view_query = R"(
 SELECT view_id, view_uuid, schema_id, view_name, dialect, sql, backing_table_id, last_refreshed_snapshot,
        COALESCE(definition_version, 1), COALESCE(has_external_dependencies, FALSE),
-       COALESCE(last_refresh_txn_wrote_dependencies, FALSE)
+       {REFRESH_TXN_DIRTY}
 FROM {METADATA_CATALOG}.ducklake_materialized_view
 WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
 )";
+	view_query =
+	    StringUtil::Replace(view_query, "{REFRESH_TXN_DIRTY}",
+	                        has_refresh_column ? "COALESCE(last_refresh_txn_wrote_dependencies, TRUE)" : "TRUE");
 	auto view_result = Query(snapshot, view_query);
 	if (view_result->HasError()) {
 		view_result->GetErrorObject().Throw("Failed to load materialized views from DuckLake: ");

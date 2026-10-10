@@ -1,0 +1,81 @@
+# name: test/sql/migration/mv_refresh_column_plain_attach.test
+# description: plain attach upgrades current MV refresh metadata without replaying local writes
+# group: [migration]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_refresh_plain.db' AS dl (DATA_PATH '{TEST_DIR}/mv_refresh_plain_files')
+
+statement ok
+CREATE TABLE dl.src(g INTEGER, x INTEGER)
+
+statement ok
+INSERT INTO dl.src VALUES (1, 10)
+
+statement ok
+CREATE MATERIALIZED VIEW dl.mv AS SELECT g, SUM(x) s, COUNT(x) n, COUNT(*) c FROM dl.src GROUP BY g
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO dl.src VALUES (1, 20)
+
+statement ok
+REFRESH MATERIALIZED VIEW dl.mv
+
+statement ok
+COMMIT
+
+statement ok
+DETACH dl
+
+statement ok
+ATTACH '{TEST_DIR}/mv_refresh_plain.db' AS legacy
+
+statement ok
+ALTER TABLE legacy.ducklake_materialized_view DROP COLUMN last_refresh_txn_wrote_dependencies
+
+statement ok
+DETACH legacy
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_refresh_plain.db' AS dl (DATA_PATH '{TEST_DIR}/mv_refresh_plain_files')
+
+query I
+SELECT SUM(x) FROM dl.src
+----
+30
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE dl.mv
+
+query I
+SELECT s FROM dl.mv
+----
+30
+
+statement ok
+INSERT INTO dl.src VALUES (1, 30)
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE dl.mv
+
+query I
+SELECT s FROM dl.mv
+----
+60
+
+statement ok
+DETACH dl
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_refresh_plain.db' AS dl (DATA_PATH '{TEST_DIR}/mv_refresh_plain_files', READ_ONLY)
+
+query I
+SELECT s FROM dl.mv
+----
+60

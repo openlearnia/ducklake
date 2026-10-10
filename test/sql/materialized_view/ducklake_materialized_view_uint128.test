@@ -1,0 +1,38 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_uint128.test
+# description: unsigned 128-bit materialized view values remain exact across refresh and reopen
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_uint128.db' AS lake (DATA_PATH '{TEST_DIR}/mv_uint128_files')
+
+statement ok
+CREATE TABLE src(id INTEGER, x UHUGEINT)
+
+statement ok
+INSERT INTO src VALUES (1, 9007199254740993), (2, '340282366920938463463374607431768211455'::UHUGEINT), (3, 0), (4, NULL)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv AS SELECT * FROM src
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE mv.x IS NOT DISTINCT FROM src.x AND typeof(mv.x) = 'UHUGEINT') FROM lake.mv mv JOIN src USING (id)
+----
+4	4
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_uint128.db' AS lake (DATA_PATH '{TEST_DIR}/mv_uint128_files')
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE mv.x IS NOT DISTINCT FROM src.x AND typeof(mv.x) = 'UHUGEINT') FROM lake.mv mv JOIN src USING (id)
+----
+4	4

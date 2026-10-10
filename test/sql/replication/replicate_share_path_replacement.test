@@ -1,0 +1,125 @@
+# name: test/sql/replication/replicate_share_path_replacement.test
+# description: replacing a sole shared external file with its namesake at another path follows the new file
+# group: [replication]
+
+require ducklake
+
+require parquet
+
+statement ok
+SET threads = 1
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/share_replace_source.db' AS src (DATA_PATH '{TEST_DIR}/share_replace_source_files')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/share_replace_dest.db' AS dst (DATA_PATH '{TEST_DIR}/share_replace_dest_files')
+
+statement ok
+CALL ducklake_set_option('src', 'data_inlining_row_limit', 0)
+
+statement ok
+CREATE TABLE src.main.t (id INTEGER)
+
+statement ok
+COPY (SELECT 1::INTEGER AS id) TO '{TEST_DIR}/replace_a' (FORMAT PARQUET, PER_THREAD_OUTPUT true, FILENAME_PATTERN 'same_{i}')
+
+statement ok
+COPY (SELECT 2::INTEGER AS id) TO '{TEST_DIR}/replace_b' (FORMAT PARQUET, PER_THREAD_OUTPUT true, FILENAME_PATTERN 'same_{i}')
+
+statement ok
+SELECT * FROM ducklake_add_data_files('src', 't', '{TEST_DIR}/replace_a/*.parquet')
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('dst', 'src', data_sync_mode := 'share')
+----
+1
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+statement ok
+DELETE FROM src.main.t WHERE id = 1
+
+statement ok
+SELECT * FROM ducklake_add_data_files('src', 't', '{TEST_DIR}/replace_b/*.parquet')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+query I
+SELECT id FROM dst.main.t
+----
+2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('dst', 1)
+
+query I
+SELECT id FROM dst.main.t
+----
+2
+
+# Destination expiry and cleanup must preserve both externally owned source files.
+statement ok
+CALL ducklake_expire_snapshots('dst', versions := [0, 1, 2])
+
+statement ok
+CALL ducklake_cleanup_old_files('dst', cleanup_all := true)
+
+query I
+SELECT id FROM read_parquet('{TEST_DIR}/replace_a/*.parquet')
+----
+1
+
+query I
+SELECT id FROM src.main.t
+----
+2
+
+# A source directory inside the destination's data directory is rebased on registration.
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/nested_share_source.db' AS nested_src (DATA_PATH '{TEST_DIR}/canonical_root/source')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/nested_share_dest.db' AS nested_dst (DATA_PATH '{TEST_DIR}/canonical_root')
+
+statement ok
+CALL ducklake_set_option('nested_src', 'data_inlining_row_limit', 0)
+
+statement ok
+CREATE TABLE nested_src.main.t (id INTEGER)
+
+statement ok
+INSERT INTO nested_src.main.t VALUES (42)
+
+statement ok
+SELECT * FROM ducklake_replicate_create('nested_dst', 'nested_src', data_sync_mode := 'share')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('nested_dst', 1)
+
+query I
+SELECT id FROM nested_dst.main.t
+----
+42
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('nested_dst', 1)
+
+query I
+SELECT id FROM nested_dst.main.t
+----
+42
+
+statement ok
+DETACH nested_src
+
+statement ok
+DETACH nested_dst
+
+statement ok
+DETACH src
+
+statement ok
+DETACH dst

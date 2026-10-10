@@ -1836,12 +1836,6 @@ vector<DuckLakeDataFile> DuckLakePrepareExternalFiles(DuckLakeTransaction &trans
 // DuckLakePrepareSharedFiles
 //===--------------------------------------------------------------------===//
 
-//! Final path component of a file path - DuckLake file names are generated unique ids, so the
-//! base name identifies a file across catalogs with different path canonicalization.
-static string SharedFileBaseName(const string &path) {
-	return path.substr(path.find_last_of("/\\") + 1);
-}
-
 //! Finds a live source field by field index, anywhere in the nested field tree.
 static const DuckLakeFieldId *FindSharedFieldById(const vector<unique_ptr<DuckLakeFieldId>> &fields,
                                                   idx_t field_index) {
@@ -2031,11 +2025,12 @@ vector<DuckLakeDataFile> DuckLakePrepareSharedFiles(DuckLakeTransaction &dest_tr
                                                     DuckLakeTableEntry &dest_table,
                                                     const vector<DuckLakeFileListExtendedEntry> &source_files) {
 	auto &source_txn = DuckLakeTransaction::Get(context, source_catalog);
-	// registered source name maps by file name - externally added files carry their own mapping
+	auto &fs = FileSystem::GetFileSystem(context);
+	// External files with the same basename can carry different registered mappings.
 	unordered_map<string, shared_ptr<const DuckLakeNameMap>> registered_maps;
 	for (auto &file : source_files) {
 		if (file.mapping_id.IsValid()) {
-			registered_maps[SharedFileBaseName(file.file.path)] = source_txn.GetMappingById(file.mapping_id);
+			registered_maps[fs.CanonicalizePath(file.file.path)] = source_txn.GetMappingById(file.mapping_id);
 		}
 	}
 	// source field id -> destination field (same logical path, different physical ids)
@@ -2061,9 +2056,9 @@ vector<DuckLakeDataFile> DuckLakePrepareSharedFiles(DuckLakeTransaction &dest_tr
 	}
 	for (auto &entry : paths_by_format) {
 		DuckLakeFileProcessor processor(dest_transaction, context, bind_data, entry.first);
-		processor.pre_mapping_hook = [&processor, &registered_maps, &source_fields,
+		processor.pre_mapping_hook = [&processor, &registered_maps, &source_fields, &fs,
 		                              &field_translation](ParquetFileMetadata &file) {
-			auto it = registered_maps.find(SharedFileBaseName(file.filepath));
+			auto it = registered_maps.find(fs.CanonicalizePath(file.filepath));
 			auto name_map = it == registered_maps.end() ? nullptr : it->second.get();
 			processor.shared_source_name_restore.clear();
 			vector<unique_ptr<ParquetColumn>> kept_columns;

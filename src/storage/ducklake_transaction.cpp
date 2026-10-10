@@ -749,6 +749,10 @@ void DuckLakeTransaction::ClearSchemaCachePins() {
 	schema_pins->Clear();
 }
 
+shared_ptr<DuckLakeSchemaCacheEntry> DuckLakeTransaction::GetSchemaCachePin(SchemaCatalogEntry &schema) {
+	return schema_pins->GetPin(schema);
+}
+
 const LocalTableChanges &DuckLakeTransaction::GetLocalChanges() const {
 	return state->local_changes;
 }
@@ -830,6 +834,12 @@ void DuckLakeTransaction::Rollback() {
 	ClearSchemaCachePins();
 }
 
+//! BEGIN resets the invalidation policy, so every metadata transaction must set it again.
+static void BeginMetadataTransaction(Connection &connection) {
+	connection.BeginTransaction();
+	connection.Query("SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE'");
+}
+
 Connection &DuckLakeTransaction::GetConnection() {
 	lock_guard<mutex> lock(connection_lock);
 	if (!connection) {
@@ -862,10 +872,16 @@ Connection &DuckLakeTransaction::GetConnection() {
 			// FIXME: sqlite_scanner's per-scan read connections deadlock against concurrent writers
 			connection->Query("SET sqlite_disable_multithreaded_scans=true");
 		}
-		connection->BeginTransaction();
-		connection->Query("SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE'");
+		BeginMetadataTransaction(*connection);
 	}
 	return *connection;
+}
+
+void DuckLakeTransaction::CommitMetadataTransaction() {
+	auto &metadata_connection = GetConnection();
+	lock_guard<mutex> lock(connection_lock);
+	metadata_connection.Commit();
+	BeginMetadataTransaction(metadata_connection);
 }
 
 map<SchemaIndex, unique_ptr<DuckLakeCatalogSet>> &DuckLakeTransaction::GetNewMacroMap(const CatalogType type) const {
@@ -1546,6 +1562,9 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		return GetSnapshot();
 	};
 	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, string &query) {
+		if (!state->new_materialized_views.empty() || !state->refreshed_materialized_views.empty()) {
+			metadata_manager->EnsureMaterializedViewRefreshColumn();
+		}
 		auto result = metadata_manager->Execute(snapshot, query);
 		for (auto &insert : inlined_inserts) {
 			if (result->HasError()) {
@@ -1578,7 +1597,7 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	context.prepare_retry = [&]() {
 		inlined_inserts.clear();
 		metadata_manager->ClearInlinedTableCaches();
-		connection->BeginTransaction();
+		BeginMetadataTransaction(*connection);
 		snapshot.reset();
 	};
 	context.query_metadata = [&](string q) {
@@ -2450,6 +2469,25 @@ optional_ptr<CatalogEntry> DuckLakeTransaction::GetLocalEntryById(TableIndex tab
 		auto entry = schema_entry.second->GetEntryById(table_id);
 		if (entry) {
 			return entry;
+		}
+	}
+	return nullptr;
+}
+
+optional_ptr<CatalogEntry> DuckLakeTransaction::GetCurrentLocalTableById(TableIndex table_id) {
+	auto entry = GetLocalEntryById(table_id);
+	if (entry) {
+		return entry;
+	}
+	// ALTERed tables are keyed by name rather than registered in the ID map. Only current-snapshot lookups may
+	// see them: historical-schema readers (flush, compaction) need the persisted layout.
+	for (auto &schema_entry : state->new_tables) {
+		for (auto &local_entry : schema_entry.second->GetEntries()) {
+			auto &candidate = *local_entry.second;
+			if (candidate.type == CatalogType::TABLE_ENTRY &&
+			    candidate.Cast<DuckLakeTableEntry>().GetTableId() == table_id) {
+				return candidate;
+			}
 		}
 	}
 	return nullptr;

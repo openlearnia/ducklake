@@ -1,0 +1,88 @@
+# name: test/sql/data_inlining/data_inlining_transaction_schema.test
+# description: transaction-local schema changes retain the stored schema of committed inline rows
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/inline_transaction_schema.db' AS lake (DATA_PATH '{TEST_DIR}/inline_transaction_schema_files')
+
+statement ok
+CREATE TABLE lake.t (id INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO lake.t VALUES (1, 'a'), (2, 'b')
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE lake.t ADD COLUMN extra INTEGER DEFAULT 7
+
+query IIT rowsort
+SELECT id, extra, v FROM lake.t
+----
+1	7	a
+2	7	b
+
+statement ok
+UPDATE lake.t SET extra = 9 WHERE id = 2
+
+query IIT rowsort
+SELECT id, extra, v FROM lake.t
+----
+1	7	a
+2	9	b
+
+statement ok
+ROLLBACK
+
+query IT rowsort
+SELECT id, v FROM lake.t
+----
+1	a
+2	b
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE lake.t ADD COLUMN extra INTEGER DEFAULT 7
+
+statement ok
+UPDATE lake.t SET extra = 9 WHERE id = 2
+
+statement ok
+COMMIT
+
+query IIT rowsort
+SELECT id, extra, v FROM lake.t
+----
+1	7	a
+2	9	b
+
+query IT rowsort
+SELECT id, v FROM lake.t AT (VERSION => 2)
+----
+1	a
+2	b
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/inline_transaction_schema.db' AS lake (DATA_PATH '{TEST_DIR}/inline_transaction_schema_files')
+
+query IIT rowsort
+SELECT id, extra, v FROM lake.t
+----
+1	7	a
+2	9	b
+
+query IT rowsort
+SELECT id, v FROM lake.t AT (VERSION => 2)
+----
+1	a
+2	b

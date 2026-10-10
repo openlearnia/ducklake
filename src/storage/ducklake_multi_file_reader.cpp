@@ -442,7 +442,9 @@ shared_ptr<BaseFileReader> DuckLakeMultiFileReader::TryCreateInlinedDataReader(c
 		DuckLakeSnapshot snapshot(catalog.GetBeginSnapshotForSchemaVersion(read_info.table.GetTableId(),
 		                                                                   schema_version.GetIndex(), *transaction),
 		                          schema_version.GetIndex(), 0, 0);
-		auto entry = catalog.GetEntryById(*transaction, snapshot, read_info.table.GetTableId());
+		// Inlined columns describe their persisted schema, not a transaction-local ALTER overlay.
+		auto &schema = catalog.GetSchemaForSnapshot(*transaction, snapshot);
+		auto entry = schema.GetEntryById(read_info.table.GetTableId());
 		if (!entry) {
 			return nullptr;
 		}

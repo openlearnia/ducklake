@@ -30,6 +30,7 @@ class DuckLakeCatalog;
 class DuckLakeSchemaEntry;
 class DuckLakeTableEntry;
 class DuckLakeFieldData;
+struct DuckLakeSchemaCacheEntry;
 struct DuckLakeCopyOptions;
 struct DuckLakeCopyInput;
 
@@ -62,6 +63,8 @@ public:
 	optional_ptr<DuckLakeTableEntry> table;
 	//! Table schema, in case of CREATE TABLE AS
 	optional_ptr<SchemaCatalogEntry> schema;
+	//! Prepared plans outlive the binding transaction and its schema cache pins.
+	shared_ptr<DuckLakeSchemaCacheEntry> schema_cache_pin;
 	//! Create table info, in case of CREATE TABLE AS
 	unique_ptr<BoundCreateTableInfo> info;
 	//! The table UUID, in case of CREATE TABLE AS
