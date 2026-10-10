@@ -332,6 +332,30 @@ SELECT id, numbers FROM ss_dst.main.el ORDER BY id
 1	[10, 20]
 2	[30]
 
+# an external list-of-structs file: the registered map names the parquet element "list"
+# while the footer keeps "element" - renames must still compose through it
+statement ok
+CREATE TABLE ss_src.main.e3 (id INTEGER, items STRUCT(a INTEGER, b VARCHAR)[])
+
+statement ok
+COPY (SELECT 1 AS id, [{'a': 1, 'b': 'x'}] AS items UNION ALL SELECT 2, [{'a': 2, 'b': 'y'}]) TO '{TEST_DIR}/ext_los.parquet' (FORMAT parquet)
+
+statement ok
+SELECT * FROM ducklake_add_data_files('ss_src', 'e3', '{TEST_DIR}/ext_los.parquet')
+
+# rename before the destination ever sees the table: preparation composes the map
+statement ok
+ALTER TABLE ss_src.main.e3 RENAME COLUMN items TO elements
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query II
+SELECT id, elements FROM ss_dst.main.e3 ORDER BY id
+----
+1	[{'a': 1, 'b': x}]
+2	[{'a': 2, 'b': y}]
+
 # ---------------------------------------------------------------------------
 # a recreated source incarnation re-establishes the share table's initial
 # missing-field defaults

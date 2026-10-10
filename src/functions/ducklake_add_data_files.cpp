@@ -1868,6 +1868,26 @@ static const DuckLakeNameMapEntry *FindSharedMapEntry(const vector<unique_ptr<Du
 	return nullptr;
 }
 
+//! Finds the registered-map entry for a list element. MapColumn registers element entries
+//! under the name the footer presented at registration time, but the three-level parquet
+//! layout gets its element renamed to "list" while the physical footer keeps "element" (and
+//! the scan normalizes "array"/"element" to "list"). Try the physical name first, then the
+//! alternate element naming conventions.
+static const DuckLakeNameMapEntry *FindSharedListElementEntry(const vector<unique_ptr<DuckLakeNameMapEntry>> &entries,
+                                                              const string &physical_name) {
+	auto entry = FindSharedMapEntry(entries, physical_name);
+	if (entry) {
+		return entry;
+	}
+	for (const auto &alternate : vector<string> {"list", "element", "array"}) {
+		entry = FindSharedMapEntry(entries, alternate);
+		if (entry) {
+			return entry;
+		}
+	}
+	return nullptr;
+}
+
 //! Walks the source and destination field trees in parallel by name and records, for every
 //! source field, the corresponding destination field. Field ids differ between catalogs
 //! whenever either side evolved independently (drops, re-adds).
@@ -1981,7 +2001,7 @@ static bool RewriteSharedColumn(ParquetColumn &column, const DuckLakeNameMapEntr
 		if (!element) {
 			break;
 		}
-		auto child_map = map_entry ? FindSharedMapEntry(map_entry->child_entries, element->name) : nullptr;
+		auto child_map = map_entry ? FindSharedListElementEntry(map_entry->child_entries, element->name) : nullptr;
 		if (!RewriteSharedColumn(*element, child_map, source_fields, translation, source_name_restore)) {
 			return false;
 		}
