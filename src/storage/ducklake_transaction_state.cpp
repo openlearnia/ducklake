@@ -1437,21 +1437,37 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 	idx_t comment_count = 0;
 	// Maps from field index to the number of column comment operations for that field.
 	map<FieldIndex, idx_t> column_comment_count;
+	//! Set when any version of this table changed its effective constraint set.
+	bool constraints_touched = false;
+	//! Set when the table itself was created in this transaction (its constraint rows are
+	//! written with the new-table row instead of a replacement).
+	bool table_created_in_txn = false;
 	for (idx_t table_idx = 0; table_idx < tables.size(); table_idx++) {
 		auto &table = tables[table_idx].get();
 		auto local_change = table.GetLocalChange();
 		switch (local_change.type) {
 		case LocalChangeType::SET_NULL:
 		case LocalChangeType::DROP_NULL:
-		case LocalChangeType::RENAME_COLUMN:
 		case LocalChangeType::SET_DEFAULT:
 			field_alter_count[local_change.field_index]++;
+			break;
+		case LocalChangeType::RENAME_COLUMN:
+			field_alter_count[local_change.field_index]++;
+			// keys follow the renamed column - republish the set with updated names (identical
+			// content when the renamed column is not a key). Marked here instead of in the walk:
+			// a rename superseded by a later same-field alter still changes the stored names.
+			constraints_touched = true;
 			break;
 		case LocalChangeType::SET_COMMENT:
 			comment_count++;
 			break;
 		case LocalChangeType::SET_COLUMN_COMMENT:
 			column_comment_count[local_change.field_index]++;
+			break;
+		case LocalChangeType::REMOVE_COLUMN:
+			// dropping a column removes its dependent key declarations - publish the reduced
+			// final set (identical content when the column was not a key)
+			constraints_touched = true;
 			break;
 		default:
 			break;
@@ -1471,11 +1487,6 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 
 	// traverse in reverse order
 	bool column_schema_change = false;
-	//! Set when any version of this table changed its effective constraint set.
-	bool constraints_touched = false;
-	//! Set when the table itself was created in this transaction (its constraint rows are
-	//! written with the new-table row instead of a replacement).
-	bool table_created_in_txn = false;
 	for (idx_t table_idx = tables.size(); table_idx > 0; table_idx--) {
 		auto &table = tables[table_idx - 1].get();
 		auto local_change = table.GetLocalChange();
@@ -1570,9 +1581,6 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			transaction_changes.altered_tables_with_schema_version_changes.insert(table_id);
 			if (local_change.type == LocalChangeType::RENAME_COLUMN) {
 				column_schema_change = true;
-				// keys follow the renamed column - republish the set with updated names
-				// (identical content when the renamed column is not a key)
-				constraints_touched = true;
 				// persist updated sort expressions (column name was updated in the table entry)
 				if (table.GetSortData()) {
 					auto sort_key = DuckLakeTransaction::GetNewSortKey(commit_state, table);
@@ -1586,11 +1594,6 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			// drop the indicated column
 			// note that in case of nested types we might be dropping multiple columns here
 			HandleChangedFields(commit_state.GetTableId(table), table.GetChangedFields(), result, txn_added_fields);
-			if (local_change.type == LocalChangeType::REMOVE_COLUMN) {
-				// dropping a column removes its dependent key declarations - publish the
-				// reduced final set (identical content when the column was not a key)
-				constraints_touched = true;
-			}
 			transaction_changes.altered_tables_with_schema_version_changes.insert(table_id);
 			column_schema_change = true;
 			break;

@@ -1224,13 +1224,16 @@ DuckLakeReplicationCatchupResult DuckLakeReplication::Catchup(ClientContext &con
 				CheckResult(*schema_res, "Failed to create schema " + ref.schema + " on destination");
 
 				// Schema sync: identical keeps data, trailing additions ALTER in place, anything
-				// else drops and recreates (which forces a full re-seed).
+				// else drops and recreates (which forces a full re-seed). A changed source
+				// identity is also destructive for share tables: the new incarnation can carry
+				// different initial missing-field defaults, which only a rebuild adopts.
 				bool recreated = false;
 				bool extended = false;
+				bool share_rebuilt = outcome.strategy == "share" && identity_changed;
 				if (dest_columns.empty()) {
 					recreated = true;
-				} else if (SameColumns(source_columns, dest_columns)) {
-				} else if (IsAdditiveSchemaChange(source_columns, dest_columns)) {
+				} else if (SameColumns(source_columns, dest_columns) && !share_rebuilt) {
+				} else if (IsAdditiveSchemaChange(source_columns, dest_columns) && !share_rebuilt) {
 					extended = true;
 				} else {
 					auto drop_res = apply->Query(StringUtil::Format("DROP TABLE %s", dst_table));

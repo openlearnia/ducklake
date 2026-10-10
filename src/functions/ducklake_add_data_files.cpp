@@ -190,9 +190,11 @@ public:
 	//! (footer field ids or the source's registered name maps) immediately before name-mapping,
 	//! so files written under an evolved source schema still map onto the destination schema.
 	std::function<void(ParquetFileMetadata &)> pre_mapping_hook;
-	//! Share mode: rewritten column path -> physical footer name. Name-map source names must
-	//! keep addressing the file's on-disk layout, so MapColumn restores them from here.
-	unordered_map<string, string> shared_source_name_restore;
+	//! Share mode: rewritten column -> physical footer name. Name-map source names must keep
+	//! addressing the file's on-disk layout, so MapColumn restores them from here. Keyed by
+	//! column pointer: names alone collide across nesting levels and dotted field names, and
+	//! wrapper levels rename columns after this map is filled.
+	unordered_map<const ParquetColumn *, string> shared_source_name_restore;
 
 private:
 	void ReadParquetFullMetadata(const string &glob, vector<DuckLakeDataFile> &result);
@@ -1276,7 +1278,7 @@ unique_ptr<DuckLakeNameMapEntry> DuckLakeFileProcessor::MapColumn(ParquetFileMet
 	map_entry->source_name = column.name;
 	// share mode rewrote the column name to the destination schema - the registered map must
 	// still address the physical footer layout
-	auto restored = shared_source_name_restore.find(prefix);
+	auto restored = shared_source_name_restore.find(&column);
 	if (restored != shared_source_name_restore.end()) {
 		map_entry->source_name = restored->second;
 	}
@@ -1886,15 +1888,50 @@ static void BuildSharedFieldTranslation(const vector<unique_ptr<DuckLakeFieldId>
 	}
 }
 
+//! Locates the element column of a parquet list layout, mirroring the navigation MapColumn
+//! performs: the avro/duckdb-native layouts expose the element as the direct child, the
+//! three-level parquet layout hides it below a wrapper level.
+static ParquetColumn *SharedListElement(ParquetColumn &column) {
+	if (column.child_columns.empty()) {
+		return nullptr;
+	}
+	auto &first = column.child_columns[0];
+	if (first->name == "array") {
+		return first.get();
+	}
+	if (first->name == "element" || column.has_duckdb_type) {
+		return first.get();
+	}
+	if (first->child_columns.empty()) {
+		return nullptr;
+	}
+	return first->child_columns[0].get();
+}
+
+//! Locates the key/value column of a parquet map layout (a grandchild below a wrapper level).
+static ParquetColumn *SharedMapChild(ParquetColumn &column, const string &name) {
+	if (column.child_columns.empty()) {
+		return nullptr;
+	}
+	for (auto &child : column.child_columns[0]->child_columns) {
+		if (child->name == name) {
+			return child.get();
+		}
+	}
+	return nullptr;
+}
+
 //! Rewrites one footer column from the source's logical metadata onto the destination schema:
 //! renames it to the destination field's name and rewrites its field id to the destination's
 //! field id so validation and statistics key on the destination, while remembering the physical
 //! footer name - registered name maps must keep addressing the file as it is laid out on disk.
 //! Columns whose source field was dropped after the file was written are removed entirely.
-static bool RewriteSharedColumn(ParquetColumn &column, const string &path_prefix, const DuckLakeNameMapEntry *map_entry,
+//! Child navigation mirrors MapColumn exactly: struct children map by name, list elements and
+//! map keys/values are reached through the parquet wrapper levels without rewriting them.
+static bool RewriteSharedColumn(ParquetColumn &column, const DuckLakeNameMapEntry *map_entry,
                                 const vector<unique_ptr<DuckLakeFieldId>> &source_fields,
                                 const unordered_map<idx_t, const DuckLakeFieldId *> &translation,
-                                unordered_map<string, string> &source_name_restore) {
+                                unordered_map<const ParquetColumn *, string> &source_name_restore) {
 	if (IsDuckLakeInternalColumn(column.name)) {
 		// internal columns (row ids, snapshot ids) stay in the file unmapped
 		return true;
@@ -1911,28 +1948,61 @@ static bool RewriteSharedColumn(ParquetColumn &column, const string &path_prefix
 		// the field was dropped from the source schema after the file was written
 		return false;
 	}
+	const DuckLakeFieldId *dest_field = nullptr;
 	if (source_field) {
 		auto entry = translation.find(source_field->GetFieldIndex().index);
 		if (entry == translation.end()) {
 			throw InvalidInputException("Cannot share source field \"%s\": it has no matching destination column",
 			                            source_field->Name());
 		}
-		auto physical_name = column.name;
-		column.name = entry->second->Name();
-		column.field_id = entry->second->GetFieldIndex().index;
-		// the restore key is the rewritten path - MapColumn knows the column only by its new name
-		auto path = path_prefix.empty() ? column.name : path_prefix + "." + column.name;
-		source_name_restore[path] = physical_name;
+		dest_field = entry->second;
+		source_name_restore[&column] = column.name;
+		column.name = dest_field->Name();
+		column.field_id = dest_field->GetFieldIndex().index;
 	}
-	vector<unique_ptr<ParquetColumn>> kept_children;
-	for (auto &child : column.child_columns) {
-		auto child_map = map_entry ? FindSharedMapEntry(map_entry->child_entries, child->name) : nullptr;
-		auto child_path = path_prefix.empty() ? column.name : path_prefix + "." + column.name;
-		if (RewriteSharedColumn(*child, child_path, child_map, source_fields, translation, source_name_restore)) {
-			kept_children.push_back(std::move(child));
+	if (!dest_field || !dest_field->HasChildren()) {
+		// nothing to recurse into - or an unmatched pass-through column (matched by name later)
+		return true;
+	}
+	switch (dest_field->Type().id()) {
+	case LogicalTypeId::STRUCT: {
+		vector<unique_ptr<ParquetColumn>> kept_children;
+		for (auto &child : column.child_columns) {
+			auto child_map = map_entry ? FindSharedMapEntry(map_entry->child_entries, child->name) : nullptr;
+			if (RewriteSharedColumn(*child, child_map, source_fields, translation, source_name_restore)) {
+				kept_children.push_back(std::move(child));
+			}
 		}
+		column.child_columns = std::move(kept_children);
+		break;
 	}
-	column.child_columns = std::move(kept_children);
+	case LogicalTypeId::LIST: {
+		auto *element = SharedListElement(column);
+		if (!element) {
+			break;
+		}
+		auto child_map = map_entry ? FindSharedMapEntry(map_entry->child_entries, element->name) : nullptr;
+		if (!RewriteSharedColumn(*element, child_map, source_fields, translation, source_name_restore)) {
+			return false;
+		}
+		break;
+	}
+	case LogicalTypeId::MAP: {
+		for (const auto &child_name : vector<string> {"key", "value"}) {
+			auto *map_child = SharedMapChild(column, child_name);
+			if (!map_child) {
+				break;
+			}
+			auto child_map = map_entry ? FindSharedMapEntry(map_entry->child_entries, map_child->name) : nullptr;
+			if (!RewriteSharedColumn(*map_child, child_map, source_fields, translation, source_name_restore)) {
+				return false;
+			}
+		}
+		break;
+	}
+	default:
+		break;
+	}
 	return true;
 }
 
@@ -1984,7 +2054,7 @@ vector<DuckLakeDataFile> DuckLakePrepareSharedFiles(DuckLakeTransaction &dest_tr
 					// the source table either, so it must not reach the destination
 					continue;
 				}
-				if (RewriteSharedColumn(*column, string(), map_entry, source_fields, field_translation,
+				if (RewriteSharedColumn(*column, map_entry, source_fields, field_translation,
 				                        processor.shared_source_name_restore)) {
 					kept_columns.push_back(std::move(column));
 				}

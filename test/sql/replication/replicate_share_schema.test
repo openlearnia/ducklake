@@ -220,6 +220,175 @@ SELECT id, details.x, extra.y FROM ss_dst.main.nest ORDER BY id
 3	9	5
 
 # ---------------------------------------------------------------------------
+# dotted field names must not collide with nested mapping paths
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ss_src.main.dot (id INTEGER, s STRUCT("x.y" INTEGER, x STRUCT(y INTEGER)))
+
+statement ok
+INSERT INTO ss_src.main.dot VALUES (1, {'x.y': 11, 'x': {'y': 22}})
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query II
+SELECT s."x.y", s.x.y FROM ss_dst.main.dot
+----
+11	22
+
+# ---------------------------------------------------------------------------
+# list and map columns keep reading through renames: footer wrapper levels
+# never take part in the mapping
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ss_src.main.lm (id INTEGER, vals INTEGER[], m MAP(INTEGER, VARCHAR))
+
+statement ok
+INSERT INTO ss_src.main.lm VALUES (1, [10, 20], map {1: 'a'}), (2, [30], map {2: 'b'})
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query III
+SELECT id, vals, m FROM ss_dst.main.lm ORDER BY id
+----
+1	[10, 20]	{1=a}
+2	[30]	{2=b}
+
+statement ok
+ALTER TABLE ss_src.main.lm RENAME COLUMN vals TO vals2
+
+statement ok
+ALTER TABLE ss_src.main.lm RENAME COLUMN m TO m2
+
+statement ok
+INSERT INTO ss_src.main.lm VALUES (3, [99], map {3: 'c'})
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query III
+SELECT id, vals2, m2 FROM ss_dst.main.lm ORDER BY id
+----
+1	[10, 20]	{1=a}
+2	[30]	{2=b}
+3	[99]	{3=c}
+
+# a list of structs renamed as a whole: nested fields still resolve through wrappers
+statement ok
+CREATE TABLE ss_src.main.los (id INTEGER, items STRUCT(a INTEGER, b VARCHAR)[])
+
+statement ok
+INSERT INTO ss_src.main.los VALUES (1, [{'a': 1, 'b': 'x'}, {'a': 2, 'b': 'y'}])
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+statement ok
+ALTER TABLE ss_src.main.los RENAME COLUMN items TO elements
+
+statement ok
+INSERT INTO ss_src.main.los VALUES (2, [{'a': 3, 'b': 'z'}])
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query III
+SELECT id, elements[1].a, elements[2].b FROM ss_dst.main.los ORDER BY id
+----
+1	1	y
+2	3	NULL
+
+# an external file with the three-level parquet list layout rides through a rename too
+statement ok
+CREATE TABLE ss_src.main.el (id INTEGER, nums INTEGER[])
+
+statement ok
+COPY (SELECT 1 AS id, [10, 20] AS nums UNION ALL SELECT 2, [30]) TO '{TEST_DIR}/ext_list.parquet' (FORMAT parquet)
+
+statement ok
+SELECT * FROM ducklake_add_data_files('ss_src', 'el', '{TEST_DIR}/ext_list.parquet')
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query II
+SELECT id, nums FROM ss_dst.main.el ORDER BY id
+----
+1	[10, 20]
+2	[30]
+
+statement ok
+ALTER TABLE ss_src.main.el RENAME COLUMN nums TO numbers
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 1)
+
+query II
+SELECT id, numbers FROM ss_dst.main.el ORDER BY id
+----
+1	[10, 20]
+2	[30]
+
+# ---------------------------------------------------------------------------
+# a recreated source incarnation re-establishes the share table's initial
+# missing-field defaults
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ss_src.main.reid (id INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO ss_src.main.reid VALUES (1, 'a')
+
+statement ok
+ALTER TABLE ss_src.main.reid ADD COLUMN n INTEGER DEFAULT 7
+
+query I
+SELECT replication_id FROM ducklake_replicate_create('ss_dst', 'ss_src', data_sync_mode := 'share', include := 'main.reid')
+----
+2
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 2)
+
+query III
+SELECT id, v, n FROM ss_dst.main.reid
+----
+1	a	7
+
+# new incarnation: files written without n, then n added with a different default
+statement ok
+DROP TABLE ss_src.main.reid
+
+statement ok
+CREATE TABLE ss_src.main.reid (id INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO ss_src.main.reid VALUES (2, 'b'), (3, 'c')
+
+statement ok
+ALTER TABLE ss_src.main.reid ADD COLUMN n INTEGER DEFAULT 42
+
+statement ok
+SELECT * FROM ducklake_replicate_catchup('ss_dst', 2)
+
+query III
+SELECT id, v, n FROM ss_src.main.reid ORDER BY id
+----
+2	b	42
+3	c	42
+
+# source and replica agree
+query III
+SELECT id, v, n FROM ss_dst.main.reid ORDER BY id
+----
+2	b	42
+3	c	42
+
+# ---------------------------------------------------------------------------
 # partitioned and live-inlined sources remain rejected
 # ---------------------------------------------------------------------------
 

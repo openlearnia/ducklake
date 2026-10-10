@@ -201,6 +201,37 @@ WHERE table_name = 'chained' AND constraint_type != 'NOT NULL' ORDER BY constrai
 ----
 chained	PRIMARY KEY(p)
 
+# a rename superseded by a later same-field alter still republishes the renamed key
+statement ok
+CREATE TABLE rd (a INTEGER, b INTEGER, PRIMARY KEY (a))
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+ALTER TABLE rd RENAME COLUMN a TO c
+
+statement ok
+ALTER TABLE rd ALTER COLUMN c SET DEFAULT 5
+
+statement ok
+COMMIT
+
+query TT
+SELECT table_name, constraint_text FROM duckdb_constraints()
+WHERE table_name = 'rd' AND constraint_type != 'NOT NULL'
+----
+rd	PRIMARY KEY(c)
+
+# the committed metadata follows the renamed column
+query TT
+SELECT constraint_type, column_name
+FROM __ducklake_metadata_lake.ducklake_table_constraint
+WHERE table_id = (SELECT table_id FROM __ducklake_metadata_lake.ducklake_table WHERE table_name = 'rd')
+AND end_snapshot IS NULL
+----
+PRIMARY KEY	c
+
 # everything survives a detach/reattach
 statement ok
 USE memory
@@ -216,11 +247,12 @@ USE lake
 
 query TT
 SELECT table_name, constraint_text FROM duckdb_constraints()
-WHERE table_name IN ('ren', 'resurrect', 'comp', 'shared', 'shifted', 'cased', 'chained')
+WHERE table_name IN ('ren', 'resurrect', 'comp', 'shared', 'shifted', 'cased', 'chained', 'rd')
 AND constraint_type != 'NOT NULL' ORDER BY table_name, constraint_text
 ----
 cased	UNIQUE(A)
 chained	PRIMARY KEY(p)
+rd	PRIMARY KEY(c)
 ren	PRIMARY KEY(c)
 shifted	PRIMARY KEY(k)
 
