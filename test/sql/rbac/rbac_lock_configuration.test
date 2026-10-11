@@ -1,0 +1,77 @@
+# name: test/sql/rbac/rbac_lock_configuration.test
+# description: DuckLake keeps working after lock_configuration, which then pins the RBAC role settings
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_lock.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_lock_files', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE lake.t AS SELECT range::INTEGER AS i FROM range(3)
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'reader')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'SELECT', table_name := 't')
+
+statement ok
+SET ducklake_role = 'reader'
+
+statement ok
+SET lock_configuration = true
+
+query I
+SELECT count(*) FROM lake.t
+----
+3
+
+statement error
+INSERT INTO lake.t VALUES (10)
+----
+does not have INSERT privilege
+
+# The session can no longer escalate its role
+statement error
+SET ducklake_role = 'admin'
+----
+the configuration has been locked
+
+statement error
+SET ducklake_admin_role = 'reader'
+----
+the configuration has been locked
+
+statement error
+BEGIN; SET LOCAL ducklake_role = 'admin';
+----
+the configuration has been locked
+
+statement ok
+ROLLBACK
+
+# Repeated reads and explicit transactions keep working under the lock
+query I
+SELECT count(*) FROM lake.t AT (VERSION => 1)
+----
+3
+
+statement ok
+BEGIN
+
+query I
+SELECT sum(i) FROM lake.t
+----
+3
+
+statement ok
+COMMIT

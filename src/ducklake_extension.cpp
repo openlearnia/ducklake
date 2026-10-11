@@ -19,7 +19,6 @@
 namespace duckdb {
 
 ScalarFunction DuckLakeMurmur3Function();
-void DuckLakeRegisterMaterializedViewParser(DBConfig &config);
 
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("Adds support for DuckLake, SQL as a Lakehouse Format");
@@ -30,9 +29,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(instance);
 	DuckLakeInstallAuthorizationProvider(instance);
 	StorageExtension::Register(config, "ducklake", make_shared_ptr<DuckLakeStorageExtension>());
-
-	// CREATE / REFRESH / DROP MATERIALIZED VIEW sugar (needs allow_parser_override_extension='FALLBACK')
-	DuckLakeRegisterMaterializedViewParser(config);
 
 	config.AddExtensionOption("ducklake_max_retry_count",
 	                          "The maximum amount of retry attempts for a ducklake transaction", LogicalType::UBIGINT,
@@ -87,7 +83,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::VARCHAR, Value("allow"), set_mv_stale_read, SetScope::SESSION);
 	config.AddExtensionOption("ducklake_role",
 	                          "Active DuckLake RBAC role for this session (empty = PUBLIC grants only)",
-	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::LOCAL);
+	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION);
 	config.AddExtensionOption("ducklake_admin_role", "Name of the DuckLake RBAC role that bypasses privilege checks",
 	                          LogicalType::VARCHAR, Value("admin"), nullptr, SetScope::GLOBAL);
 	auto set_enable_rbac = [](ClientContext &context, SetScope, Value &parameter) {

@@ -22,6 +22,7 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
                                                             vector<LogicalType> &return_types,
                                                             vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckAdmin(context);
 	auto result = make_uniq<ExpireSnapshotsBindData>(catalog);
 	timestamp_tz_t from_timestamp;
 	string snapshot_list;

@@ -1,0 +1,50 @@
+# name: test/sql/rbac/rbac_merge_privileges.test
+# description: DuckLake RBAC - MERGE requires only the privileges of the actions it contains
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_merge.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_merge_files')
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+CREATE TABLE lake.t(id INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO lake.t VALUES (1, 10)
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'writer')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'writer', 'SELECT, INSERT', table_name := 't')
+
+statement ok
+SET ducklake_role = 'writer'
+
+statement ok
+MERGE INTO lake.t USING (SELECT 2 AS id, 20 AS v) s ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)
+
+statement error
+MERGE INTO lake.t USING (SELECT 1 AS id, 11 AS v) s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)
+----
+does not have INSERT,UPDATE privilege
+
+statement error
+MERGE INTO lake.t USING (SELECT 1 AS id) s ON t.id = s.id WHEN MATCHED THEN DELETE
+----
+does not have DELETE privilege
+
+query II
+SELECT id, v FROM lake.t ORDER BY id
+----
+1	10
+2	20

@@ -13,15 +13,16 @@
 
 namespace duckdb {
 
-DuckLakeRbac *DuckLakeRbac::FindActiveRbac(ClientContext &context) {
+vector<reference<DuckLakeRbac>> DuckLakeRbac::FindActiveRbacs(ClientContext &context) {
+	vector<reference<DuckLakeRbac>> result;
 	auto databases = context.db->GetDatabaseManager().GetDatabases(context);
 	for (auto &attached : databases) {
 		auto &catalog = attached->GetCatalog();
 		if (catalog.GetCatalogType() == "ducklake" && catalog.Cast<DuckLakeCatalog>().Rbac().IsEnabled()) {
-			return &catalog.Cast<DuckLakeCatalog>().Rbac();
+			result.push_back(catalog.Cast<DuckLakeCatalog>().Rbac());
 		}
 	}
-	return nullptr;
+	return result;
 }
 
 bool DuckLakeRbac::CheckDuckDBObject(ClientContext &context, DuckLakePrivilege privilege, const string &,
@@ -75,13 +76,20 @@ public:
 		return static_cast<DuckLakePrivilege>(result);
 	}
 
+	//! Objects outside DuckLake are allowed only if every RBAC-enabled lake allows them
 	static bool Check(ClientContext &context, uint16_t privileges, const string &object_desc) {
-		auto rbac = DuckLakeRbac::FindActiveRbac(context);
-		if (!rbac) {
-			// no attached catalog has RBAC enabled - allow everything
-			return true;
+		for (auto &rbac : DuckLakeRbac::FindActiveRbacs(context)) {
+			if (!rbac.get().CheckDuckDBObject(context, MapPrivileges(privileges), object_desc)) {
+				return false;
+			}
 		}
-		return rbac->CheckDuckDBObject(context, MapPrivileges(privileges), object_desc);
+		return true;
+	}
+
+	static void CheckAdminEverywhere(ClientContext &context) {
+		for (auto &rbac : DuckLakeRbac::FindActiveRbacs(context)) {
+			rbac.get().CheckAdmin(context);
+		}
 	}
 
 	static string DescribeObject(const string &schema_name, const string &object_name) {
@@ -102,7 +110,7 @@ public:
 			auto role = DuckLakeRbac::GetActiveRole(context);
 			throw PermissionException("Role \"%s\" does not have SELECT privilege on %s (DuckDB catalog \"%s\")",
 			                          role.empty() ? DUCKLAKE_PUBLIC_GRANTEE : role,
-			                          DescribeObject(schema_name, object_name), catalog.GetName());
+			                          DescribeObject(schema_name, object_name), catalog.GetName().GetIdentifierName());
 		}
 	}
 
@@ -117,7 +125,7 @@ public:
 			throw PermissionException("Role \"%s\" does not have %s privilege on %s (DuckDB catalog \"%s\")",
 			                          role.empty() ? DUCKLAKE_PUBLIC_GRANTEE : role,
 			                          DuckLakeRbac::PrivilegesToString(MapPrivileges(privileges)),
-			                          DescribeObject(schema_name, table_name), catalog.GetName());
+			                          DescribeObject(schema_name, table_name), catalog.GetName().GetIdentifierName());
 		}
 	}
 
@@ -132,18 +140,14 @@ public:
 			throw PermissionException("Role \"%s\" does not have %s privilege on %s (DuckDB catalog \"%s\")",
 			                          role.empty() ? DUCKLAKE_PUBLIC_GRANTEE : role,
 			                          DuckLakeRbac::PrivilegesToString(MapPrivileges(privileges)),
-			                          DescribeObject(schema_name, object_name), catalog.GetName());
+			                          DescribeObject(schema_name, object_name), catalog.GetName().GetIdentifierName());
 		}
 	}
 
 	void CheckEngineManagement(ClientContext &context) override {
-		auto rbac = DuckLakeRbac::FindActiveRbac(context);
-		if (!rbac) {
-			return;
-		}
 		// ATTACH/DETACH while RBAC is active requires admin - this also
 		// prevents detaching an RBAC-enabled catalog to disable enforcement
-		rbac->CheckAdmin(context);
+		CheckAdminEverywhere(context);
 	}
 
 	//! Calling a routine requires EXECUTE, whether or not it is SECURITY DEFINER.
@@ -152,21 +156,22 @@ public:
 	//! ducklake_role, so both modes currently execute under the caller.
 	void CheckExecuteRoutine(ClientContext &context, Catalog &catalog, const string &schema_name,
 	                         const string &routine_name, bool security_definer) override {
-		auto rbac = DuckLakeRbac::FindActiveRbac(context);
-		if (!rbac) {
-			// no attached catalog has RBAC enabled - allow everything
-			return;
-		}
-		// A routine lives in a schema, so scope the grant lookup to that schema and let a
-		// schema-scoped EXECUTE grant match, as well as a catalog-wide one.
-		optional_idx schema_id;
+		bool allowed;
 		if (catalog.GetCatalogType() == "ducklake") {
+			// A routine lives in a schema of its own lake: only that lake's grants apply, and a
+			// schema-scoped EXECUTE grant matches as well as a catalog-wide one.
 			auto &ducklake = catalog.Cast<DuckLakeCatalog>();
+			if (!ducklake.Rbac().IsEnabled()) {
+				return;
+			}
 			auto &schema_entry = ducklake.GetSchema(ducklake.GetCatalogTransaction(context), Identifier(schema_name));
-			schema_id = optional_idx(schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId().index);
+			auto schema_id = optional_idx(schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId().index);
+			allowed = ducklake.Rbac().CheckDuckDBObject(context, DUCKLAKE_PRIVILEGE_EXECUTE,
+			                                            DescribeObject(schema_name, routine_name), schema_id);
+		} else {
+			allowed = Check(context, AUTH_EXECUTE, DescribeObject(schema_name, routine_name));
 		}
-		if (rbac->CheckDuckDBObject(context, DUCKLAKE_PRIVILEGE_EXECUTE, DescribeObject(schema_name, routine_name),
-		                            schema_id)) {
+		if (allowed) {
 			return;
 		}
 		auto role = DuckLakeRbac::GetActiveRole(context);
@@ -175,14 +180,15 @@ public:
 	}
 
 	bool RequireStatementRebind(ClientContext &context) override {
-		return DuckLakeRbac::FindActiveRbac(context) != nullptr;
+		return !DuckLakeRbac::FindActiveRbacs(context).empty();
 	}
 
 	void CheckReadFile(ClientContext &context, const string &function_name) override {
-		auto rbac = DuckLakeRbac::FindActiveRbac(context);
-		if (rbac) {
-			rbac->CheckAdmin(context);
-		}
+		CheckAdminEverywhere(context);
+	}
+
+	void CheckWriteFile(ClientContext &context, const string &path) override {
+		CheckAdminEverywhere(context);
 	}
 };
 

@@ -1,0 +1,143 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_stale_read_refresh.test
+# description: Every refresh mode can repair a stale view under ducklake_mv_stale_read='error'
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_stale_refresh.db' AS lake (DATA_PATH '{TEST_DIR}/mv_stale_refresh_files')
+
+statement ok
+CREATE TABLE lake.src(k INTEGER, v BIGINT)
+
+statement ok
+INSERT INTO lake.src VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE TABLE lake.fact(dim_id INTEGER, v BIGINT)
+
+statement ok
+CREATE TABLE lake.dim(dim_id INTEGER, g VARCHAR)
+
+statement ok
+INSERT INTO lake.fact VALUES (1, 5), (2, 7)
+
+statement ok
+INSERT INTO lake.dim VALUES (1, 'a'), (2, 'b')
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv_delta AS SELECT k, sum(v) s, count(v) cv, count(*) c FROM lake.src GROUP BY k
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv_minmax AS SELECT k, min(v) mn, count(*) c FROM lake.src GROUP BY k
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv_incr AS SELECT k, sum(v) s FROM lake.src GROUP BY k
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv_join AS SELECT d.g, sum(f.v) AS s FROM lake.fact f JOIN lake.dim d ON f.dim_id = d.dim_id GROUP BY d.g
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv_other AS SELECT count(*) c FROM lake.src
+
+statement ok
+INSERT INTO lake.src VALUES (1, 1), (3, 30)
+
+statement ok
+INSERT INTO lake.fact VALUES (1, 100)
+
+statement ok
+SET ducklake_mv_stale_read = 'error'
+
+statement error
+SELECT * FROM lake.mv_delta
+----
+is stale
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('lake', view_name := 'mv_delta')
+----
+delta
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('lake', view_name := 'mv_minmax')
+----
+delta
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('lake', view_name := 'mv_incr')
+----
+incremental
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('lake', view_name := 'mv_join')
+----
+join_incremental
+
+query IIII
+SELECT * FROM lake.mv_delta ORDER BY k
+----
+1	11	2	2
+2	20	1	1
+3	30	1	1
+
+query III
+SELECT * FROM lake.mv_minmax ORDER BY k
+----
+1	1	2
+2	20	1
+3	30	1
+
+query II
+SELECT * FROM lake.mv_incr ORDER BY k
+----
+1	11
+2	20
+3	30
+
+query TI
+SELECT * FROM lake.mv_join ORDER BY g
+----
+a	105
+b	7
+
+# The statement form works too, and protection of other stale views is unchanged
+statement ok
+INSERT INTO lake.src VALUES (2, 2)
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv_delta
+
+query IIII
+SELECT * FROM lake.mv_delta WHERE k = 2
+----
+2	22	2	2
+
+statement error
+SELECT * FROM lake.mv_other
+----
+is stale
+
+statement error
+SELECT * FROM lake.mv_incr
+----
+is stale
+
+# Inside a transaction
+statement ok
+BEGIN
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('lake', view_name := 'mv_incr')
+----
+incremental
+
+query II
+SELECT * FROM lake.mv_incr WHERE k = 2
+----
+2	22
+
+statement ok
+COMMIT

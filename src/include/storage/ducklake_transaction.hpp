@@ -286,6 +286,12 @@ public:
 	void DropMaterializedView(TableIndex view_id);
 	//! Materialized views created in this transaction (not yet persisted)
 	const vector<DuckLakeMaterializedViewInfo> &GetNewMaterializedViews() const;
+	//! Refreshes staged by this transaction (stamped at commit)
+	const vector<DuckLakeMaterializedViewRefreshInfo> &GetRefreshedMaterializedViews() const;
+	//! Backing table whose refresh SQL is being bound: it may read its own stale contents
+	optional_idx &RefreshingBackingTable() {
+		return refreshing_backing_table;
+	}
 	void DropScalarMacro(DuckLakeScalarMacroEntry &macro);
 	void DropTableMacro(DuckLakeTableMacroEntry &macro);
 	void DropProcedure(DuckLakeProcedureEntry &procedure);
@@ -397,6 +403,7 @@ private:
 	DuckLakeCatalog &ducklake_catalog;
 	DatabaseInstance &db;
 	unique_ptr<DuckLakeMetadataManager> metadata_manager;
+	optional_idx refreshing_backing_table;
 	mutex connection_lock;
 	unique_ptr<Connection> connection;
 	//! Flushes of several tables finalize in parallel while scans check the flushed tables

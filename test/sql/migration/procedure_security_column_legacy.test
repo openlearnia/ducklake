@@ -1,0 +1,84 @@
+# name: test/sql/migration/procedure_security_column_legacy.test
+# description: catalogs with persisted procedures but no security_definer column stay readable on default and READ_ONLY attach
+# group: [migration]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_sec_legacy.db' AS dl (DATA_PATH '{TEST_DIR}/proc_sec_legacy_files')
+
+statement ok
+CREATE TABLE dl.t AS SELECT 1 AS i
+
+statement ok
+CREATE PROCEDURE dl.main.p() RETURNS INTEGER LANGUAGE JAVASCRIPT AS $$ return 7; $$;
+
+statement ok
+DETACH dl
+
+statement ok
+ATTACH '{TEST_DIR}/proc_sec_legacy.db' AS legacy
+
+statement ok
+ALTER TABLE legacy.ducklake_procedure DROP COLUMN security_definer
+
+statement ok
+DETACH legacy
+
+# READ_ONLY: readable, procedures callable, metadata schema untouched
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_sec_legacy.db' AS dl (DATA_PATH '{TEST_DIR}/proc_sec_legacy_files', READ_ONLY)
+
+query I
+SELECT count(*) FROM dl.t
+----
+1
+
+query I
+CALL dl.main.p();
+----
+7
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name='__ducklake_metadata_dl' AND table_name='ducklake_procedure' AND column_name='security_definer'
+----
+0
+
+statement ok
+DETACH dl
+
+# default attach: readable, and creating a SECURITY DEFINER procedure works
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_sec_legacy.db' AS dl (DATA_PATH '{TEST_DIR}/proc_sec_legacy_files')
+
+query I
+SELECT count(*) FROM dl.t
+----
+1
+
+query I
+CALL dl.main.p();
+----
+7
+
+statement ok
+CREATE PROCEDURE dl.main.p_definer() RETURNS INTEGER LANGUAGE JAVASCRIPT SECURITY DEFINER AS $$ return 8; $$;
+
+statement ok
+DETACH dl
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_sec_legacy.db' AS dl (DATA_PATH '{TEST_DIR}/proc_sec_legacy_files', READ_ONLY)
+
+query TT
+SELECT procedure_name, security_definer FROM __ducklake_metadata_dl.ducklake_procedure ORDER BY procedure_name
+----
+p	NULL
+p_definer	true
+
+query I
+CALL dl.main.p_definer();
+----
+8

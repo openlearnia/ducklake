@@ -834,10 +834,21 @@ void DuckLakeTransaction::Rollback() {
 	ClearSchemaCachePins();
 }
 
-//! BEGIN resets the invalidation policy, so every metadata transaction must set it again.
+//! BEGIN resets the invalidation policy, so every metadata transaction must set it again. It is set directly
+//! rather than through SQL, which lock_configuration would reject.
 static void BeginMetadataTransaction(Connection &connection) {
 	connection.BeginTransaction();
-	connection.Query("SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE'");
+	connection.context->transaction.SetInvalidationPolicy(
+	    TransactionInvalidationPolicy::SYNTACTIC_ERRORS_DO_NOT_INVALIDATE);
+}
+
+static void SetExtensionSettingDirectly(ClientContext &context, const string &name, Value value) {
+	ExtensionOption option;
+	if (!DBConfig::GetConfig(context).TryGetExtensionOption(Identifier(name), option) ||
+	    !option.setting_index.IsValid()) {
+		return;
+	}
+	ClientConfig::GetConfig(context).user_settings.SetUserSetting(option.setting_index.GetIndex(), std::move(value));
 }
 
 Connection &DuckLakeTransaction::GetConnection() {
@@ -867,10 +878,11 @@ Connection &DuckLakeTransaction::GetConnection() {
 		// it does not support all filter types DuckDB may push down (e.g. EXPRESSION_FILTER)
 		auto &metadata_type = ducklake_catalog.MetadataType();
 		if (metadata_type == "postgres" || metadata_type == "postgres_scanner") {
-			connection->Query("SET pg_experimental_filter_pushdown=false");
+			SetExtensionSettingDirectly(*connection->context, "pg_experimental_filter_pushdown", Value::BOOLEAN(false));
 		} else if (metadata_type == "sqlite" || metadata_type == "sqlite_scanner") {
 			// FIXME: sqlite_scanner's per-scan read connections deadlock against concurrent writers
-			connection->Query("SET sqlite_disable_multithreaded_scans=true");
+			SetExtensionSettingDirectly(*connection->context, "sqlite_disable_multithreaded_scans",
+			                            Value::BOOLEAN(true));
 		}
 		BeginMetadataTransaction(*connection);
 	}
@@ -1565,6 +1577,9 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		if (!state->new_materialized_views.empty() || !state->refreshed_materialized_views.empty()) {
 			metadata_manager->EnsureMaterializedViewRefreshColumn();
 		}
+		if (!state->new_procedures.empty()) {
+			metadata_manager->EnsureProcedureSecurityColumnExists();
+		}
 		auto result = metadata_manager->Execute(snapshot, query);
 		for (auto &insert : inlined_inserts) {
 			if (result->HasError()) {
@@ -2108,6 +2123,10 @@ void DuckLakeTransaction::DropMaterializedView(TableIndex view_id) {
 
 const vector<DuckLakeMaterializedViewInfo> &DuckLakeTransaction::GetNewMaterializedViews() const {
 	return state->new_materialized_views;
+}
+
+const vector<DuckLakeMaterializedViewRefreshInfo> &DuckLakeTransaction::GetRefreshedMaterializedViews() const {
+	return state->refreshed_materialized_views;
 }
 
 void DuckLakeTransaction::DropTableMacro(DuckLakeTableMacroEntry &macro) {

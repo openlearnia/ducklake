@@ -1825,6 +1825,10 @@ WHERE snapshot_id > %d AND snapshot_id <= %d
 }
 
 void DuckLakeCatalog::VerifyMaterializedViewStaleRead(ClientContext &context, DuckLakeTableEntry &table) {
+	if (DuckLakeRbac::IsInternalConnection(context)) {
+		// refresh bookkeeping (e.g. logical diffs) reads stale views on purpose
+		return;
+	}
 	Value setting_val;
 	if (!context.TryGetCurrentSetting("ducklake_mv_stale_read", setting_val) || setting_val.IsNull()) {
 		return;
@@ -1834,6 +1838,10 @@ void DuckLakeCatalog::VerifyMaterializedViewStaleRead(ClientContext &context, Du
 		return;
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, *this);
+	auto &refreshing = transaction.RefreshingBackingTable();
+	if (refreshing.IsValid() && refreshing.GetIndex() == table.GetTableId().index) {
+		return;
+	}
 	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
 	DuckLakeMaterializedViewInfo staged_copy;
 	auto persisted = GetMaterializedViewByBackingTable(transaction, table.GetTableId());
@@ -1851,10 +1859,19 @@ void DuckLakeCatalog::VerifyMaterializedViewStaleRead(ClientContext &context, Du
 	if (!mv) {
 		return;
 	}
+	auto current_snapshot = transaction.GetSnapshot().snapshot_id;
 	bool stale = true;
 	if (mv->last_refreshed_snapshot.IsValid()) {
 		stale = MaterializedViewDependenciesChanged(transaction, *mv, mv->last_refreshed_snapshot.GetIndex(),
-		                                            transaction.GetSnapshot().snapshot_id);
+		                                            current_snapshot);
+	}
+	if (stale) {
+		// a refresh staged by this transaction is stamped only at commit
+		for (auto &refresh : transaction.GetRefreshedMaterializedViews()) {
+			if (refresh.view_id == mv->id && refresh.source_snapshot == current_snapshot) {
+				stale = false;
+			}
+		}
 	}
 	if (!stale) {
 		// uncommitted changes made by this transaction are invisible to the snapshot window but

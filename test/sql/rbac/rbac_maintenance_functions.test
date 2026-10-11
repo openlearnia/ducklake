@@ -1,0 +1,216 @@
+# name: test/sql/rbac/rbac_maintenance_functions.test
+# description: DuckLake RBAC - maintenance, file-registration and option functions require privileges
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_maint.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_maint_files', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+CREATE TABLE lake.t1 AS SELECT range::INTEGER AS i FROM range(10)
+
+statement ok
+CREATE TABLE lake.secret AS SELECT 'pw' || range AS s FROM range(4)
+
+statement ok
+DELETE FROM lake.t1 WHERE i = 0
+
+statement ok
+INSERT INTO lake.t1 VALUES (100)
+
+statement ok
+COPY (SELECT 42::INTEGER AS i) TO '{TEST_DIR}/rbac_maint_ext.parquet'
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'reader')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'SELECT', table_name := 't1')
+
+statement ok
+SET ducklake_role = 'reader'
+
+query I
+SELECT count(*) FROM lake.t1
+----
+10
+
+# F-R1: snapshot expiry and file cleanup are ADMIN operations
+
+statement error
+SELECT * FROM ducklake_expire_snapshots('lake', older_than => now())
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM ducklake_expire_snapshots('lake', older_than => now(), dry_run => true)
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM ducklake_cleanup_old_files('lake', cleanup_all => true)
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM ducklake_delete_orphaned_files('lake', cleanup_all => true)
+----
+does not have ADMIN privileges
+
+# F-R2: registering files inserts rows and reads arbitrary paths
+
+statement error
+SELECT * FROM ducklake_add_data_files('lake', 't1', '{TEST_DIR}/rbac_maint_ext.parquet')
+----
+does not have INSERT privilege
+
+# F-R3: options and storage maintenance
+
+statement error
+SELECT * FROM ducklake_set_option('lake', 'data_inlining_row_limit', 500)
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM ducklake_set_option('lake', 'data_inlining_row_limit', 500, table_name => 't1')
+----
+does not have ALTER privilege
+
+statement error
+SELECT * FROM ducklake_flush_inlined_data('lake')
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM ducklake_rewrite_data_files('lake')
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM ducklake_rewrite_data_files('lake', 't1')
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM ducklake_merge_adjacent_files('lake', 't1')
+----
+does not have ADMIN privileges
+
+# File paths and encryption keys of ungranted tables are not listed
+
+statement error
+SELECT * FROM ducklake_list_files('lake', 'secret')
+----
+does not have SELECT privilege
+
+query I
+SELECT count(*) > 0 FROM ducklake_list_files('lake', 't1')
+----
+true
+
+# A commit message only annotates the caller's own commit and creates no snapshot
+
+query I
+SELECT count(*) FROM ducklake_snapshots('lake')
+----
+5
+
+statement ok
+BEGIN
+
+statement ok
+SELECT * FROM ducklake_set_commit_message('lake', 'reader', 'msg')
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*) FROM ducklake_snapshots('lake')
+----
+5
+
+# INSERT alone is not enough to register external files: their paths are read as files
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'INSERT', table_name := 't1')
+
+statement ok
+SET ducklake_role = 'reader'
+
+statement error
+SELECT * FROM ducklake_add_data_files('lake', 't1', '{TEST_DIR}/rbac_maint_ext.parquet')
+----
+does not have ADMIN privileges
+
+# A grant on the table makes table-scoped options available
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'ALTER', table_name := 't1')
+
+statement ok
+SET ducklake_role = 'reader'
+
+statement ok
+SELECT * FROM ducklake_set_option('lake', 'parquet_row_group_size', 1000, table_name => 't1')
+
+# Nothing the reader attempted took effect: history and data are intact
+
+statement ok
+SET ducklake_role = 'admin'
+
+query II
+SELECT count(*), max(i) FROM lake.t1
+----
+10	100
+
+query I
+SELECT count(*) FROM lake.t1 AT (VERSION => 1)
+----
+10
+
+query I
+SELECT count(*) FROM ducklake_options('lake') WHERE option_name = 'data_inlining_row_limit' AND value = '500'
+----
+0
+
+# The admin can still run all of them
+
+statement ok
+SELECT * FROM ducklake_add_data_files('lake', 't1', '{TEST_DIR}/rbac_maint_ext.parquet')
+
+query II
+SELECT count(*), max(i) FROM lake.t1
+----
+11	100
+
+statement ok
+SELECT * FROM ducklake_flush_inlined_data('lake')
+
+statement ok
+SELECT * FROM ducklake_merge_adjacent_files('lake')
+
+statement ok
+SELECT * FROM ducklake_expire_snapshots('lake', older_than => now())
+
+statement ok
+SELECT * FROM ducklake_cleanup_old_files('lake', cleanup_all => true)
+
+query II
+SELECT count(*), max(i) FROM lake.t1
+----
+11	100

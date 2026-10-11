@@ -1,5 +1,6 @@
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "functions/ducklake_table_functions.hpp"
+#include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "common/ducklake_util.hpp"
@@ -88,6 +89,7 @@ static unique_ptr<FunctionData> DuckLakeListFilesBind(ClientContext &context, Ta
 	CatalogEntryRetriever retriever(context);
 	auto table_entry = catalog.LookupEntry(retriever, table_lookup, OnEntryNotFound::THROW_EXCEPTION).entry;
 	auto &ducklake_table = table_entry->Cast<DuckLakeTableEntry>();
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_SELECT, ducklake_table);
 	auto snapshot = transaction.GetSnapshot(at_clause.get());
 
 	// fetch the file list

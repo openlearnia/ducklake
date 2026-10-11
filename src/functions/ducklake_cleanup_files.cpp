@@ -55,6 +55,7 @@ static unique_ptr<FunctionData> CleanupBind(ClientContext &context, TableFunctio
                                             vector<LogicalType> &return_types, vector<Identifier> &names,
                                             CleanupType type) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckAdmin(context);
 	auto result = make_uniq<CleanupBindData>(catalog, type);
 
 	auto &ducklake_catalog = reinterpret_cast<DuckLakeCatalog &>(catalog);

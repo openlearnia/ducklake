@@ -89,4 +89,4 @@ $$;
 statement error
 CALL return_overflow_bigint()
 ----
-does not fit in BIGINT or UBIGINT
+out of range for the destination type INT64

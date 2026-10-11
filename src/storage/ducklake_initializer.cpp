@@ -134,6 +134,16 @@ void DuckLakeInitializer::Initialize() {
 	// top of Initialize() would now dangle.
 	auto &current_metadata_manager = transaction.GetMetadataManager();
 	current_metadata_manager.EnsureMaterializedViewRefreshColumn();
+	current_metadata_manager.EnsureProcedureSecurityColumnExists();
+	// a global ducklake_enable_rbac also covers lakes attached after it was set
+	Value enable_rbac;
+	if (context.TryGetCurrentSetting("ducklake_enable_rbac", enable_rbac) && !enable_rbac.IsNull() &&
+	    BooleanValue::Get(enable_rbac.DefaultCastAs(LogicalType::BOOLEAN))) {
+		if (!current_metadata_manager.MetadataIsReadOnly()) {
+			catalog.Rbac().EnsureMetadataTables(transaction);
+		}
+		catalog.Rbac().SetEnabled(true);
+	}
 	// probe the metadata server for optional capabilities (e.g. server-side commit retries) once per attach
 	current_metadata_manager.ProbeServerCapabilities();
 	current_metadata_manager.ClearCache();

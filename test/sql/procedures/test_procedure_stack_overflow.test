@@ -1,0 +1,61 @@
+# name: test/sql/procedures/test_procedure_stack_overflow.test
+# description: unbounded JavaScript recursion raises an error instead of overflowing the native stack
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_stack.db' AS lake (DATA_PATH '{TEST_DIR}/proc_stack_files')
+
+statement ok
+CREATE PROCEDURE lake.main.deep() RETURNS INTEGER LANGUAGE JAVASCRIPT AS $$ function f(n){ return f(n+1)+1; } return f(0); $$;
+
+statement error
+CALL lake.main.deep();
+----
+Maximum call stack size exceeded
+
+# the connection is still usable, and bounded recursion still works
+query I
+SELECT 42
+----
+42
+
+statement ok
+CREATE PROCEDURE lake.main.bounded() RETURNS INTEGER LANGUAGE JAVASCRIPT AS $$ function f(n){ return n == 0 ? 0 : f(n-1)+1; } return f(1000); $$;
+
+query I
+CALL lake.main.bounded();
+----
+1000
+
+# nested SQL runs on a helper thread with its own (smaller) stack
+statement ok
+CREATE PROCEDURE lake.main.outer_deep() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+try {
+	await duckdb.query('CALL lake.main.deep()');
+	return 'no error';
+} catch (e) {
+	return String(e).includes('Maximum call stack size exceeded') ? 'caught' : String(e);
+}
+$$;
+
+query T
+CALL lake.main.outer_deep();
+----
+caught
+
+statement ok
+SET threads = 1
+
+statement error
+CALL lake.main.deep();
+----
+Maximum call stack size exceeded
+
+query I
+SELECT 43
+----
+43

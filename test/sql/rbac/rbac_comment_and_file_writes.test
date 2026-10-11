@@ -1,0 +1,90 @@
+# name: test/sql/rbac/rbac_comment_and_file_writes.test
+# description: DuckLake RBAC - COMMENT ON needs ALTER, and writing files needs ADMIN
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_comment.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_comment_files')
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+CREATE TABLE lake.t1 AS SELECT 1 AS i
+
+statement ok
+CREATE VIEW lake.v1 AS SELECT 1 AS i
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'reader')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'SELECT', table_name := 't1')
+
+statement ok
+SET ducklake_role = 'reader'
+
+statement error
+COMMENT ON TABLE lake.t1 IS 'x'
+----
+does not have ALTER privilege
+
+statement error
+COMMENT ON COLUMN lake.t1.i IS 'x'
+----
+does not have ALTER privilege
+
+statement error
+COMMENT ON VIEW lake.v1 IS 'x'
+----
+does not have ALTER privilege
+
+statement error
+COPY lake.t1 TO '{TEST_DIR}/rbac_comment_out.csv'
+----
+does not have ADMIN privileges
+
+statement error
+COPY (SELECT 1) TO '{TEST_DIR}/rbac_comment_out2.csv'
+----
+does not have ADMIN privileges
+
+statement error
+EXPORT DATABASE lake TO '{TEST_DIR}/rbac_comment_export'
+----
+does not have ADMIN privileges
+
+# granting ALTER on the table allows its comments
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'ALTER', table_name := 't1')
+
+statement ok
+SET ducklake_role = 'reader'
+
+statement ok
+COMMENT ON TABLE lake.t1 IS 'allowed'
+
+statement ok
+SET ducklake_role = 'admin'
+
+query T
+SELECT comment FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = 't1'
+----
+allowed
+
+query T
+SELECT comment FROM duckdb_views() WHERE database_name = 'lake' AND view_name = 'v1'
+----
+NULL
+
+statement ok
+COPY lake.t1 TO '{TEST_DIR}/rbac_comment_admin.csv'

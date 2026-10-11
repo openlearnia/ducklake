@@ -1,0 +1,147 @@
+# name: test/sql/rbac/rbac_transaction_local_role.test
+# description: DuckLake RBAC - SET LOCAL ducklake_role binds the role to one transaction, so a reused connection does not inherit it
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_txrole.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_txrole_files', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+CREATE TABLE lake.secret AS SELECT 'pw' || range AS s FROM range(4)
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'reader')
+
+statement ok
+RESET ducklake_role
+
+# A pooled connection serves an admin request, then an anonymous one
+statement ok con1
+BEGIN
+
+statement ok con1
+SET LOCAL ducklake_role = 'admin'
+
+query I con1
+SELECT count(*) FROM lake.secret
+----
+4
+
+statement ok con1
+COMMIT
+
+statement error con1
+SELECT count(*) FROM lake.secret
+----
+Role "PUBLIC" does not have SELECT privilege
+
+# Rollback restores the previous session role as well
+statement ok con1
+SET ducklake_role = 'reader'
+
+statement ok con1
+BEGIN
+
+statement ok con1
+SET LOCAL ducklake_role = 'admin'
+
+query I con1
+SELECT count(*) FROM lake.secret
+----
+4
+
+statement ok con1
+ROLLBACK
+
+query T con1
+SELECT current_setting('ducklake_role')
+----
+reader
+
+# An error that aborts the transaction still restores the role
+statement ok con1
+BEGIN
+
+statement ok con1
+SET LOCAL ducklake_role = 'admin'
+
+statement error con1
+SELECT 1/0::INTEGER, error('boom')
+----
+boom
+
+statement ok con1
+ROLLBACK
+
+statement error con1
+SELECT count(*) FROM lake.secret
+----
+Role "reader" does not have SELECT privilege
+
+# A session-scope SET inside the transaction outlives it
+statement ok con1
+BEGIN
+
+statement ok con1
+SET LOCAL ducklake_role = 'admin'
+
+statement ok con1
+SET ducklake_role = 'admin'
+
+statement ok con1
+COMMIT
+
+query T con1
+SELECT current_setting('ducklake_role')
+----
+admin
+
+statement ok con1
+RESET ducklake_role
+
+# Other connections never see another connection's transaction-local role
+statement ok con1
+BEGIN
+
+statement ok con1
+SET LOCAL ducklake_role = 'admin'
+
+statement error con2
+SELECT count(*) FROM lake.secret
+----
+Role "PUBLIC" does not have SELECT privilege
+
+statement ok con1
+COMMIT
+
+# SET LOCAL needs an explicit transaction
+statement error con1
+SET LOCAL ducklake_role = 'admin'
+----
+SET LOCAL can only be used in transaction blocks
+
+statement error con1
+SELECT count(*) FROM lake.secret
+----
+Role "PUBLIC" does not have SELECT privilege
+
+# Settings with set callbacks cannot be restored safely and are refused
+statement ok con1
+BEGIN
+
+statement error con1
+SET LOCAL ducklake_mv_stale_read = 'error'
+----
+SET LOCAL is not supported for setting
+
+statement ok con1
+ROLLBACK

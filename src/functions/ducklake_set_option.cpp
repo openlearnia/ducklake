@@ -105,6 +105,7 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 		    context, DuckLakeUtil::QualifiedEntryName(context, catalog, schema, table),
 		    OnEntryNotFound::THROW_EXCEPTION);
 		auto &ducklake_table = table_catalog_entry->Cast<DuckLakeTableEntry>();
+		catalog.Cast<DuckLakeCatalog>().Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_ALTER, ducklake_table);
 		config_option.table_id = ducklake_table.GetTableId();
 		if (IsTransactionLocal(config_option.table_id)) {
 			throw NotImplementedException("Settings cannot be set for transaction-local tables");
@@ -130,10 +131,13 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 	} else if (!schema.empty()) {
 		auto &schema_catalog_entry = DuckLakeUtil::GetSchema(context, catalog, schema);
 		auto &ducklake_schema = schema_catalog_entry.Cast<DuckLakeSchemaEntry>();
+		catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_ALTER, ducklake_schema);
 		config_option.schema_id = ducklake_schema.GetSchemaId();
 		if (config_option.schema_id.IsTransactionLocal()) {
 			throw NotImplementedException("Settings cannot be set for transaction-local schemas");
 		}
+	} else {
+		catalog.Cast<DuckLakeCatalog>().Rbac().CheckAdmin(context);
 	}
 
 	return_types.push_back(LogicalType::BOOLEAN);

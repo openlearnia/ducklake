@@ -6,6 +6,7 @@
 #include "storage/ducklake_schema_entry.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_insert.hpp"
+#include "storage/ducklake_field_data.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
@@ -622,23 +623,73 @@ public:
 	bool returned_result;
 };
 
+//! A materialized view whose backing table and metadata are created when the plan executes, so that
+//! PREPARE and EXPLAIN have no catalog side effects
+struct DuckLakeMVPendingCreate {
+	explicit DuckLakeMVPendingCreate(DuckLakeSchemaEntry &schema_p) : schema(schema_p) {
+	}
+
+	DuckLakeSchemaEntry &schema;
+	unique_ptr<BoundCreateTableInfo> create_info;
+	string table_uuid;
+	string table_data_path;
+	//! staged metadata, completed with ids and the snapshot at execution
+	DuckLakeMaterializedViewInfo mv_info;
+};
+
+static void CheckMaterializedViewNameAvailable(ClientContext &context, DuckLakeCatalog &catalog,
+                                               DuckLakeTransaction &transaction, DuckLakeSchemaEntry &schema,
+                                               const string &view_name) {
+	auto schema_name = schema.name.GetIdentifierName();
+	bool materialized_view_exists = catalog.GetMaterializedViewByName(transaction, schema_name, view_name) != nullptr;
+	for (auto &staged : transaction.GetNewMaterializedViews()) {
+		if (staged.schema_id == schema.GetSchemaId() && StringUtil::CIEquals(staged.name, view_name)) {
+			materialized_view_exists = true;
+			break;
+		}
+	}
+	if (materialized_view_exists) {
+		throw CatalogException("Materialized view \"%s.%s\" already exists!", schema_name, view_name);
+	}
+	auto existing_entry =
+	    schema.GetEntry(catalog.GetCatalogTransaction(context), CatalogType::TABLE_ENTRY, Identifier(view_name));
+	if (existing_entry) {
+		throw CatalogException("%s with name \"%s\" already exists!", CatalogTypeToString(existing_entry->type),
+		                       view_name);
+	}
+}
+
+class DuckLakeMVRefreshGlobalState : public DuckLakeInsertGlobalState {
+public:
+	DuckLakeMVRefreshGlobalState(DuckLakeTableEntry &table, TableIndex mv_view_id_p, bool txn_wrote_dependencies_p)
+	    : DuckLakeInsertGlobalState(table), mv_view_id(mv_view_id_p), txn_wrote_dependencies(txn_wrote_dependencies_p) {
+	}
+
+	TableIndex mv_view_id;
+	bool txn_wrote_dependencies;
+};
+
 //! Terminal operator of a materialized view create/refresh: collects the files written by the
 //! copy operator, retires the previous backing files (refresh only) and appends the new files -
 //! all staged on the transaction so the swap is atomic in the resulting snapshot.
 class DuckLakeMVRefresh : public PhysicalOperator {
 public:
-	DuckLakeMVRefresh(PhysicalPlan &physical_plan, const vector<LogicalType> &types, DuckLakeTableEntry &table_p,
+	DuckLakeMVRefresh(PhysicalPlan &physical_plan, const vector<LogicalType> &types,
+	                  optional_ptr<DuckLakeTableEntry> table_p, shared_ptr<DuckLakeMVPendingCreate> pending_create_p,
 	                  TableIndex mv_view_id_p, string encryption_key_p, optional_idx partition_id_p,
 	                  string refresh_mode_p, string logical_diff_sql_p, bool txn_wrote_dependencies_p,
 	                  PhysicalOperator &child)
-	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 0), table(table_p),
-	      mv_view_id(mv_view_id_p), encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
+	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 0), existing_table(table_p),
+	      pending_create(std::move(pending_create_p)), mv_view_id(mv_view_id_p),
+	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
 	      refresh_mode(std::move(refresh_mode_p)), logical_diff_sql(std::move(logical_diff_sql_p)),
 	      txn_wrote_dependencies(txn_wrote_dependencies_p), refresh_start_ms(RefreshClockMillis()) {
 		children.push_back(child);
 	}
 
-	DuckLakeTableEntry &table;
+	//! the backing table of a refreshed view; unset when the plan creates the view
+	optional_ptr<DuckLakeTableEntry> existing_table;
+	shared_ptr<DuckLakeMVPendingCreate> pending_create;
 	TableIndex mv_view_id;
 	string encryption_key;
 	optional_idx partition_id;
@@ -664,14 +715,44 @@ public:
 		source_state.returned_result = true;
 		auto &gstate = sink_state->Cast<DuckLakeInsertGlobalState>();
 		chunk.SetCardinality(1);
-		chunk.SetValue(0, 0, Value(table.schema.name));
-		chunk.SetValue(1, 0, Value(table.name));
+		chunk.SetValue(0, 0, Value(gstate.table.schema.name));
+		chunk.SetValue(1, 0, Value(gstate.table.name));
 		chunk.SetValue(2, 0, Value::BIGINT(NumericCast<int64_t>(gstate.rows_flushed)));
 		return SourceResultType::FINISHED;
 	}
 
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
-		return make_uniq<DuckLakeInsertGlobalState>(table);
+		if (!pending_create) {
+			return make_uniq<DuckLakeMVRefreshGlobalState>(*existing_table.get_mutable(), mv_view_id,
+			                                               txn_wrote_dependencies);
+		}
+		auto &pending = *pending_create;
+		auto &catalog = pending.schema.ParentCatalog().Cast<DuckLakeCatalog>();
+		auto &transaction = DuckLakeTransaction::Get(context, catalog);
+		CheckMaterializedViewNameAvailable(context, catalog, transaction, pending.schema, pending.mv_info.name);
+		auto entry = pending.schema.CreateTableExtended(catalog.GetCatalogTransaction(context), *pending.create_info,
+		                                                pending.table_uuid, pending.table_data_path);
+		if (!entry) {
+			throw InvalidInputException("Failed to create backing table for materialized view \"%s\"",
+			                            pending.mv_info.name);
+		}
+		auto &table = entry->Cast<DuckLakeTableEntry>();
+		auto mv_info = pending.mv_info;
+		mv_info.id = TableIndex(transaction.GetLocalCatalogId());
+		mv_info.backing_table_id = table.GetTableId();
+		mv_info.last_refreshed_snapshot = transaction.GetSnapshot().snapshot_id;
+		// the creating transaction's own dependency writes are incorporated into the initial content:
+		// mark it so the next refresh recomputes instead of delta-applying them again
+		bool create_txn_wrote_dependencies = false;
+		for (auto &dependency : mv_info.dependencies) {
+			if (dependency.IsTransactionLocal() || transaction.HasAnyLocalChanges(dependency)) {
+				create_txn_wrote_dependencies = true;
+				break;
+			}
+		}
+		auto view_id = mv_info.id;
+		transaction.CreateMaterializedView(std::move(mv_info));
+		return make_uniq<DuckLakeMVRefreshGlobalState>(table, view_id, create_txn_wrote_dependencies);
 	}
 
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
@@ -682,7 +763,8 @@ public:
 
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override {
-		auto &global_state = input.global_state.Cast<DuckLakeInsertGlobalState>();
+		auto &global_state = input.global_state.Cast<DuckLakeMVRefreshGlobalState>();
+		auto &table = global_state.table;
 		auto &transaction = DuckLakeTransaction::Get(context, table.catalog);
 		auto snapshot = transaction.GetSnapshot();
 		auto table_id = table.GetTableId();
@@ -724,7 +806,7 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 			global_state.rows_flushed += file.row_count;
 		}
 		DuckLakeMaterializedViewRefreshInfo refresh;
-		refresh.view_id = mv_view_id;
+		refresh.view_id = global_state.mv_view_id;
 		refresh.refresh_mode = refresh_mode;
 		refresh.rows_refreshed = global_state.rows_flushed;
 		refresh.refresh_duration_ms = RefreshClockMillis() - refresh_start_ms;
@@ -742,7 +824,7 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 			refresh.rows_changed = NumericCast<idx_t>(diff.GetValue(2, 0).GetValue<int64_t>());
 		}
 		transaction.AppendFiles(table_id, std::move(global_state.written_files));
-		refresh.txn_wrote_dependencies = txn_wrote_dependencies;
+		refresh.txn_wrote_dependencies = global_state.txn_wrote_dependencies;
 		refresh.source_snapshot = snapshot.snapshot_id;
 		timestamp_tz_t source_time;
 		if (GetSnapshotTime(transaction, snapshot, source_time)) {
@@ -773,17 +855,19 @@ WHERE table_id=%d AND {SNAPSHOT_ID} >= begin_snapshot
 
 class DuckLakeLogicalMVRefresh : public LogicalExtensionOperator {
 public:
-	DuckLakeLogicalMVRefresh(TableIndex table_index_p, DuckLakeTableEntry &table_p, TableIndex mv_view_id_p,
+	DuckLakeLogicalMVRefresh(TableIndex table_index_p, optional_ptr<DuckLakeTableEntry> table_p,
+	                         shared_ptr<DuckLakeMVPendingCreate> pending_create_p, TableIndex mv_view_id_p,
 	                         string encryption_key_p, optional_idx partition_id_p, string refresh_mode_p,
 	                         string logical_diff_sql_p, bool txn_wrote_dependencies_p)
-	    : table_index(table_index_p), table(table_p), mv_view_id(mv_view_id_p),
-	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
+	    : table_index(table_index_p), table(table_p), pending_create(std::move(pending_create_p)),
+	      mv_view_id(mv_view_id_p), encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p),
 	      refresh_mode(std::move(refresh_mode_p)), logical_diff_sql(std::move(logical_diff_sql_p)),
 	      txn_wrote_dependencies(txn_wrote_dependencies_p) {
 	}
 
 	TableIndex table_index;
-	DuckLakeTableEntry &table;
+	optional_ptr<DuckLakeTableEntry> table;
+	shared_ptr<DuckLakeMVPendingCreate> pending_create;
 	TableIndex mv_view_id;
 	string encryption_key;
 	optional_idx partition_id;
@@ -794,8 +878,8 @@ public:
 public:
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
 		auto &child = planner.CreatePlan(*children[0]);
-		return planner.Make<DuckLakeMVRefresh>(types, table, mv_view_id, std::move(encryption_key), partition_id,
-		                                       std::move(refresh_mode), std::move(logical_diff_sql),
+		return planner.Make<DuckLakeMVRefresh>(types, table, pending_create, mv_view_id, std::move(encryption_key),
+		                                       partition_id, std::move(refresh_mode), std::move(logical_diff_sql),
 		                                       txn_wrote_dependencies, child);
 	}
 
@@ -827,18 +911,17 @@ public:
 //! Wrap a bound plan producing the materialized view content with the write pipeline:
 //! plan -> (casts) -> copy-to-files -> MV refresh operator -> projection.
 //! The projection emits (schema_name, view_name, refresh_mode, rows_refreshed).
-static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Binder &binder, TableIndex bind_index,
-                                                    unique_ptr<LogicalOperator> plan, DuckLakeTableEntry &table,
-                                                    TableIndex mv_view_id, const string &schema_name,
-                                                    const string &view_name, const string &refresh_mode,
-                                                    const string &logical_diff_sql, bool txn_wrote_dependencies,
-                                                    vector<Identifier> &return_names) {
+static unique_ptr<LogicalOperator>
+BuildMVWritePlan(ClientContext &context, Binder &binder, TableIndex bind_index, unique_ptr<LogicalOperator> plan,
+                 DuckLakeCopyInput &copy_input, optional_ptr<DuckLakeTableEntry> table,
+                 shared_ptr<DuckLakeMVPendingCreate> pending_create, TableIndex mv_view_id, const string &schema_name,
+                 const string &view_name, const string &refresh_mode, const string &logical_diff_sql,
+                 bool txn_wrote_dependencies, vector<Identifier> &return_names) {
 	plan->ResolveOperatorTypes();
 	if (DuckLakeTypes::RequiresCast(plan->types)) {
 		plan = DuckLakeInsert::InsertCasts(binder, plan);
 	}
 
-	DuckLakeCopyInput copy_input(context, table);
 	auto copy_options = DuckLakeInsert::GetCopyOptions(context, copy_input);
 
 	if (!copy_options.projection_list.empty()) {
@@ -871,9 +954,9 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 	copy->children.push_back(std::move(plan));
 
 	TableIndex mv_index = binder.GenerateTableIndex();
-	auto mv_op =
-	    make_uniq<DuckLakeLogicalMVRefresh>(mv_index, table, mv_view_id, std::move(copy_input.encryption_key),
-	                                        optional_idx(), refresh_mode, logical_diff_sql, txn_wrote_dependencies);
+	auto mv_op = make_uniq<DuckLakeLogicalMVRefresh>(mv_index, table, std::move(pending_create), mv_view_id,
+	                                                 std::move(copy_input.encryption_key), optional_idx(), refresh_mode,
+	                                                 logical_diff_sql, txn_wrote_dependencies);
 	mv_op->children.push_back(std::move(copy));
 	mv_op->ResolveOperatorTypes();
 
@@ -891,6 +974,19 @@ static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Bind
 	return_names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_mode"),
 	                Identifier("rows_refreshed")};
 	return std::move(projection);
+}
+
+//! Write plan refreshing the existing backing table of a view
+static unique_ptr<LogicalOperator> BuildMVWritePlan(ClientContext &context, Binder &binder, TableIndex bind_index,
+                                                    unique_ptr<LogicalOperator> plan, DuckLakeTableEntry &table,
+                                                    TableIndex mv_view_id, const string &schema_name,
+                                                    const string &view_name, const string &refresh_mode,
+                                                    const string &logical_diff_sql, bool txn_wrote_dependencies,
+                                                    vector<Identifier> &return_names) {
+	DuckLakeCopyInput copy_input(context, table);
+	return BuildMVWritePlan(context, binder, bind_index, std::move(plan), copy_input, table, nullptr, mv_view_id,
+	                        schema_name, view_name, refresh_mode, logical_diff_sql, txn_wrote_dependencies,
+	                        return_names);
 }
 
 //! Result row for statements that do not execute a plan (skip / drop).
@@ -919,6 +1015,23 @@ static unique_ptr<LogicalOperator> BindDefinitionPlan(Binder &parent_binder, Cli
 	auto binder = Binder::CreateBinder(context, &parent_binder);
 	auto &sql_statement = static_cast<SQLStatement &>(*statement);
 	return binder->Bind(sql_statement).plan;
+}
+
+//! Bind refresh SQL that reads the view's own backing table, exempting that read from the stale-read guard
+static unique_ptr<LogicalOperator> BindRefreshPlan(Binder &parent_binder, ClientContext &context,
+                                                   DuckLakeTransaction &transaction, DuckLakeTableEntry &backing,
+                                                   const string &sql, const string &error_context) {
+	auto &refreshing = transaction.RefreshingBackingTable();
+	auto previous = refreshing;
+	refreshing = optional_idx(backing.GetTableId().index);
+	try {
+		auto plan = BindDefinitionPlan(parent_binder, context, sql, error_context);
+		refreshing = previous;
+		return plan;
+	} catch (...) {
+		refreshing = previous;
+		throw;
+	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -1075,25 +1188,9 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 	    ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
 	auto &dl_schema = schema_entry.Cast<DuckLakeSchemaEntry>();
 	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_CREATE, dl_schema);
+	CheckMaterializedViewNameAvailable(context, ducklake_catalog, transaction, dl_schema, view_name);
 
-	bool materialized_view_exists =
-	    ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name) != nullptr;
-	for (auto &staged : transaction.GetNewMaterializedViews()) {
-		if (staged.schema_id == dl_schema.GetSchemaId() && StringUtil::CIEquals(staged.name, view_name)) {
-			materialized_view_exists = true;
-			break;
-		}
-	}
-	if (materialized_view_exists) {
-		throw CatalogException("Materialized view \"%s.%s\" already exists!", schema, view_name);
-	}
-	auto existing_entry = dl_schema.GetEntry(ducklake_catalog.GetCatalogTransaction(context), CatalogType::TABLE_ENTRY,
-	                                         Identifier(view_name));
-	if (existing_entry) {
-		throw CatalogException("%s with name \"%s\" already exists!", CatalogTypeToString(existing_entry->type),
-		                       view_name);
-	}
-
+	auto pending = make_shared_ptr<DuckLakeMVPendingCreate>(dl_schema);
 	auto mv_uuid = UUID::ToString(UUID::GenerateRandomUUID());
 	auto backing_table_name = DuckLakeUtil::MaterializedViewBackingTableName(mv_uuid);
 
@@ -1109,50 +1206,31 @@ static unique_ptr<LogicalOperator> CreateMaterializedViewBind(ClientContext &con
 		create_info->columns.AddColumn(ColumnDefinition(Identifier(column_names[i]), bound.types[i]));
 	}
 	auto table_binder = Binder::CreateBinder(context, input.binder);
-	auto bound_create = table_binder->BindCreateTableInfo(std::move(create_info));
+	pending->create_info = table_binder->BindCreateTableInfo(std::move(create_info));
+	pending->table_uuid = transaction.GenerateUUID();
+	pending->table_data_path =
+	    dl_schema.DataPath() + ducklake_catalog.GeneratePathFromName(pending->table_uuid, backing_table_name);
 
-	auto table_uuid = transaction.GenerateUUID();
-	auto table_data_path = dl_schema.DataPath() + ducklake_catalog.GeneratePathFromName(table_uuid, backing_table_name);
-	auto entry = dl_schema.CreateTableExtended(ducklake_catalog.GetCatalogTransaction(context), *bound_create,
-	                                           table_uuid, table_data_path);
-	if (!entry) {
-		throw InvalidInputException("Failed to create backing table for materialized view \"%s\"", view_name);
-	}
-	auto &table = entry->Cast<DuckLakeTableEntry>();
-
-	// stage the materialized view metadata
-	DuckLakeMaterializedViewInfo mv_info;
-	mv_info.id = TableIndex(transaction.GetLocalCatalogId());
+	auto &mv_info = pending->mv_info;
 	mv_info.schema_id = dl_schema.GetSchemaId();
 	mv_info.uuid = std::move(mv_uuid);
 	mv_info.name = view_name;
 	mv_info.dialect = "duckdb";
 	mv_info.sql =
 	    DuckLakeUtil::ReplaceSkippingQuotes(stored_sql, ducklake_catalog.GetName() + ".", "{DUCKLAKE_CATALOG}.");
-	mv_info.backing_table_id = table.GetTableId();
-	mv_info.last_refreshed_snapshot = transaction.GetSnapshot().snapshot_id;
-
-	// resolve dependencies from the parsed statement (all base tables referenced anywhere in the FROM)
+	// all base tables referenced anywhere in the FROM
 	mv_info.dependencies = dependencies;
 	mv_info.has_external_dependencies = has_external_dependencies;
-	transaction.CreateMaterializedView(std::move(mv_info));
 
-	// write the initial content: definition plan -> files -> refresh operator
-	auto plan = std::move(bound.plan);
+	// write the initial content: definition plan -> files -> refresh operator, which creates the view
+	auto &columns = pending->create_info->Base().columns;
+	auto field_data = DuckLakeFieldData::FromColumns(columns);
+	DuckLakeCopyInput copy_input(context, dl_schema, columns, pending->table_data_path, *field_data);
 	auto logical_diff_sql = BuildLogicalDiffSQL(string(), ResolveMaterializedViewSQL(stored_sql, ducklake_catalog),
 	                                            bound.names, analysis.key_positions);
-	// the creating transaction's own dependency writes were incorporated into the initial
-	// content: mark it so the next refresh recomputes instead of delta-applying them again
-	bool create_txn_wrote_dependencies = false;
-	for (auto &dependency : transaction.GetNewMaterializedViews().back().dependencies) {
-		if (dependency.IsTransactionLocal() || transaction.HasAnyLocalChanges(dependency)) {
-			create_txn_wrote_dependencies = true;
-			break;
-		}
-	}
-	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(plan), table,
-	                        transaction.GetNewMaterializedViews().back().id, schema, view_name, "full",
-	                        logical_diff_sql, create_txn_wrote_dependencies, return_names);
+	return BuildMVWritePlan(context, *input.binder, bind_index, std::move(bound.plan), copy_input, nullptr,
+	                        std::move(pending), TableIndex(), schema, view_name, "full", logical_diff_sql, false,
+	                        return_names);
 }
 
 DuckLakeCreateMaterializedViewFunction::DuckLakeCreateMaterializedViewFunction()
@@ -1474,8 +1552,14 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 		if (!extremum_deleted.empty()) {
 			extremum_deleted += " OR ";
 		}
-		extremum_deleted += StringUtil::Format("c.__m%d IS NOT DISTINCT FROM __mv.%s", a,
-		                                       SQLIdentifier(bound_column_names[agg.select_index]));
+		// a deleted value at or beyond the new candidate (stored extremum combined with the window's
+		// inserts) may be that candidate: an in-window insert that was deleted again, or a stored tie
+		auto column = SQLIdentifier(bound_column_names[agg.select_index]);
+		auto fn = agg.kind == MVAggKind::MIN ? "LEAST" : "GREATEST";
+		auto cmp = agg.kind == MVAggKind::MIN ? "<=" : ">=";
+		extremum_deleted +=
+		    StringUtil::Format("c.__m%d IS NOT DISTINCT FROM __mv.%s OR c.__m%d %s %s(__mv.%s, d.__d%d)", a, column, a,
+		                       cmp, fn, column, a);
 	}
 	// deleted-state conditions that make a delta unsafe: deleted min/max extrema, and
 	// deleted nonfinite floating summands
@@ -1488,14 +1572,17 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 	}
 	string invalid_columns;
 	string invalid_select;
+	string invalid_delta_join;
 	string rebuild_condition;
 	for (idx_t i = 0; i < analysis.key_positions.size(); i++) {
 		if (i > 0) {
 			invalid_columns += ", ";
 			invalid_select += ", ";
+			invalid_delta_join += " AND ";
 			rebuild_condition += " AND ";
 		}
 		invalid_columns += StringUtil::Format("__k%d", i);
+		invalid_delta_join += StringUtil::Format("c.__k%d IS NOT DISTINCT FROM d.__k%d", i, i);
 		invalid_select += StringUtil::Format("c.__k%d", i);
 		rebuild_condition += StringUtil::Format("ik.__k%d IS NOT DISTINCT FROM %s", i, analysis.key_expr_sql[i]);
 	}
@@ -1518,7 +1605,7 @@ __deltas AS (
 	SELECT %s, %s FROM __cdc GROUP BY %s
 ),
 __invalid(%s) AS (
-	SELECT DISTINCT %s FROM __cdc c JOIN %s AS __mv ON %s
+	SELECT DISTINCT %s FROM __cdc c JOIN __deltas d ON %s LEFT JOIN %s AS __mv ON %s
 	WHERE c.__sgn = -1 AND (%s)
 )
 SELECT * FROM (%s) UNION ALL SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
@@ -1526,8 +1613,8 @@ SELECT * FROM (%s) UNION ALL SELECT * FROM (%s) UNION ALL SELECT * FROM (%s)
 	                          cte_columns, cdc_key_select, ins_call, base_alias, cdc_where, cdc_key_select, del_call,
 	                          base_alias, cdc_where, cdc_key_select, ins_measures, ins_call, base_alias, cdc_where,
 	                          cdc_key_select, del_measures, del_call, base_alias, cdc_where, cte_columns, delta_aggs,
-	                          cte_columns, invalid_columns, invalid_select, mv_ref, invalid_key_join, deleted_unsafe,
-	                          kept, updated, rebuild);
+	                          cte_columns, invalid_columns, invalid_select, invalid_delta_join, mv_ref,
+	                          invalid_key_join, deleted_unsafe, kept, updated, rebuild);
 }
 
 //! Build the incremental refresh SQL:
@@ -1889,7 +1976,8 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 				auto bound = binder->Bind(sql_statement);
 				auto join_sql = BuildJoinIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 				                                               last_refreshed + 1, current_snapshot);
-				auto join_plan = BindDefinitionPlan(*input.binder, context, join_sql, "join-incremental refresh");
+				auto join_plan =
+				    BindRefreshPlan(*input.binder, context, transaction, *table, join_sql, "join-incremental refresh");
 				auto logical_diff_sql =
 				    BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name), join_sql,
 				                        bound.names, analysis.key_positions);
@@ -1923,7 +2011,7 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 		    analysis.aggregates.size() + analysis.key_positions.size() == bound.names.size()) {
 			auto delta_sql = BuildDeltaRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names, bound.types,
 			                                      last_refreshed + 1, current_snapshot);
-			auto delta_plan = BindDefinitionPlan(*input.binder, context, delta_sql, "delta refresh");
+			auto delta_plan = BindRefreshPlan(*input.binder, context, transaction, *table, delta_sql, "delta refresh");
 			auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
 			                                            delta_sql, bound.names, analysis.key_positions);
 			return BuildMVWritePlan(context, *input.binder, bind_index, std::move(delta_plan), *table, mv->id, schema,
@@ -1931,7 +2019,8 @@ static unique_ptr<LogicalOperator> RefreshMaterializedViewBind(ClientContext &co
 		}
 		auto incremental_sql = BuildIncrementalRefreshSQL(ducklake_catalog, *mv, schema, analysis, bound.names,
 		                                                  last_refreshed + 1, current_snapshot);
-		auto incremental_plan = BindDefinitionPlan(*input.binder, context, incremental_sql, "incremental refresh");
+		auto incremental_plan =
+		    BindRefreshPlan(*input.binder, context, transaction, *table, incremental_sql, "incremental refresh");
 		auto logical_diff_sql = BuildLogicalDiffSQL(MaterializedViewReference(ducklake_catalog, schema, view_name),
 		                                            incremental_sql, bound.names, analysis.key_positions);
 		return BuildMVWritePlan(context, *input.binder, bind_index, std::move(incremental_plan), *table, mv->id, schema,
@@ -1959,9 +2048,125 @@ DuckLakeRefreshMaterializedViewFunction::DuckLakeRefreshMaterializedViewFunction
 // Drop
 //===--------------------------------------------------------------------===//
 
+//! A view staged in this transaction, else the persisted one
+static unique_ptr<DuckLakeMaterializedViewInfo> FindMaterializedView(DuckLakeCatalog &catalog,
+                                                                     DuckLakeTransaction &transaction,
+                                                                     DuckLakeSchemaEntry &schema,
+                                                                     const string &view_name) {
+	for (auto &staged : transaction.GetNewMaterializedViews()) {
+		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema.GetSchemaId()) {
+			return make_uniq<DuckLakeMaterializedViewInfo>(staged);
+		}
+	}
+	return catalog.GetMaterializedViewByName(transaction, schema.name.GetIdentifierName(), view_name);
+}
+
+static DuckLakeSchemaEntry &GetDropSchema(ClientContext &context, DuckLakeCatalog &catalog, const string &schema) {
+	auto &schema_entry = catalog.GetSchema(catalog.GetCatalogTransaction(context), Identifier(schema));
+	return schema_entry.Cast<DuckLakeSchemaEntry>();
+}
+
+//! Drops the backing table and the view metadata when executed
+class DuckLakeMVDrop : public PhysicalOperator {
+public:
+	DuckLakeMVDrop(PhysicalPlan &physical_plan, const vector<LogicalType> &types, DuckLakeCatalog &catalog_p,
+	               string schema_p, string view_name_p)
+	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 1), catalog(catalog_p),
+	      schema(std::move(schema_p)), view_name(std::move(view_name_p)) {
+	}
+
+	DuckLakeCatalog &catalog;
+	string schema;
+	string view_name;
+
+public:
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
+		return make_uniq<DuckLakeMVRefreshSourceState>();
+	}
+
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override {
+		auto &source_state = input.global_state.Cast<DuckLakeMVRefreshSourceState>();
+		if (source_state.returned_result) {
+			return SourceResultType::FINISHED;
+		}
+		source_state.returned_result = true;
+		auto &client = context.client;
+		auto &transaction = DuckLakeTransaction::Get(client, catalog);
+		auto &schema_entry = GetDropSchema(client, catalog, schema);
+		catalog.Rbac().CheckSchemaPrivilege(client, DUCKLAKE_PRIVILEGE_DROP, schema_entry);
+		auto mv = FindMaterializedView(catalog, transaction, schema_entry, view_name);
+		if (!mv) {
+			throw InvalidInputException("Materialized view \"%s.%s\" does not exist", schema, view_name);
+		}
+		// drop the backing table through the regular table drop path
+		optional_ptr<CatalogEntry> backing = transaction.GetCurrentLocalTableById(mv->backing_table_id);
+		if (!backing && !mv->backing_table_id.IsTransactionLocal()) {
+			backing = catalog.GetEntryById(transaction, transaction.GetSnapshot(), mv->backing_table_id);
+		}
+		if (backing) {
+			transaction.DropTable(backing->Cast<DuckLakeTableEntry>());
+		}
+		transaction.DropMaterializedView(mv->id);
+		chunk.SetCardinality(1);
+		chunk.SetValue(0, 0, Value(schema));
+		chunk.SetValue(1, 0, Value(view_name));
+		chunk.SetValue(2, 0, Value("dropped"));
+		chunk.SetValue(3, 0, Value::BIGINT(0));
+		return SourceResultType::FINISHED;
+	}
+
+	string GetName() const override {
+		return "DUCKLAKE_MV_DROP";
+	}
+
+	bool IsSource() const override {
+		return true;
+	}
+};
+
+class DuckLakeLogicalMVDrop : public LogicalExtensionOperator {
+public:
+	DuckLakeLogicalMVDrop(TableIndex table_index_p, DuckLakeCatalog &catalog_p, string schema_p, string view_name_p)
+	    : table_index(table_index_p), catalog(catalog_p), schema(std::move(schema_p)),
+	      view_name(std::move(view_name_p)) {
+	}
+
+	TableIndex table_index;
+	DuckLakeCatalog &catalog;
+	string schema;
+	string view_name;
+
+public:
+	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
+		return planner.Make<DuckLakeMVDrop>(types, catalog, schema, view_name);
+	}
+
+	string GetName() const override {
+		return "DUCKLAKE_MV_DROP";
+	}
+
+	string GetExtensionName() const override {
+		return "ducklake";
+	}
+
+	vector<ColumnBinding> GetColumnBindings() override {
+		vector<ColumnBinding> result;
+		for (idx_t i = 0; i < 4; i++) {
+			result.emplace_back(table_index, ProjectionIndex(i));
+		}
+		return result;
+	}
+
+	void ResolveTypes() override {
+		types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT};
+	}
+};
+
 static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &context, TableFunctionBindInput &input,
                                                             TableIndex bind_index, vector<Identifier> &return_names) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input, false);
+	input.binder->SetAlwaysRequireRebind();
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 
@@ -1972,41 +2177,16 @@ static unique_ptr<LogicalOperator> DropMaterializedViewBind(ClientContext &conte
 	}
 	auto view_name = StringValue::Get(input.named_parameters["view_name"]);
 
-	optional_ptr<const DuckLakeMaterializedViewInfo> mv;
-	DuckLakeMaterializedViewInfo staged_copy;
-	unique_ptr<DuckLakeMaterializedViewInfo> persisted_mv;
-	auto &schema_entry =
-	    ducklake_catalog.GetSchema(ducklake_catalog.GetCatalogTransaction(context), Identifier(schema));
-	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_DROP,
-	                                             schema_entry.Cast<DuckLakeSchemaEntry>());
-	auto schema_id = schema_entry.Cast<DuckLakeSchemaEntry>().GetSchemaId();
-	for (auto &staged : transaction.GetNewMaterializedViews()) {
-		if (StringUtil::CIEquals(staged.name, view_name) && staged.schema_id == schema_id) {
-			staged_copy = staged;
-			mv = &staged_copy;
-			break;
-		}
+	auto &schema_entry = GetDropSchema(context, ducklake_catalog, schema);
+	ducklake_catalog.Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_DROP, schema_entry);
+	if (!FindMaterializedView(ducklake_catalog, transaction, schema_entry, view_name)) {
+		throw InvalidInputException("Materialized view \"%s.%s\" does not exist", schema, view_name);
 	}
-	if (!mv) {
-		persisted_mv = ducklake_catalog.GetMaterializedViewByName(transaction, schema, view_name);
-		if (!persisted_mv) {
-			throw InvalidInputException("Materialized view \"%s.%s\" does not exist", schema, view_name);
-		}
-		mv = persisted_mv.get();
-	}
-
-	// drop the backing table through the regular table drop path
-	auto snapshot = transaction.GetSnapshot();
-	optional_ptr<CatalogEntry> backing;
-	backing = transaction.GetCurrentLocalTableById(mv->backing_table_id);
-	if (!backing && !mv->backing_table_id.IsTransactionLocal()) {
-		backing = ducklake_catalog.GetEntryById(transaction, snapshot, mv->backing_table_id);
-	}
-	if (backing) {
-		transaction.DropTable(backing->Cast<DuckLakeTableEntry>());
-	}
-	transaction.DropMaterializedView(mv->id);
-	return BuildConstantResult(bind_index, schema, view_name, "dropped", 0, return_names);
+	auto drop = make_uniq<DuckLakeLogicalMVDrop>(bind_index, ducklake_catalog, schema, view_name);
+	drop->ResolveOperatorTypes();
+	return_names = {Identifier("schema_name"), Identifier("view_name"), Identifier("refresh_mode"),
+	                Identifier("rows_refreshed")};
+	return std::move(drop);
 }
 
 DuckLakeDropMaterializedViewFunction::DuckLakeDropMaterializedViewFunction()

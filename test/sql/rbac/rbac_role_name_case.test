@@ -1,0 +1,116 @@
+# name: test/sql/rbac/rbac_role_name_case.test
+# description: DuckLake RBAC - role names are case-insensitive for lookup, grant, revoke and drop
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_case.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_case_files', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+CREATE TABLE lake.secret AS SELECT 'pw' || range AS s FROM range(4)
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'Analyst')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'Analyst', 'SELECT', table_name := 'secret')
+
+# Dropping with a different case removes the role and its grants
+statement ok
+SELECT * FROM ducklake_drop_role('lake', 'ANALYST')
+
+query I
+SELECT count(*) FROM ducklake_roles('lake')
+----
+0
+
+query I
+SELECT count(*) FROM ducklake_grants('lake')
+----
+0
+
+statement ok
+SET ducklake_role = 'analyst'
+
+statement error
+SELECT count(*) FROM lake.secret
+----
+does not have SELECT privilege
+
+statement ok
+SET ducklake_role = 'admin'
+
+# Dropping a role that does not exist is an error, not a silent success
+statement error
+SELECT * FROM ducklake_drop_role('lake', 'analyst')
+----
+Role "analyst" does not exist
+
+# Case variants of one name are the same role
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'OPS')
+
+statement error
+SELECT * FROM ducklake_create_role('lake', 'ops')
+----
+already exists
+
+# Grants issued under any spelling land on the existing role and can be revoked under any spelling
+statement ok
+SELECT * FROM ducklake_grant('lake', 'ops', 'SELECT', table_name := 'secret')
+
+query TT
+SELECT grantee, privileges FROM ducklake_grants('lake')
+----
+OPS	SELECT
+
+statement ok
+SET ducklake_role = 'ops'
+
+query I
+SELECT count(*) FROM lake.secret
+----
+4
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_revoke('lake', 'ops', 'SELECT', table_name := 'secret')
+
+query I
+SELECT count(*) FROM ducklake_grants('lake')
+----
+0
+
+statement ok
+SET ducklake_role = 'ops'
+
+statement error
+SELECT count(*) FROM lake.secret
+----
+does not have SELECT privilege
+
+# A second grant under another spelling merges into one row
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'Ops', 'SELECT', table_name := 'secret')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'oPs', 'INSERT', table_name := 'secret')
+
+query TT
+SELECT grantee, privileges FROM ducklake_grants('lake')
+----
+OPS	SELECT,INSERT

@@ -1,0 +1,66 @@
+# name: test/sql/rbac/rbac_lock_configuration_writes.test
+# description: DuckLake reads, writes, maintenance and attach work after lock_configuration
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/lock_writes.db' AS lake (DATA_PATH '{TEST_DIR}/lock_writes_files', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE lake.t AS SELECT range::INTEGER AS i FROM range(3)
+
+statement ok
+SET lock_configuration = true
+
+query I
+SELECT count(*) FROM lake.t
+----
+3
+
+statement ok
+INSERT INTO lake.t VALUES (3)
+
+statement ok
+DELETE FROM lake.t WHERE i = 0
+
+statement ok
+UPDATE lake.t SET i = i + 10 WHERE i = 1
+
+query I
+SELECT sum(i) FROM lake.t
+----
+16
+
+statement ok
+SELECT * FROM ducklake_merge_adjacent_files('lake')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/lock_writes2.db' AS lake2 (DATA_PATH '{TEST_DIR}/lock_writes2_files')
+
+statement ok
+CREATE TABLE lake2.t AS SELECT 1 AS i
+
+query I
+SELECT count(*) FROM lake2.t
+----
+1
+
+# An error in an explicit transaction is reported and rolled back normally
+statement ok
+BEGIN
+
+statement error
+SELECT * FROM lake.does_not_exist
+----
+does not exist
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM lake.t
+----
+3

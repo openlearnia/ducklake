@@ -1,0 +1,35 @@
+# name: test/sql/rbac/rbac_global_enable_later_attach.test
+# description: DuckLake RBAC - SET ducklake_enable_rbac also protects lakes attached afterwards
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_later.db' AS lake4 (DATA_PATH '{TEST_DIR}/rbac_later_files')
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+CREATE TABLE lake4.t AS SELECT 'secret' s
+
+statement ok
+SELECT * FROM ducklake_create_role('lake4', 'reader')
+
+statement ok
+SET ducklake_role = 'reader'
+
+statement error
+SELECT * FROM lake4.t
+----
+does not have SELECT privilege
+
+statement error
+DETACH lake4
+----
+does not have ADMIN privileges

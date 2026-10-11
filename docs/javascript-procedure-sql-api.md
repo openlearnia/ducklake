@@ -63,10 +63,12 @@ matters, although awaiting it is recommended so errors can be handled explicitly
 reject their own Promise; a rejected operation inside an explicit transaction also makes that
 transaction rollback-only, even when JavaScript catches the rejection.
 
-Statements run on the private connection, not the caller's connection. Caller-local settings
-and uncommitted changes are not visible. Outside an explicit transaction, each operation is
-independently auto-committed; later operations in the same procedure see earlier committed
-writes.
+Statements run on the private connection, not the caller's connection. The connection starts
+with the caller's search path (so unqualified names resolve as they would after the caller's
+`USE`) and the caller's session-level extension settings (for example `ducklake_role` and
+`ducklake_mv_stale_read`). Core session settings and uncommitted changes are not visible.
+Outside an explicit transaction, each operation is independently auto-committed; later
+operations in the same procedure see earlier committed writes.
 
 ## Transactions across `await`
 
@@ -156,9 +158,14 @@ procedure is **not** automatically executable by `PUBLIC` — grants must be iss
 ## Value conversion
 
 * `BOOLEAN` becomes a JavaScript boolean.
-* Integer types through `BIGINT` and unsigned integers through 32-bit become JavaScript
-  numbers.
-* `FLOAT`, `DOUBLE`, `DECIMAL`, `HUGEINT`, and `UBIGINT` become doubles and may lose precision.
+* Integer types (through `HUGEINT`/`UHUGEINT`) become JavaScript numbers while their value is
+  within `Number.MAX_SAFE_INTEGER`, and `BigInt` beyond it, so they round-trip exactly.
+  Procedure arguments follow the same rule. `JSON.stringify` rejects `BigInt`; pass a replacer
+  such as `(k, v) => typeof v === 'bigint' ? v.toString() : v`.
+* `FLOAT`, `DOUBLE`, and `DECIMAL` become doubles; `DECIMAL` may lose precision.
+* A JavaScript number parameter that is integral and within the `BIGINT` range binds as
+  `BIGINT`, otherwise as `DOUBLE`. A `BigInt` parameter binds as `BIGINT`, `UBIGINT`, `HUGEINT`,
+  or `UHUGEINT`, whichever first holds it.
 * Other result types (`VARCHAR`, dates, timestamps, blobs, lists, structs, and so on) use their
   string representation.
 * Query results are arrays of objects keyed by column name; duplicate names use the last value.
@@ -166,7 +173,9 @@ procedure is **not** automatically executable by `PUBLIC` — grants must be iss
 
 ## Limits and implementation
 
-Every `CALL` gets a fresh QuickJS runtime with a 64 MiB heap limit and an 8 MiB stack limit.
+Every `CALL` gets a fresh QuickJS runtime with a 64 MiB heap limit. Its stack limit is what
+remains of the executing thread's stack, less headroom for native frames, capped at 8 MiB;
+unbounded recursion fails with `Maximum call stack size exceeded`.
 Query results are materialized before conversion. A nesting guard rejects more than 16 nested
 JavaScript procedure calls, including calls made through SQL.
 

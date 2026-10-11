@@ -258,6 +258,10 @@ public:
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 
 	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
+	unique_ptr<SQLStatement> RewriteMaterializedViewStatement(ClientContext &context,
+	                                                          MaterializedViewStatementType type,
+	                                                          SchemaCatalogEntry &schema, const Identifier &name,
+	                                                          optional_ptr<CreateTableInfo> info) override;
 
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
 

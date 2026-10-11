@@ -29,7 +29,10 @@ void DuckLakeRbac::SetEnabled(bool value) {
 }
 
 void DuckLakeRbac::EnsureMetadataTables(ClientContext &context) {
-	auto &transaction = DuckLakeTransaction::Get(context, catalog);
+	EnsureMetadataTables(DuckLakeTransaction::Get(context, catalog));
+}
+
+void DuckLakeRbac::EnsureMetadataTables(DuckLakeTransaction &transaction) {
 	auto result = transaction.GetMetadataManager().Query(R"(
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_role(role_id BIGINT PRIMARY KEY, role_name VARCHAR UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_grant(grant_id BIGINT PRIMARY KEY, grantee VARCHAR NOT NULL, schema_id BIGINT, table_id BIGINT, privileges BIGINT NOT NULL);

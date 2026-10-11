@@ -1,0 +1,95 @@
+# name: test/sql/rbac/rbac_file_metadata_functions.test
+# description: DuckLake RBAC - every function that expands user file paths requires ADMIN
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_filemeta.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_filemeta_files', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+CREATE TABLE lake.t1 AS SELECT range::INTEGER AS i FROM range(10)
+
+statement ok
+CREATE TABLE lake.secret AS SELECT 'pw' || range AS s FROM range(4)
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'reader')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'SELECT', table_name := 't1')
+
+statement ok
+SET VARIABLE f = (SELECT data_file FROM ducklake_list_files('lake', 'secret') LIMIT 1)
+
+query II
+SELECT stats_min_value, stats_max_value FROM parquet_metadata(getvariable('f'))
+----
+pw0	pw3
+
+statement ok
+SET ducklake_role = 'reader'
+
+query I
+SELECT count(*) FROM lake.t1
+----
+10
+
+statement error
+SELECT stats_min_value, stats_max_value FROM parquet_metadata(getvariable('f'))
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM parquet_file_metadata(getvariable('f'))
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM parquet_schema(getvariable('f'))
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM parquet_kv_metadata(getvariable('f'))
+----
+does not have ADMIN privileges
+
+statement error
+SELECT size FROM read_blob(getvariable('f'))
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM read_parquet(getvariable('f'))
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM read_text(getvariable('f'))
+----
+does not have ADMIN privileges
+
+statement error
+SELECT * FROM glob(getvariable('f'))
+----
+does not have ADMIN privileges
+
+# The granted table stays readable after the denials, through every scan path
+query I
+SELECT count(*) FROM lake.t1 WHERE i < 5
+----
+5
+
+query I
+SELECT count(*) FROM ducklake_table_insertions('lake', 'main', 't1', 0, 1)
+----
+10

@@ -1,0 +1,129 @@
+# name: test/sql/rbac/rbac_multi_lake_execute.test
+# description: DuckLake RBAC - EXECUTE is decided by the lake that owns the procedure
+# group: [rbac]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_ml1.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_ml1_files')
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_ml2.db' AS lake2 (DATA_PATH '{TEST_DIR}/rbac_ml2_files')
+
+statement ok
+CREATE PROCEDURE lake.main.p1() RETURNS INTEGER LANGUAGE JAVASCRIPT AS $$ return 1; $$;
+
+statement ok
+CREATE PROCEDURE lake2.main.p2() RETURNS INTEGER LANGUAGE JAVASCRIPT AS $$ return 2; $$;
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_create_role('lake', 'reader')
+
+statement ok
+SELECT * FROM ducklake_create_role('lake2', 'reader')
+
+# EXECUTE in lake2 only
+statement ok
+SELECT * FROM ducklake_grant('lake2', 'reader', 'EXECUTE', "schema" := 'main')
+
+statement ok
+SET ducklake_role = 'reader'
+
+statement error
+CALL lake.main.p1();
+----
+does not have EXECUTE privilege
+
+query I
+CALL lake2.main.p2();
+----
+2
+
+# EXECUTE in lake only: the valid grant must not be denied because lake2 is attached
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_revoke('lake2', 'reader', 'EXECUTE', "schema" := 'main')
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'EXECUTE', "schema" := 'main')
+
+statement ok
+SET ducklake_role = 'reader'
+
+query I
+CALL lake.main.p1();
+----
+1
+
+statement error
+CALL lake2.main.p2();
+----
+does not have EXECUTE privilege
+
+# Swap attach order so the arbitrary first lake differs
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+DETACH lake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/rbac_ml1.db' AS lake (DATA_PATH '{TEST_DIR}/rbac_ml1_files')
+
+statement ok
+SET ducklake_enable_rbac = true
+
+statement ok
+SET ducklake_role = 'reader'
+
+query I
+CALL lake.main.p1();
+----
+1
+
+statement error
+CALL lake2.main.p2();
+----
+does not have EXECUTE privilege
+
+# Native objects need the privilege in every RBAC-enabled lake
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+CREATE TABLE memory.main.native_t AS SELECT 1 AS i
+
+statement ok
+SELECT * FROM ducklake_grant('lake', 'reader', 'SELECT')
+
+statement ok
+SET ducklake_role = 'reader'
+
+statement error
+SELECT * FROM memory.main.native_t
+----
+does not have SELECT privilege
+
+statement ok
+SET ducklake_role = 'admin'
+
+statement ok
+SELECT * FROM ducklake_grant('lake2', 'reader', 'SELECT')
+
+statement ok
+SET ducklake_role = 'reader'
+
+query I
+SELECT * FROM memory.main.native_t
+----
+1

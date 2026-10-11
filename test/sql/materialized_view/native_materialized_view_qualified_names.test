@@ -1,0 +1,52 @@
+# name: test/sql/materialized_view/native_materialized_view_qualified_names.test
+# description: Schema- and catalog-qualified native materialized views are not claimed by DuckLake
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_native_names.db' AS lake (DATA_PATH '{TEST_DIR}/mv_native_names_files')
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE TABLE t AS SELECT 1 AS i
+
+statement ok
+CREATE MATERIALIZED VIEW s.mv AS SELECT i FROM t
+
+statement ok
+CREATE MATERIALIZED VIEW memory.s.mv3 AS SELECT i FROM t
+
+statement ok
+INSERT INTO t VALUES (2)
+
+statement ok
+REFRESH MATERIALIZED VIEW s.mv
+
+statement ok
+REFRESH MATERIALIZED VIEW memory.s.mv3
+
+query II
+SELECT (SELECT count(*) FROM s.mv), (SELECT count(*) FROM memory.s.mv3)
+----
+2	2
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('lake')
+----
+0
+
+statement ok
+DROP MATERIALIZED VIEW s.mv
+
+statement ok
+DROP MATERIALIZED VIEW memory.s.mv3
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name IN ('mv', 'mv3')
+----
+0

@@ -12,13 +12,17 @@
 //
 // This is defense-in-depth for embedding applications that perform their
 // own authentication - it is not a security boundary against arbitrary
-// untrusted SQL (see docs/rbac.md).
+// untrusted SQL. Embedders that reuse connections across requests should
+// bind the role to a transaction with SET LOCAL ducklake_role, which
+// reverts when the transaction ends.
 //===----------------------------------------------------------------------===//
 
 #pragma once
 
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/helper.hpp"
+#include "duckdb/common/vector.hpp"
 
 namespace duckdb {
 
@@ -93,10 +97,12 @@ public:
 	//! role management. Throws when denied. No-op when RBAC is disabled.
 	void CheckAdmin(ClientContext &context);
 	void EnsureMetadataTables(ClientContext &context);
+	void EnsureMetadataTables(DuckLakeTransaction &transaction);
 
 	//! Kept for grant mutation call sites; grant reads are transaction-local.
 	void InvalidateCache();
-	static DuckLakeRbac *FindActiveRbac(ClientContext &context);
+	//! Every attached DuckLake catalog with RBAC enabled
+	static vector<reference<DuckLakeRbac>> FindActiveRbacs(ClientContext &context);
 	static bool IsInternalConnection(ClientContext &context);
 	//! Verify `privilege` for a non-table DuckDB object (a routine, for example).
 	//! `schema_id` scopes the lookup so a schema-scoped grant matches; an invalid

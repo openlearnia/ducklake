@@ -1,0 +1,142 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_bind_side_effects.test
+# description: MV create and drop take effect when executed, not when prepared or explained
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_bind_effects.db' AS lake (DATA_PATH '{TEST_DIR}/mv_bind_effects_files')
+
+statement ok
+CREATE TABLE lake.src AS SELECT range::INTEGER AS i FROM range(3)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.keep AS SELECT i FROM lake.src
+
+# PREPARE of a drop does not drop
+statement ok
+PREPARE d AS SELECT * FROM ducklake_drop_materialized_view('lake', schema_name := 'main', view_name := 'keep')
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('lake') WHERE view_name = 'keep'
+----
+1
+
+query I
+SELECT count(*) FROM lake.keep
+----
+3
+
+# EXPLAIN of a drop does not drop
+statement ok
+EXPLAIN SELECT * FROM ducklake_drop_materialized_view('lake', schema_name := 'main', view_name := 'keep')
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('lake') WHERE view_name = 'keep'
+----
+1
+
+statement ok
+EXPLAIN DROP MATERIALIZED VIEW lake.keep
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('lake') WHERE view_name = 'keep'
+----
+1
+
+statement ok
+EXECUTE d
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('lake') WHERE view_name = 'keep'
+----
+0
+
+# EXPLAIN of a create does not create
+statement ok
+EXPLAIN SELECT * FROM ducklake_create_materialized_view('lake', view_name := 'mvx', query := 'SELECT i FROM lake.src')
+
+statement ok
+EXPLAIN CREATE MATERIALIZED VIEW lake.mvy AS SELECT i FROM lake.src
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('lake')
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake' AND table_name IN ('mvx', 'mvy')
+----
+0
+
+# PREPARE of a create does not create; EXECUTE does, once
+statement ok
+PREPARE c AS SELECT * FROM ducklake_create_materialized_view('lake', view_name := 'mvp', query := 'SELECT i FROM lake.src')
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('lake') WHERE view_name = 'mvp'
+----
+0
+
+query TTTI
+EXECUTE c
+----
+main	mvp	full	3
+
+query I
+SELECT count(*) FROM lake.mvp
+----
+3
+
+statement error
+EXECUTE c
+----
+already exists
+
+# EXPLAIN ANALYZE executes
+statement ok
+EXPLAIN ANALYZE CREATE MATERIALIZED VIEW lake.mva AS SELECT i FROM lake.src
+
+query I
+SELECT count(*) FROM lake.mva
+----
+3
+
+# Inside a transaction, a created view is visible and refreshable, and rollback discards it
+statement ok
+BEGIN
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mvt AS SELECT i FROM lake.src
+
+statement ok
+INSERT INTO lake.src VALUES (7)
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('lake', view_name := 'mvt')
+----
+full
+
+query I
+SELECT count(*) FROM lake.mvt
+----
+4
+
+statement ok
+DROP MATERIALIZED VIEW lake.mvt
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = 'mvt'
+----
+0
+
+query T
+SELECT view_name FROM ducklake_materialized_views('lake') ORDER BY ALL
+----
+mva
+mvp

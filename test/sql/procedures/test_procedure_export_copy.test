@@ -1,0 +1,68 @@
+# name: test/sql/procedures/test_procedure_export_copy.test
+# description: COPY FROM DATABASE, EXPORT DATABASE and IMPORT DATABASE carry procedures, including SECURITY DEFINER
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH '{TEST_DIR}/proc_copy_src.db' AS src
+
+statement ok
+ATTACH '{TEST_DIR}/proc_copy_dst.db' AS dst
+
+statement ok
+CREATE TABLE src.main.t AS SELECT 1 AS i
+
+statement ok
+CREATE PROCEDURE src.main.p(x INTEGER) RETURNS INTEGER LANGUAGE JAVASCRIPT AS $$ return x + 1; $$;
+
+statement ok
+CREATE PROCEDURE src.main.p_definer() RETURNS VARCHAR LANGUAGE JAVASCRIPT SECURITY DEFINER AS $fn$ return 'a$$b'; $fn$;
+
+statement ok
+COPY FROM DATABASE src TO dst
+
+query I
+CALL dst.main.p(41);
+----
+42
+
+query T
+CALL dst.main.p_definer();
+----
+a$$b
+
+statement ok
+EXPORT DATABASE src TO '{TEST_DIR}/proc_export'
+
+query I
+SELECT content ILIKE '%LANGUAGE JAVASCRIPT SECURITY DEFINER AS%' FROM read_text('{TEST_DIR}/proc_export/schema.sql')
+----
+true
+
+statement ok
+DETACH src
+
+statement ok
+DETACH dst
+
+statement ok
+ATTACH ':memory:' AS imported
+
+statement ok
+USE imported
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/proc_export'
+
+query I
+CALL imported.main.p(1);
+----
+2
+
+query T
+CALL imported.main.p_definer();
+----
+a$$b

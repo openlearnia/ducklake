@@ -1,0 +1,103 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_statement_routing.test
+# description: MATERIALIZED VIEW statements reach DuckLake wherever they appear in a batch and however the name resolves
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_routing.db' AS lake (DATA_PATH '{TEST_DIR}/mv_routing_files')
+
+statement ok
+CREATE TABLE lake.src AS SELECT range::INTEGER AS i FROM range(3)
+
+# not the first statement of a batch
+statement ok
+SELECT 1; CREATE MATERIALIZED VIEW lake.mv_batch AS SELECT i FROM lake.src;
+
+# unqualified after USE
+statement ok
+USE lake
+
+statement ok
+CREATE MATERIALIZED VIEW mv_use AS SELECT i FROM lake.src
+
+# schema-qualified inside the current lake, and fully qualified
+statement ok
+CREATE SCHEMA lake.s
+
+statement ok
+CREATE MATERIALIZED VIEW s.mv_s AS SELECT i FROM lake.src
+
+statement ok
+CREATE MATERIALIZED VIEW lake.s.mv_3 AS SELECT i FROM lake.src
+
+query TT
+SELECT schema_name, view_name FROM ducklake_materialized_views('lake') ORDER BY ALL
+----
+main	mv_batch
+main	mv_use
+s	mv_3
+s	mv_s
+
+statement ok
+INSERT INTO lake.src VALUES (10)
+
+statement ok
+SELECT 1; REFRESH MATERIALIZED VIEW lake.mv_batch;
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_use
+
+statement ok
+REFRESH MATERIALIZED VIEW s.mv_s
+
+statement ok
+REFRESH MATERIALIZED VIEW IF STALE lake.s.mv_3
+
+query IIII
+SELECT (SELECT count(*) FROM lake.mv_batch), (SELECT count(*) FROM mv_use), (SELECT count(*) FROM s.mv_s), (SELECT count(*) FROM lake.s.mv_3)
+----
+4	4	4	4
+
+statement ok
+SELECT 1; DROP MATERIALIZED VIEW lake.mv_batch;
+
+statement ok
+DROP MATERIALIZED VIEW mv_use
+
+statement ok
+DROP MATERIALIZED VIEW s.mv_s
+
+statement ok
+DROP MATERIALIZED VIEW lake.s.mv_3
+
+query I
+SELECT count(*) FROM ducklake_materialized_views('lake')
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake' AND table_name LIKE 'mv_%'
+----
+0
+
+# A plain table is not a materialized view
+statement ok
+CREATE TABLE lake.plain AS SELECT 1 AS i
+
+statement error
+REFRESH MATERIALIZED VIEW lake.plain
+----
+does not exist
+
+statement error
+DROP MATERIALIZED VIEW lake.plain
+----
+does not exist
+
+statement error
+CREATE MATERIALIZED VIEW lake.plain AS SELECT 1 AS i
+----
+already exists

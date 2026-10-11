@@ -1,0 +1,131 @@
+# name: test/sql/procedures/test_procedure_integer_precision.test
+# description: 64- and 128-bit integers cross the JavaScript boundary exactly, and untyped parameters bind
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_int.db' AS lake (DATA_PATH '{TEST_DIR}/proc_int_files')
+
+statement ok
+USE lake
+
+statement ok
+CREATE TABLE t(b BIGINT)
+
+# 2^63 is not a BIGINT: it must not be stored as INT64_MAX
+statement ok
+CREATE PROCEDURE big_param() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+try {
+	await duckdb.execute('INSERT INTO lake.main.t VALUES ($1)', [2**63]);
+	return 'stored';
+} catch (e) {
+	return 'rejected';
+}
+$$;
+
+query T
+CALL big_param();
+----
+rejected
+
+query I
+SELECT count(*) FROM t
+----
+0
+
+# Values beyond Number.MAX_SAFE_INTEGER arrive as BigInt and round-trip exactly
+statement ok
+CREATE PROCEDURE wide_values() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+const rows = await duckdb.query(`SELECT 9007199254740993::BIGINT AS b, 18446744073709551615::UBIGINT AS u,
+	170141183460469231731687303715884105727::HUGEINT AS h, (-9223372036854775808)::BIGINT AS m, 42::BIGINT AS small`);
+const r = rows[0];
+return [typeof r.b, String(r.b), String(r.u), String(r.h), String(r.m), typeof r.small, String(r.small)].join('|');
+$$;
+
+query T
+CALL wide_values();
+----
+bigint|9007199254740993|18446744073709551615|170141183460469231731687303715884105727|-9223372036854775808|number|42
+
+statement ok
+CREATE PROCEDURE round_trip() RETURNS BIGINT LANGUAGE JAVASCRIPT AS $$
+const rows = await duckdb.query('SELECT 9007199254740993::BIGINT AS b');
+await duckdb.execute('INSERT INTO lake.main.t VALUES ($1)', [rows[0].b]);
+const back = await duckdb.query('SELECT b FROM lake.main.t');
+return back[0].b;
+$$;
+
+query I
+CALL round_trip();
+----
+9007199254740993
+
+query I
+SELECT b FROM t
+----
+9007199254740993
+
+statement ok
+CREATE TABLE h(x HUGEINT)
+
+statement ok
+CREATE PROCEDURE hugeint_write() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+await duckdb.execute('INSERT INTO lake.main.h VALUES ($1)', [170141183460469231731687303715884105727n]);
+return 'ok';
+$$;
+
+query T
+CALL hugeint_write();
+----
+ok
+
+query I
+SELECT x FROM h
+----
+170141183460469231731687303715884105727
+
+# BIGINT procedure arguments beyond the safe range arrive exactly
+statement ok
+CREATE PROCEDURE echo_big(x BIGINT) RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$ return typeof x + ':' + String(x); $$;
+
+query T
+CALL echo_big(9223372036854775807);
+----
+bigint:9223372036854775807
+
+query T
+CALL echo_big(7);
+----
+number:7
+
+# Parameters whose type is only known at execution bind like PREPARE/EXECUTE
+statement ok
+CREATE PROCEDURE untyped() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+const a = await duckdb.query('SELECT $1 AS x', ['a']);
+const b = await duckdb.query('SELECT typeof($1) AS x', [1]);
+const c = await duckdb.query('SELECT $1 + $1 AS x', [2]);
+return [a[0].x, b[0].x, String(c[0].x)].join('|');
+$$;
+
+query T
+CALL untyped();
+----
+a|BIGINT|4
+
+statement ok
+CREATE PROCEDURE too_many() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+try {
+	await duckdb.query('SELECT $1 AS x', ['a', 'b']);
+	return 'accepted';
+} catch (e) {
+	return String(e).includes('too many bound parameters') ? 'rejected' : String(e);
+}
+$$;
+
+query T
+CALL too_many();
+----
+rejected

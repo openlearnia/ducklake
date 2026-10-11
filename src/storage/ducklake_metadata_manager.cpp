@@ -668,6 +668,28 @@ ALTER TABLE {METADATA_CATALOG}.ducklake_procedure ADD COLUMN IF NOT EXISTS secur
 	}
 }
 
+bool DuckLakeMetadataManager::EnsureProcedureSecurityColumnExists(bool allow_schema_change) {
+	auto probe = Query("SELECT * FROM {METADATA_CATALOG}.ducklake_procedure LIMIT 0");
+	if (probe->HasError()) {
+		// catalogs from before persisted procedures have no procedure table
+		return false;
+	}
+	for (auto &name : probe->GetNames()) {
+		if (StringUtil::CIEquals(name.GetIdentifierName(), "security_definer")) {
+			return true;
+		}
+	}
+	if (!allow_schema_change || MetadataIsReadOnly()) {
+		return false;
+	}
+	auto result =
+	    Execute("ALTER TABLE {METADATA_CATALOG}.ducklake_procedure ADD COLUMN IF NOT EXISTS security_definer BOOLEAN");
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to add ducklake_procedure.security_definer: ");
+	}
+	return true;
+}
+
 void DuckLakeMetadataManager::MigrateV10Dev() {
 	auto &db = transaction.GetCatalog().GetDatabase();
 	// the schema additions and the inlined column rename are independent so a failure of one must not skip the other
@@ -1408,10 +1430,23 @@ WHERE  {SNAPSHOT_ID} >= ducklake_macro.begin_snapshot AND ({SNAPSHOT_ID} < duckl
 	                                                                    {"parameter_type", "parameter_type"}};
 	// pre-port lakes (catalog version < 1.1) have no procedure metadata tables - skip them
 	if (load_procedures) {
-		result = query_executor(snapshot, StringUtil::Format(R"(
+		// catalogs that persisted procedures before SECURITY DEFINER lack the column; read-only
+		// attaches cannot add it, so they read every procedure as SECURITY INVOKER
+		auto probe = query_executor(snapshot, "SELECT * FROM {METADATA_CATALOG}.ducklake_procedure LIMIT 0");
+		bool has_security_column = false;
+		if (!probe->HasError()) {
+			for (auto &name : probe->GetNames()) {
+				if (StringUtil::CIEquals(name.GetIdentifierName(), "security_definer")) {
+					has_security_column = true;
+				}
+			}
+		}
+		result = query_executor(
+		    snapshot,
+		    StringUtil::Format(R"(
 SELECT schema_id, ducklake_procedure.procedure_id, procedure_name, language, body,
        COALESCE(ducklake_procedure.definition_version, 1), return_type,
-       COALESCE(ducklake_procedure.security_definer, false), (
+       %s, (
 	SELECT %s
 	FROM {METADATA_CATALOG}.ducklake_procedure_parameters
 	WHERE ducklake_procedure.procedure_id = ducklake_procedure_parameters.procedure_id
@@ -1420,7 +1455,8 @@ FROM {METADATA_CATALOG}.ducklake_procedure
 WHERE {SNAPSHOT_ID} >= ducklake_procedure.begin_snapshot
   AND ({SNAPSHOT_ID} < ducklake_procedure.end_snapshot OR ducklake_procedure.end_snapshot IS NULL)
 )",
-		                                                     ListAggregation(PROCEDURE_PARAM_FIELDS)));
+		                       has_security_column ? "COALESCE(ducklake_procedure.security_definer, false)" : "false",
+		                       ListAggregation(PROCEDURE_PARAM_FIELDS)));
 		if (result->HasError()) {
 			result->GetErrorObject().Throw("Failed to get procedure information from DuckLake: ");
 		}

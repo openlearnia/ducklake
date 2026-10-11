@@ -1,0 +1,83 @@
+# name: test/sql/materialized_view/ducklake_materialized_view_minmax_window.test
+# description: MIN/MAX delta refresh invalidates a key when a row inserted in the refresh window is deleted in it again
+# group: [materialized_view]
+
+require ducklake
+
+require parquet
+
+foreach inlining 0 1000
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/mv_minmax_window_${inlining}.db' AS lake (DATA_PATH '{TEST_DIR}/mv_minmax_window_${inlining}_files', DATA_INLINING_ROW_LIMIT ${inlining})
+
+statement ok
+CREATE TABLE lake.src(k INTEGER, v BIGINT)
+
+statement ok
+INSERT INTO lake.src VALUES (4, 4), (4, 9), (7, 70)
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv AS SELECT k, min(v) mn, max(v) mx, count(*) c FROM lake.src GROUP BY k
+
+# a new minimum inserted and deleted within the window
+statement ok
+INSERT INTO lake.src VALUES (4, -3)
+
+statement ok
+DELETE FROM lake.src WHERE v < 0
+
+# a new maximum inserted and deleted within the window
+statement ok
+INSERT INTO lake.src VALUES (7, 700)
+
+statement ok
+DELETE FROM lake.src WHERE v = 700
+
+# a brand-new key whose minimum is inserted and deleted within the window
+statement ok
+INSERT INTO lake.src VALUES (9, 1), (9, 2)
+
+statement ok
+DELETE FROM lake.src WHERE k = 9 AND v = 1
+
+query T
+SELECT refresh_mode FROM ducklake_refresh_materialized_view('lake', view_name := 'mv')
+----
+delta
+
+query IIII
+SELECT * FROM lake.mv ORDER BY k
+----
+4	4	9	2
+7	70	70	1
+9	2	2	1
+
+query IIII
+SELECT k, min(v), max(v), count(*) FROM lake.src GROUP BY k ORDER BY k
+----
+4	4	9	2
+7	70	70	1
+9	2	2	1
+
+# a deleted value beyond the candidate in a window that also inserts stays delta-maintained
+statement ok
+INSERT INTO lake.src VALUES (4, 1), (4, 5)
+
+statement ok
+DELETE FROM lake.src WHERE k = 4 AND v = 5
+
+statement ok
+REFRESH MATERIALIZED VIEW lake.mv
+
+query IIII
+SELECT * FROM lake.mv ORDER BY k
+----
+4	1	9	3
+7	70	70	1
+9	2	2	1
+
+statement ok
+DETACH lake
+
+endloop

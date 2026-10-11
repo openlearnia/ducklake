@@ -1,0 +1,82 @@
+# name: test/sql/procedures/test_procedure_session_context.test
+# description: procedure SQL runs with the caller's search path and session settings
+# group: [procedures]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/proc_ctx.db' AS lake (DATA_PATH '{TEST_DIR}/proc_ctx_files')
+
+statement ok
+CREATE TABLE memory.main.tgt(src VARCHAR)
+
+statement ok
+CREATE TABLE lake.main.tgt(src VARCHAR)
+
+statement ok
+CREATE PROCEDURE lake.main.writer() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+await duckdb.execute("INSERT INTO tgt VALUES ('p')");
+const rows = await duckdb.query('SELECT current_database() AS db');
+return rows[0].db;
+$$;
+
+statement ok
+USE lake
+
+query T
+CALL lake.main.writer();
+----
+lake
+
+query II
+SELECT (SELECT count(*) FROM lake.main.tgt), (SELECT count(*) FROM memory.main.tgt)
+----
+1	0
+
+statement ok
+USE memory
+
+query T
+CALL lake.main.writer();
+----
+memory
+
+query II
+SELECT (SELECT count(*) FROM lake.main.tgt), (SELECT count(*) FROM memory.main.tgt)
+----
+1	1
+
+# The stale-read guard applies to procedure SQL too
+statement ok
+CREATE TABLE lake.src AS SELECT 1 AS k, 10 AS v
+
+statement ok
+CREATE MATERIALIZED VIEW lake.mv AS SELECT k, sum(v) s FROM lake.src GROUP BY k
+
+statement ok
+INSERT INTO lake.src VALUES (1, 5)
+
+statement ok
+CREATE PROCEDURE lake.main.read_mv() RETURNS VARCHAR LANGUAGE JAVASCRIPT AS $$
+try {
+	const rows = await duckdb.query('SELECT s FROM lake.mv');
+	return 'read ' + rows[0].s;
+} catch (e) {
+	return String(e).includes('is stale') ? 'stale' : String(e);
+}
+$$;
+
+query T
+CALL lake.main.read_mv();
+----
+read 10
+
+statement ok
+SET ducklake_mv_stale_read = 'error'
+
+query T
+CALL lake.main.read_mv();
+----
+stale

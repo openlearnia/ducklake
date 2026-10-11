@@ -395,15 +395,25 @@ void ApplySetColumnCommentToView(DuckLakeTransaction &transaction, CatalogTransa
 void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInfo &info) {
 	auto &context = catalog_transaction.GetContext();
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
-	if (info.type == AlterType::ALTER_TABLE) {
-		auto &alter = info.Cast<AlterTableInfo>();
-		auto entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, alter.GetQualifiedName().Name());
+	auto &rbac = catalog.Cast<DuckLakeCatalog>().Rbac();
+	switch (info.type) {
+	case AlterType::ALTER_TABLE:
+	case AlterType::SET_COMMENT:
+	case AlterType::SET_COLUMN_COMMENT: {
+		// comments are alterations too: tables need ALTER on the table, views ALTER on the schema
+		auto entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, info.GetQualifiedName().Name());
 		if (entry && entry->type == CatalogType::TABLE_ENTRY) {
-			catalog.Cast<DuckLakeCatalog>().Rbac().CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_ALTER,
-			                                                           entry->Cast<DuckLakeTableEntry>());
+			rbac.CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_ALTER, entry->Cast<DuckLakeTableEntry>());
+		} else if (info.type != AlterType::ALTER_TABLE) {
+			rbac.CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_ALTER, *this);
 		}
-	} else if (info.type == AlterType::ALTER_VIEW) {
-		catalog.Cast<DuckLakeCatalog>().Rbac().CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_ALTER, *this);
+		break;
+	}
+	case AlterType::ALTER_VIEW:
+		rbac.CheckSchemaPrivilege(context, DUCKLAKE_PRIVILEGE_ALTER, *this);
+		break;
+	default:
+		break;
 	}
 	switch (info.type) {
 	case AlterType::ALTER_TABLE: {

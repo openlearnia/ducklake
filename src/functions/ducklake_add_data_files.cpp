@@ -55,6 +55,10 @@ static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context,
 	    context, DuckLakeUtil::QualifiedEntryName(context, catalog, schema_name, table_name),
 	    OnEntryNotFound::THROW_EXCEPTION);
 	auto &table = entry->Cast<DuckLakeTableEntry>();
+	auto &rbac = catalog.Cast<DuckLakeCatalog>().Rbac();
+	rbac.CheckTablePrivilege(context, DUCKLAKE_PRIVILEGE_INSERT, table);
+	// the registered paths are read as files, which requires ADMIN like read_parquet
+	rbac.CheckAdmin(context);
 
 	auto result = make_uniq<DuckLakeAddDataFilesData>(catalog, table);
 	auto &file_list = input.inputs[2];

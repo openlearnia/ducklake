@@ -636,6 +636,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	// gather a list of files to compact
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
+	ducklake_catalog.Rbac().CheckAdmin(context);
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 
 	auto &named_parameters = input.named_parameters;

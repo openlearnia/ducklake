@@ -860,6 +860,7 @@ unique_ptr<LogicalOperator> BindCompaction(ClientContext &context, TableFunction
                                            CompactionType type) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
+	ducklake_catalog.Rbac().CheckAdmin(context);
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 	string schema, table;
 	vector<unique_ptr<LogicalOperator>> compactions;

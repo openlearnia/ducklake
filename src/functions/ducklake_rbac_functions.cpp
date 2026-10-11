@@ -54,9 +54,29 @@ void ResolveGrantScope(Catalog &catalog, ClientContext &context, TableFunctionBi
 	}
 }
 
+//! Role names are case-insensitive, matching grant evaluation
+string RoleNamePredicate(const string &column, const string &role) {
+	return StringUtil::Format("lower(%s) = lower('%s')", column, EscapeSingleQuote(role));
+}
+
+//! The stored spelling of a role, if it exists
+bool TryGetRoleName(DuckLakeMetadataManager &manager, const string &role, string &result) {
+	auto query = StringUtil::Format("SELECT role_name FROM {METADATA_CATALOG}.ducklake_role WHERE %s LIMIT 1",
+	                                RoleNamePredicate("role_name", role));
+	auto role_result = manager.Query(query);
+	if (role_result->HasError()) {
+		role_result->GetErrorObject().Throw("Failed to look up DuckLake role: ");
+	}
+	for (auto &row : *role_result) {
+		result = row.GetValue<string>(0);
+		return true;
+	}
+	return false;
+}
+
 //! WHERE clause matching exactly one (grantee, scope) grant row
 string GrantScopePredicate(const string &grantee, optional_idx schema_id, optional_idx table_id) {
-	string result = StringUtil::Format("grantee = '%s'", EscapeSingleQuote(grantee));
+	string result = RoleNamePredicate("grantee", grantee);
 	if (table_id.IsValid()) {
 		result += StringUtil::Format(" AND table_id = %llu", table_id.GetIndex());
 	} else if (schema_id.IsValid()) {
@@ -98,6 +118,10 @@ static void RbacMutateExecute(ClientContext &context, TableFunctionInput &data_p
 
 	switch (bind_data.action) {
 	case RbacAction::CREATE_ROLE: {
+		string existing;
+		if (TryGetRoleName(manager, bind_data.name, existing)) {
+			throw InvalidInputException("Role \"%s\" already exists", existing);
+		}
 		string query = StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_role VALUES (%llu, '%s')",
 		                                  NextId(manager, "ducklake_role", "role_id"), name);
 		auto result = manager.Query(query);
@@ -112,13 +136,18 @@ static void RbacMutateExecute(ClientContext &context, TableFunctionInput &data_p
 		break;
 	}
 	case RbacAction::DROP_ROLE: {
-		string query = StringUtil::Format("DELETE FROM {METADATA_CATALOG}.ducklake_role WHERE role_name = '%s'", name);
+		string existing;
+		if (!TryGetRoleName(manager, bind_data.name, existing)) {
+			throw InvalidInputException("Role \"%s\" does not exist", bind_data.name);
+		}
+		string query = StringUtil::Format("DELETE FROM {METADATA_CATALOG}.ducklake_role WHERE %s",
+		                                  RoleNamePredicate("role_name", bind_data.name));
 		auto result = manager.Query(query);
 		if (result->HasError()) {
 			result->GetErrorObject().Throw("Failed to drop DuckLake role: ");
 		}
-		string drop_grants =
-		    StringUtil::Format("DELETE FROM {METADATA_CATALOG}.ducklake_grant WHERE grantee = '%s'", name);
+		string drop_grants = StringUtil::Format("DELETE FROM {METADATA_CATALOG}.ducklake_grant WHERE %s",
+		                                        RoleNamePredicate("grantee", bind_data.name));
 		result = manager.Query(drop_grants);
 		if (result->HasError()) {
 			result->GetErrorObject().Throw("Failed to drop DuckLake role grants: ");
@@ -238,25 +267,16 @@ static unique_ptr<FunctionData> GrantBind(RbacAction action, ClientContext &cont
 		throw InvalidInputException("Grantee cannot be empty");
 	}
 	auto privileges = DuckLakeRbac::ParsePrivileges(StringValue::Get(input.inputs[2]));
-	if (!StringUtil::CIEquals(grantee, DUCKLAKE_PUBLIC_GRANTEE)) {
+	if (StringUtil::CIEquals(grantee, DUCKLAKE_PUBLIC_GRANTEE)) {
+		grantee = DUCKLAKE_PUBLIC_GRANTEE;
+	} else {
 		auto &transaction = DuckLakeTransaction::Get(context, catalog);
-		string role_query =
-		    StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.ducklake_role WHERE role_name = '%s' LIMIT 1",
-		                       EscapeSingleQuote(grantee));
-		auto role_result = transaction.GetMetadataManager().Query(role_query);
-		if (role_result->HasError()) {
-			role_result->GetErrorObject().Throw("Failed to look up DuckLake role: ");
-		}
-		bool role_exists = false;
-		for (auto &row : *role_result) {
-			(void)row;
-			role_exists = true;
-			break;
-		}
-		if (!role_exists) {
+		string role_name;
+		if (!TryGetRoleName(transaction.GetMetadataManager(), grantee, role_name)) {
 			throw InvalidInputException("Role \"%s\" does not exist - create it with ducklake_create_role first",
 			                            grantee);
 		}
+		grantee = std::move(role_name);
 	}
 	optional_idx schema_id;
 	optional_idx table_id;
@@ -306,6 +326,7 @@ DuckLakeRevokeFunction::DuckLakeRevokeFunction()
 static unique_ptr<FunctionData> RolesBind(ClientContext &context, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckAdmin(context);
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	string query = "SELECT role_id, role_name FROM {METADATA_CATALOG}.ducklake_role ORDER BY role_id";
 	auto result = transaction.GetMetadataManager().Query(query);
@@ -329,6 +350,7 @@ static unique_ptr<FunctionData> RolesBind(ClientContext &context, TableFunctionB
 static unique_ptr<FunctionData> GrantsBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
+	catalog.Cast<DuckLakeCatalog>().Rbac().CheckAdmin(context);
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	string query =
 	    "SELECT grantee, schema_id, table_id, privileges FROM {METADATA_CATALOG}.ducklake_grant ORDER BY grantee, "
